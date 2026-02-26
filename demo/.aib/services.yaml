@@ -1,0 +1,75 @@
+version: 1
+gateway:
+  port: 8080
+  timeouts:
+    header: 10s
+    backend_connect: 5s
+    backend_response_header: 30s
+    idle: 60s
+    request: 300s
+  websocket:
+    enabled: false
+services:
+- id: agent-py/app
+  mount_path: /agents/py
+  port: 0
+  cwd: /Users/1amageek/Desktop/agents-in-black/demo/agent-py
+  run:
+  - python3
+  - server.py
+  watch_mode: internal
+  watch_paths:
+  - server.py
+  - pyproject.toml
+  restart_affects: []
+  path_rewrite: strip_prefix
+  cookie_path_rewrite: true
+  env: {}
+  health:
+    liveness_path: /health/live
+    readiness_path: /health/ready
+    startup_ready_timeout: 30s
+    check_interval: 2s
+    failure_threshold: 3
+  restart:
+    drain_timeout: 10s
+    shutdown_grace_period: 10s
+    backoff_initial: 1s
+    backoff_max: 30s
+  concurrency:
+    max_inflight: 80
+    overflow_mode: reject
+  auth:
+    mode: 'off'
+- id: mcp-node/web
+  mount_path: /mcp/node
+  port: 0
+  cwd: /Users/1amageek/Desktop/agents-in-black/demo/mcp-node
+  run:
+  - node
+  - server.js
+  watch_mode: internal
+  watch_paths:
+  - server.js
+  - package.json
+  restart_affects: []
+  path_rewrite: strip_prefix
+  cookie_path_rewrite: true
+  env: {}
+  health:
+    liveness_path: /health/live
+    readiness_path: /health/ready
+    startup_ready_timeout: 30s
+    check_interval: 2s
+    failure_threshold: 3
+  restart:
+    drain_timeout: 10s
+    shutdown_grace_period: 10s
+    backoff_initial: 1s
+    backoff_max: 30s
+  concurrency:
+    max_inflight: 80
+    overflow_mode: reject
+  auth:
+    mode: 'off'
+log_level: info

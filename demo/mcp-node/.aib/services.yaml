@@ -1,0 +1,9 @@
+version: 1
+services:
+  - id: web
+    mount_path: /mcp/node
+    port: 0
+    cwd: .
+    run: [node, server.js]
+    watch_mode: internal
+    watch_paths: [server.js, package.json]

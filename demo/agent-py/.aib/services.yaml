@@ -1,0 +1,9 @@
+version: 1
+services:
+  - id: app
+    mount_path: /agents/py
+    port: 0
+    cwd: .
+    run: [python3, server.py]
+    watch_mode: internal
+    watch_paths: [server.py, pyproject.toml]

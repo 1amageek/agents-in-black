@@ -1,0 +1,11 @@
+{
+  "name": "mcp-node-demo",
+  "private": true,
+  "version": "0.0.1",
+  "scripts": {
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "fastify": "^5.0.0"
+  }
+}

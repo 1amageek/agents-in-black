@@ -1,0 +1,37 @@
+version: 1
+workspace_name: demo
+generated_services_path: .aib/services.yaml
+gateway:
+  port: 8080
+repos:
+- name: agent-py
+  path: agent-py
+  manifest_path: .aib/services.yaml
+  runtime: python
+  framework: plain
+  package_manager: pip
+  status: managed
+  detection_confidence: high
+  command_candidates: []
+  services_namespace: agent-py
+  enabled: true
+- name: mcp-node
+  path: mcp-node
+  manifest_path: .aib/services.yaml
+  runtime: node
+  framework: fastify
+  package_manager: npm
+  status: managed
+  detection_confidence: high
+  command_candidates:
+  - argv:
+    - npm
+    - run
+    - dev
+    reason: package.json scripts.dev
+  selected_command:
+  - npm
+  - run
+  - dev
+  services_namespace: mcp-node
+  enabled: true
