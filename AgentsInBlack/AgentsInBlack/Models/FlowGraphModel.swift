@@ -1,0 +1,29 @@
+import AIBCore
+import CoreGraphics
+import Foundation
+
+enum FlowConnectionKind: String, Hashable {
+    case mcp = "MCP"
+    case a2a = "A2A"
+}
+
+struct FlowNodeModel: Identifiable, Hashable {
+    let id: String
+    let namespacedID: String
+    let serviceKind: AIBServiceKind
+    let position: CGPoint
+}
+
+struct FlowConnectionModel: Identifiable, Hashable {
+    let id: String
+    let sourceServiceID: String
+    let targetServiceID: String
+    let kind: FlowConnectionKind
+}
+
+enum DetailSurfaceMode: String, CaseIterable, Identifiable {
+    case topology = "Topology"
+    case workbench = "Workbench"
+
+    var id: String { rawValue }
+}

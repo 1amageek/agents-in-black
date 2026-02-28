@@ -3,33 +3,41 @@ import AIBRuntimeCore
 import Foundation
 import Yams
 
+public struct ResolvedConfig: Sendable {
+    public var config: AIBConfig
+    public var warnings: [String]
+
+    public init(config: AIBConfig, warnings: [String]) {
+        self.config = config
+        self.warnings = warnings
+    }
+}
+
 public enum WorkspaceSyncer {
-    public static func sync(workspaceRoot: String, workspace: AIBWorkspaceConfig) throws -> WorkspaceSyncResult {
-        let servicesConfigPath = URL(fileURLWithPath: workspace.generatedServicesPath, relativeTo: URL(fileURLWithPath: workspaceRoot)).standardizedFileURL.path
+    /// Flatten workspace repos into a validated AIBConfig.
+    /// This is the primary entry point for resolving workspace.yaml into runtime config.
+    public static func resolveConfig(workspaceRoot: String, workspace: AIBWorkspaceConfig) throws -> ResolvedConfig {
         var services: [ServiceConfig] = []
         var warnings: [String] = []
 
         for repo in workspace.repos where repo.enabled {
             let repoRoot = URL(fileURLWithPath: repo.path, relativeTo: URL(fileURLWithPath: workspaceRoot)).standardizedFileURL.path
-            switch repo.status {
-            case .managed:
-                guard let manifestPath = repo.manifestPath else {
-                    warnings.append("repo \(repo.name): status=managed but manifest_path missing")
+            if let inlineServices = repo.services, !inlineServices.isEmpty {
+                let converted = try inlineServices.map { try convertInlineService($0, repo: repo, repoRoot: repoRoot) }
+                services.append(contentsOf: namespacedServices(from: converted, repo: repo, repoRoot: repoRoot))
+            } else {
+                switch repo.status {
+                case .discoverable:
+                    if let generated = generateDiscoverableService(repo: repo, repoRoot: repoRoot) {
+                        services.append(generated)
+                    } else {
+                        warnings.append("repo \(repo.name): discoverable but no selected command")
+                    }
+                case .unresolved:
+                    warnings.append("repo \(repo.name): unresolved (skipped)")
+                case .ignored:
                     continue
                 }
-                let manifestAbs = URL(fileURLWithPath: manifestPath, relativeTo: URL(fileURLWithPath: repoRoot)).standardizedFileURL.path
-                let repoServices = try loadRepoServicesManifest(path: manifestAbs)
-                services.append(contentsOf: namespacedServices(from: repoServices, repo: repo, repoRoot: repoRoot))
-            case .discoverable:
-                if let generated = generateDiscoverableService(repo: repo, repoRoot: repoRoot) {
-                    services.append(generated)
-                } else {
-                    warnings.append("repo \(repo.name): discoverable but no selected command")
-                }
-            case .unresolved:
-                warnings.append("repo \(repo.name): unresolved (skipped)")
-            case .ignored:
-                continue
             }
         }
 
@@ -41,8 +49,72 @@ public enum WorkspaceSyncer {
         }
         warnings.append(contentsOf: validation.warnings)
 
-        try writeServicesConfig(config, path: servicesConfigPath)
-        return WorkspaceSyncResult(serviceCount: services.count, warnings: warnings)
+        return ResolvedConfig(config: config, warnings: warnings)
+    }
+
+    /// Sync workspace: resolve config and write runtime connection artifacts.
+    /// Does NOT write services.yaml — workspace.yaml is the sole source of truth.
+    public static func sync(workspaceRoot: String, workspace: AIBWorkspaceConfig) throws -> WorkspaceSyncResult {
+        let resolved = try resolveConfig(workspaceRoot: workspaceRoot, workspace: workspace)
+        try writeRuntimeConnectionArtifacts(
+            config: resolved.config,
+            workspaceRoot: workspaceRoot,
+            gatewayPort: workspace.gateway.port
+        )
+        return WorkspaceSyncResult(serviceCount: resolved.config.services.count, warnings: resolved.warnings)
+    }
+
+    /// Write runtime connection JSON artifacts for agent services.
+    public static func writeRuntimeConnectionArtifacts(
+        config: AIBConfig,
+        workspaceRoot: String,
+        gatewayPort: Int
+    ) throws {
+        let outputRoot = URL(fileURLWithPath: ".aib/generated/runtime/connections", relativeTo: URL(fileURLWithPath: workspaceRoot))
+            .standardizedFileURL
+
+        do {
+            try FileManager.default.createDirectory(at: outputRoot, withIntermediateDirectories: true)
+        } catch {
+            throw ConfigError(
+                "Failed to create runtime connection output directory",
+                metadata: ["path": outputRoot.path, "underlying_error": "\(error)"]
+            )
+        }
+
+        let servicesByID = Dictionary(uniqueKeysWithValues: config.services.map { ($0.id, $0) })
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+
+        for service in config.services where service.kind == .agent {
+            let artifact = RuntimeConnectionArtifact(
+                serviceID: service.id.rawValue,
+                mcpServers: resolveConnectionTargets(
+                    service.connections.mcpServers,
+                    servicesByID: servicesByID,
+                    gatewayPort: gatewayPort,
+                    defaultPathProvider: { target in target.mcp?.path ?? "/mcp" }
+                ),
+                a2aAgents: resolveConnectionTargets(
+                    service.connections.a2aAgents,
+                    servicesByID: servicesByID,
+                    gatewayPort: gatewayPort,
+                    defaultPathProvider: { target in target.a2a?.rpcPath ?? "/a2a" }
+                )
+            )
+
+            let filename = sanitizedServiceFilename(service.id.rawValue) + ".json"
+            let outputURL = outputRoot.appendingPathComponent(filename)
+            do {
+                let data = try encoder.encode(artifact)
+                try data.write(to: outputURL, options: .atomic)
+            } catch {
+                throw ConfigError(
+                    "Failed to write runtime connection artifact",
+                    metadata: ["path": outputURL.path, "underlying_error": "\(error)"]
+                )
+            }
+        }
     }
 
     private static func namespacedServices(from repoServices: [ServiceConfig], repo: WorkspaceRepo, repoRoot: String) -> [ServiceConfig] {
@@ -55,23 +127,42 @@ public enum WorkspaceSyncer {
                 updated.cwd = repoRoot
             }
             updated.restartAffects = service.restartAffects.map { ServiceID("\(repo.namespace)/\($0.rawValue)") }
+            updated.connections = namespacedConnections(service.connections, repoNamespace: repo.namespace)
             return updated
         }
     }
 
+    private static func namespacedConnections(_ connections: ServiceConnectionsConfig, repoNamespace: String) -> ServiceConnectionsConfig {
+        ServiceConnectionsConfig(
+            mcpServers: connections.mcpServers.map { namespacedConnectionTarget($0, repoNamespace: repoNamespace) },
+            a2aAgents: connections.a2aAgents.map { namespacedConnectionTarget($0, repoNamespace: repoNamespace) }
+        )
+    }
+
+    private static func namespacedConnectionTarget(_ target: ServiceConnectionTarget, repoNamespace: String) -> ServiceConnectionTarget {
+        guard let serviceRef = target.serviceRef, !serviceRef.isEmpty else {
+            return target
+        }
+        if serviceRef.contains("/") {
+            return target
+        }
+        return ServiceConnectionTarget(serviceRef: "\(repoNamespace)/\(serviceRef)", url: target.url)
+    }
+
     private static func generateDiscoverableService(repo: WorkspaceRepo, repoRoot: String) -> ServiceConfig? {
         guard let selected = repo.selectedCommand, !selected.isEmpty else { return nil }
-        let watchMode = defaultWatchMode(for: repo.runtime)
+        let defaults = RuntimeAdapterRegistry.defaults(for: repo.runtime, packageManager: repo.packageManager)
         return ServiceConfig(
             id: ServiceID("\(repo.namespace)/main"),
+            kind: defaults.serviceKind,
             mountPath: "/\(repo.namespace)",
             port: 0,
             cwd: repoRoot,
             run: selected,
-            build: defaultBuildCommand(for: repo.runtime),
-            install: defaultInstallCommand(for: repo.packageManager),
-            watchMode: watchMode,
-            watchPaths: defaultWatchPaths(for: repo.runtime),
+            build: defaults.buildCommand,
+            install: defaults.installCommand,
+            watchMode: defaults.watchMode,
+            watchPaths: defaults.watchPaths,
             restartAffects: [],
             pathRewrite: .stripPrefix,
             cookiePathRewrite: true,
@@ -83,396 +174,141 @@ public enum WorkspaceSyncer {
         )
     }
 
-    private static func defaultWatchMode(for runtime: RuntimeKind) -> WatchMode {
-        switch runtime {
-        case .swift:
-            return .external
-        case .node, .deno, .python:
-            return .internal
-        case .unknown:
-            return .external
+    private static func convertInlineService(_ inline: WorkspaceRepoServiceConfig, repo: WorkspaceRepo, repoRoot: String) throws -> ServiceConfig {
+        let watchMode = WatchMode(rawValue: inline.watchMode ?? "external") ?? .external
+        let pathRewrite = PathRewriteMode(rawValue: inline.pathRewrite ?? "strip_prefix") ?? .stripPrefix
+        let overflowMode = OverflowMode(rawValue: inline.concurrency?.overflowMode ?? "reject") ?? .reject
+        let authMode = AuthMode(rawValue: inline.auth?.mode ?? "off") ?? .off
+        let resolvedKind = inline.kind.flatMap(ServiceKind.init(rawValue:))
+            ?? inferServiceKind(from: inline.mountPath)
+        let connectionConfig = ServiceConnectionsConfig(
+            mcpServers: (inline.connections?.mcpServers ?? []).map { ServiceConnectionTarget(serviceRef: $0.serviceRef, url: $0.url) },
+            a2aAgents: (inline.connections?.a2aAgents ?? []).map { ServiceConnectionTarget(serviceRef: $0.serviceRef, url: $0.url) }
+        )
+        let mcpConfig: MCPServiceConfig?
+        if let mcp = inline.mcp {
+            let transport = MCPTransport(rawValue: mcp.transport ?? "streamable_http") ?? .streamableHTTP
+            mcpConfig = MCPServiceConfig(transport: transport, path: mcp.path ?? "/mcp")
+        } else {
+            mcpConfig = nil
         }
-    }
-
-    private static func defaultBuildCommand(for runtime: RuntimeKind) -> [String]? {
-        switch runtime {
-        case .swift: ["swift", "build"]
-        default: nil
-        }
-    }
-
-    private static func defaultInstallCommand(for packageManager: PackageManagerKind) -> [String]? {
-        switch packageManager {
-        case .npm: ["npm", "install"]
-        case .pnpm: ["pnpm", "install"]
-        case .yarn: ["yarn", "install"]
-        case .uv: ["uv", "sync"]
-        case .poetry: ["poetry", "install"]
-        default: nil
-        }
-    }
-
-    private static func defaultWatchPaths(for runtime: RuntimeKind) -> [String] {
-        switch runtime {
-        case .swift:
-            return ["Sources/**", "Package.swift", "Package.resolved"]
-        case .node:
-            return ["package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock"]
-        case .python:
-            return ["pyproject.toml", "requirements.txt", "uv.lock", "poetry.lock"]
-        case .deno:
-            return ["deno.json", "deno.jsonc", "deno.lock"]
-        case .unknown:
-            return []
-        }
-    }
-
-    private static func writeServicesConfig(_ config: AIBConfig, path: String) throws {
-        let dto = GeneratedServicesFile(config)
-        do {
-            let yaml = try YAMLEncoder().encode(dto)
-            try FileManager.default.createDirectory(atPath: URL(fileURLWithPath: path).deletingLastPathComponent().path, withIntermediateDirectories: true)
-            try yaml.write(toFile: path, atomically: true, encoding: .utf8)
-        } catch {
-            throw ConfigError("Failed to write generated services config", metadata: ["path": path, "underlying_error": "\(error)"])
-        }
-    }
-
-    private static func loadRepoServicesManifest(path: String) throws -> [ServiceConfig] {
-        let yaml: String
-        do {
-            yaml = try String(contentsOfFile: path, encoding: .utf8)
-        } catch {
-            throw ConfigError("Failed to read repo services manifest", metadata: ["path": path, "underlying_error": "\(error)"])
-        }
-
-        let dto: RepoServicesManifestDTO
-        do {
-            dto = try YAMLDecoder().decode(RepoServicesManifestDTO.self, from: yaml)
-        } catch {
-            throw ConfigError("Failed to parse repo services manifest", metadata: ["path": path, "underlying_error": "\(error)"])
-        }
-        return try dto.services.map { try $0.toServiceConfig() }
-    }
-}
-
-private struct RepoServicesManifestDTO: Codable {
-    var version: Int?
-    var services: [RepoServiceDTO]
-}
-
-private struct RepoServiceDTO: Codable {
-    var id: String
-    var mountPath: String
-    var port: Int?
-    var cwd: String?
-    var run: [String]
-    var build: [String]?
-    var install: [String]?
-    var watchMode: String?
-    var watchPaths: [String]?
-    var restartAffects: [String]?
-    var pathRewrite: String?
-    var cookiePathRewrite: Bool?
-    var env: [String: String]?
-    var health: RepoHealthDTO?
-    var restart: RepoRestartDTO?
-    var concurrency: RepoConcurrencyDTO?
-    var auth: RepoAuthDTO?
-
-    enum CodingKeys: String, CodingKey {
-        case id
-        case mountPath = "mount_path"
-        case port
-        case cwd
-        case run
-        case build
-        case install
-        case watchMode = "watch_mode"
-        case watchPaths = "watch_paths"
-        case restartAffects = "restart_affects"
-        case pathRewrite = "path_rewrite"
-        case cookiePathRewrite = "cookie_path_rewrite"
-        case env
-        case health
-        case restart
-        case concurrency
-        case auth
-    }
-
-    func toServiceConfig() throws -> ServiceConfig {
-        guard let watchMode = WatchMode(rawValue: watchMode ?? "external") else {
-            throw ConfigError("Invalid watch_mode", metadata: ["service": id])
-        }
-        guard let pathRewrite = PathRewriteMode(rawValue: pathRewrite ?? "strip_prefix") else {
-            throw ConfigError("Invalid path_rewrite", metadata: ["service": id])
-        }
-        guard let overflowMode = OverflowMode(rawValue: concurrency?.overflowMode ?? "reject") else {
-            throw ConfigError("Invalid overflow_mode", metadata: ["service": id])
-        }
-        guard let authMode = AuthMode(rawValue: auth?.mode ?? "off") else {
-            throw ConfigError("Invalid auth.mode", metadata: ["service": id])
-        }
+        let a2aConfig = inline.a2a.map { A2AServiceConfig(cardPath: $0.cardPath ?? "/.well-known/agent.json", rpcPath: $0.rpcPath ?? "/a2a") }
 
         return ServiceConfig(
-            id: ServiceID(id),
-            mountPath: mountPath,
-            port: port ?? 0,
-            cwd: cwd,
-            run: run,
-            build: build,
-            install: install,
+            id: ServiceID(inline.id),
+            kind: resolvedKind,
+            mountPath: inline.mountPath,
+            port: inline.port ?? 0,
+            cwd: inline.cwd,
+            run: inline.run,
+            build: inline.build,
+            install: inline.install,
             watchMode: watchMode,
-            watchPaths: watchPaths ?? [],
-            restartAffects: (restartAffects ?? []).map { ServiceID($0) },
+            watchPaths: inline.watchPaths ?? [],
+            restartAffects: (inline.restartAffects ?? []).map { ServiceID($0) },
             pathRewrite: pathRewrite,
-            cookiePathRewrite: cookiePathRewrite ?? true,
-            env: env ?? [:],
+            cookiePathRewrite: inline.cookiePathRewrite ?? true,
+            env: inline.env ?? [:],
             health: .init(
-                livenessPath: health?.livenessPath ?? "/health/live",
-                readinessPath: health?.readinessPath ?? "/health/ready",
-                startupReadyTimeout: .init(health?.startupReadyTimeout ?? "30s"),
-                checkInterval: .init(health?.checkInterval ?? "2s"),
-                failureThreshold: health?.failureThreshold ?? 3
+                livenessPath: inline.health?.livenessPath ?? "/health/live",
+                readinessPath: inline.health?.readinessPath ?? "/health/ready",
+                startupReadyTimeout: .init(inline.health?.startupReadyTimeout ?? "30s"),
+                checkInterval: .init(inline.health?.checkInterval ?? "2s"),
+                failureThreshold: inline.health?.failureThreshold ?? 3
             ),
             restart: .init(
-                drainTimeout: .init(restart?.drainTimeout ?? "10s"),
-                shutdownGracePeriod: .init(restart?.shutdownGracePeriod ?? "10s"),
-                backoffInitial: .init(restart?.backoffInitial ?? "1s"),
-                backoffMax: .init(restart?.backoffMax ?? "30s")
+                drainTimeout: .init(inline.restart?.drainTimeout ?? "10s"),
+                shutdownGracePeriod: .init(inline.restart?.shutdownGracePeriod ?? "10s"),
+                backoffInitial: .init(inline.restart?.backoffInitial ?? "1s"),
+                backoffMax: .init(inline.restart?.backoffMax ?? "30s")
             ),
             concurrency: .init(
-                maxInflight: concurrency?.maxInflight ?? 80,
+                maxInflight: inline.concurrency?.maxInflight ?? 80,
                 overflowMode: overflowMode,
-                queueTimeout: concurrency?.queueTimeout.map { DurationString($0) }
+                queueTimeout: inline.concurrency?.queueTimeout.map { DurationString($0) }
             ),
-            auth: .init(mode: authMode)
+            auth: .init(mode: authMode),
+            connections: connectionConfig,
+            mcp: mcpConfig,
+            a2a: a2aConfig
         )
     }
+
+    private static func inferServiceKind(from mountPath: String) -> ServiceKind {
+        if mountPath.hasPrefix("/agents/") {
+            return .agent
+        }
+        if mountPath.hasPrefix("/mcp/") {
+            return .mcp
+        }
+        return .unknown
+    }
+
+    private static func resolveConnectionTargets(
+        _ targets: [ServiceConnectionTarget],
+        servicesByID: [ServiceID: ServiceConfig],
+        gatewayPort: Int,
+        defaultPathProvider: (ServiceConfig) -> String
+    ) -> [ResolvedConnectionTarget] {
+        targets.compactMap { target in
+            if let url = target.url, !url.isEmpty {
+                return ResolvedConnectionTarget(
+                    serviceRef: nil,
+                    resolvedURL: url,
+                    source: "url"
+                )
+            }
+            guard let serviceRef = target.serviceRef, !serviceRef.isEmpty else {
+                return nil
+            }
+            guard let resolvedService = servicesByID[ServiceID(serviceRef)] else {
+                return nil
+            }
+            let base = "http://127.0.0.1:\(gatewayPort)\(resolvedService.mountPath)"
+            let suffix = normalizedPath(defaultPathProvider(resolvedService))
+            return ResolvedConnectionTarget(
+                serviceRef: serviceRef,
+                resolvedURL: base + suffix,
+                source: "service_ref"
+            )
+        }
+    }
+
+    private static func normalizedPath(_ path: String) -> String {
+        if path.isEmpty {
+            return ""
+        }
+        if path.hasPrefix("/") {
+            return path
+        }
+        return "/" + path
+    }
+
+    private static func sanitizedServiceFilename(_ value: String) -> String {
+        value.replacingOccurrences(of: "/", with: "__")
+    }
 }
 
-private struct RepoHealthDTO: Codable {
-    var livenessPath: String?
-    var readinessPath: String?
-    var startupReadyTimeout: String?
-    var checkInterval: String?
-    var failureThreshold: Int?
+private struct RuntimeConnectionArtifact: Codable {
+    var serviceID: String
+    var mcpServers: [ResolvedConnectionTarget]
+    var a2aAgents: [ResolvedConnectionTarget]
 
     enum CodingKeys: String, CodingKey {
-        case livenessPath = "liveness_path"
-        case readinessPath = "readiness_path"
-        case startupReadyTimeout = "startup_ready_timeout"
-        case checkInterval = "check_interval"
-        case failureThreshold = "failure_threshold"
+        case serviceID = "service_id"
+        case mcpServers = "mcp_servers"
+        case a2aAgents = "a2a_agents"
     }
 }
 
-private struct RepoRestartDTO: Codable {
-    var drainTimeout: String?
-    var shutdownGracePeriod: String?
-    var backoffInitial: String?
-    var backoffMax: String?
+private struct ResolvedConnectionTarget: Codable {
+    var serviceRef: String?
+    var resolvedURL: String
+    var source: String
 
     enum CodingKeys: String, CodingKey {
-        case drainTimeout = "drain_timeout"
-        case shutdownGracePeriod = "shutdown_grace_period"
-        case backoffInitial = "backoff_initial"
-        case backoffMax = "backoff_max"
+        case serviceRef = "service_ref"
+        case resolvedURL = "resolved_url"
+        case source
     }
-}
-
-private struct RepoConcurrencyDTO: Codable {
-    var maxInflight: Int?
-    var overflowMode: String?
-    var queueTimeout: String?
-
-    enum CodingKeys: String, CodingKey {
-        case maxInflight = "max_inflight"
-        case overflowMode = "overflow_mode"
-        case queueTimeout = "queue_timeout"
-    }
-}
-
-private struct RepoAuthDTO: Codable {
-    var mode: String?
-}
-
-private struct GeneratedServicesFile: Codable {
-    var version: Int
-    var gateway: GeneratedGateway
-    var services: [GeneratedService]
-    var logLevel: String
-
-    enum CodingKeys: String, CodingKey {
-        case version
-        case gateway
-        case services
-        case logLevel = "log_level"
-    }
-
-    init(_ config: AIBConfig) {
-        version = config.version
-        gateway = .init(port: config.gateway.port, timeouts: .init(config.gateway.timeouts), websocket: .init(enabled: config.gateway.websocket.enabled))
-        services = config.services.map(GeneratedService.init)
-        logLevel = config.logLevel
-    }
-}
-
-private struct GeneratedGateway: Codable {
-    var port: Int
-    var timeouts: GeneratedTimeouts
-    var websocket: GeneratedWebSocket
-}
-
-private struct GeneratedTimeouts: Codable {
-    var header: String
-    var backendConnect: String
-    var backendResponseHeader: String
-    var idle: String
-    var request: String
-
-    enum CodingKeys: String, CodingKey {
-        case header
-        case backendConnect = "backend_connect"
-        case backendResponseHeader = "backend_response_header"
-        case idle
-        case request
-    }
-
-    init(_ t: GatewayConfig.Timeouts) {
-        header = t.header.rawValue
-        backendConnect = t.backendConnect.rawValue
-        backendResponseHeader = t.backendResponseHeader.rawValue
-        idle = t.idle.rawValue
-        request = t.request.rawValue
-    }
-}
-
-private struct GeneratedWebSocket: Codable { var enabled: Bool }
-
-private struct GeneratedService: Codable {
-    var id: String
-    var mountPath: String
-    var port: Int
-    var cwd: String?
-    var run: [String]
-    var build: [String]?
-    var install: [String]?
-    var watchMode: String
-    var watchPaths: [String]
-    var restartAffects: [String]
-    var pathRewrite: String
-    var cookiePathRewrite: Bool
-    var env: [String: String]
-    var health: GeneratedHealth
-    var restart: GeneratedRestart
-    var concurrency: GeneratedConcurrency
-    var auth: GeneratedAuth
-
-    enum CodingKeys: String, CodingKey {
-        case id
-        case mountPath = "mount_path"
-        case port
-        case cwd
-        case run
-        case build
-        case install
-        case watchMode = "watch_mode"
-        case watchPaths = "watch_paths"
-        case restartAffects = "restart_affects"
-        case pathRewrite = "path_rewrite"
-        case cookiePathRewrite = "cookie_path_rewrite"
-        case env
-        case health
-        case restart
-        case concurrency
-        case auth
-    }
-
-    init(_ service: ServiceConfig) {
-        id = service.id.rawValue
-        mountPath = service.mountPath
-        port = service.port
-        cwd = service.cwd
-        run = service.run
-        build = service.build
-        install = service.install
-        watchMode = service.watchMode.rawValue
-        watchPaths = service.watchPaths
-        restartAffects = service.restartAffects.map(\.rawValue)
-        pathRewrite = service.pathRewrite.rawValue
-        cookiePathRewrite = service.cookiePathRewrite
-        env = service.env
-        health = .init(service.health)
-        restart = .init(service.restart)
-        concurrency = .init(service.concurrency)
-        auth = .init(mode: service.auth.mode.rawValue)
-    }
-}
-
-private struct GeneratedHealth: Codable {
-    var livenessPath: String
-    var readinessPath: String
-    var startupReadyTimeout: String
-    var checkInterval: String
-    var failureThreshold: Int
-
-    enum CodingKeys: String, CodingKey {
-        case livenessPath = "liveness_path"
-        case readinessPath = "readiness_path"
-        case startupReadyTimeout = "startup_ready_timeout"
-        case checkInterval = "check_interval"
-        case failureThreshold = "failure_threshold"
-    }
-
-    init(_ health: ServiceHealthConfig) {
-        livenessPath = health.livenessPath
-        readinessPath = health.readinessPath
-        startupReadyTimeout = health.startupReadyTimeout.rawValue
-        checkInterval = health.checkInterval.rawValue
-        failureThreshold = health.failureThreshold
-    }
-}
-
-private struct GeneratedRestart: Codable {
-    var drainTimeout: String
-    var shutdownGracePeriod: String
-    var backoffInitial: String
-    var backoffMax: String
-
-    enum CodingKeys: String, CodingKey {
-        case drainTimeout = "drain_timeout"
-        case shutdownGracePeriod = "shutdown_grace_period"
-        case backoffInitial = "backoff_initial"
-        case backoffMax = "backoff_max"
-    }
-
-    init(_ restart: ServiceRestartConfig) {
-        drainTimeout = restart.drainTimeout.rawValue
-        shutdownGracePeriod = restart.shutdownGracePeriod.rawValue
-        backoffInitial = restart.backoffInitial.rawValue
-        backoffMax = restart.backoffMax.rawValue
-    }
-}
-
-private struct GeneratedConcurrency: Codable {
-    var maxInflight: Int
-    var overflowMode: String
-    var queueTimeout: String?
-
-    enum CodingKeys: String, CodingKey {
-        case maxInflight = "max_inflight"
-        case overflowMode = "overflow_mode"
-        case queueTimeout = "queue_timeout"
-    }
-
-    init(_ c: ServiceConcurrencyConfig) {
-        maxInflight = c.maxInflight
-        overflowMode = c.overflowMode.rawValue
-        queueTimeout = c.queueTimeout?.rawValue
-    }
-}
-
-private struct GeneratedAuth: Codable {
-    var mode: String
 }

@@ -46,7 +46,7 @@ cd demo
 ## Architecture
 
 ### Invariants (never violate)
-1. **`services.yaml`** (workspace `.aib/services.yaml`) is the sole source of truth for local runtime config
+1. **`workspace.yaml`** (`.aib/workspace.yaml`) is the sole source of truth for all runtime config — `services.yaml` is eliminated
 2. **`.aib/` exists only at the workspace root** — individual repositories are never invaded with AIB-specific files
 3. Execution boundary = service (language-agnostic HTTP unit)
 4. Local exposure via single port (Gateway)
@@ -59,10 +59,10 @@ cd demo
 | Module | Role | Key Types |
 |---|---|---|
 | `AIBRuntimeCore` | Shared foundation types (IDs, errors, routes, traces, duration parsing) | `ServiceID`, `RoutePrefix`, `DurationParser` |
-| `AIBConfig` | Decode + validate `services.yaml` | `AIBConfig`, `AIBConfigLoader`, `AIBConfigValidator` |
-| `AIBWorkspace` | Repo discovery, workspace sync, service config generation | `WorkspaceDiscovery`, `WorkspaceSyncer`, `AIBWorkspaceManager` |
+| `AIBConfig` | Config types + validation | `AIBConfig`, `AIBConfigValidator`, `LoadedConfig` |
+| `AIBWorkspace` | Repo discovery, workspace sync, config resolution (workspace.yaml → AIBConfig) | `WorkspaceDiscovery`, `WorkspaceSyncer`, `AIBWorkspaceManager` |
 | `AIBGateway` | NIOAsyncChannel-based reverse proxy (routing, timeout, header rewrite, concurrency) | `DevGateway`, `HTTPConnectionHandler`, `GatewayControl` |
-| `AIBSupervisor` | Process lifecycle, health/readiness probes, restart, log mux | `DevSupervisor` (actor), `DefaultProcessController`, `LogMux` |
+| `AIBSupervisor` | Process lifecycle, health/readiness probes, restart, log mux | `DevSupervisor` (actor), `ConfigProvider`, `DefaultProcessController`, `LogMux` |
 | `AIBCore` | App/CLI shared API — emulator control, workspace/service models, events | `AIBEmulatorController`, `AIBWorkspaceSnapshot`, `AIBServiceModel` |
 | `AIBCLI` | CLI entry point dispatching to `AIBCore` | `AIBDevMain` (`@main`) |
 | `AgentsInBlack App` | macOS SwiftUI UI, views, app state | `AgentsInBlackAppModel`, `ContentView` |
@@ -80,7 +80,7 @@ App ──→ AIBCore (only)
 - **Data Plane** (`AIBGateway`): HTTP reverse proxy, routing by `mount_path`, path rewriting, timeout enforcement, concurrency limits
 
 ### CLI Commands (dispatch in `Sources/AIBCLI/main.swift`)
-- `aib init` — bootstrap workspace, discover repos, generate `.aib/services.yaml`
+- `aib init` — bootstrap workspace, discover repos, write `.aib/workspace.yaml`
 - `aib workspace list|scan|sync` — workspace management
 - `aib emulator start|validate|status|stop` — local runtime control
 - `aib deploy plan|apply` — deployment (apply not yet implemented)
@@ -90,7 +90,7 @@ App ──→ AIBCore (only)
 AIB's core purpose is managing **Actor Topology**: the connection graph between Agents and MCP servers. This topology is defined visually, persisted in workspace.yaml, and drives both local emulation and Cloud Run deployment.
 
 ```
-Define (App UI)  →  Persist (.aib/workspace.yaml)  →  Generate (services.yaml + runtime/)  →  Run / Deploy
+Define (App UI)  →  Persist (.aib/workspace.yaml)  →  Resolve (in-memory AIBConfig + runtime/)  →  Run / Deploy
 ```
 
 #### 1. Define — Actor Topology Canvas
@@ -103,8 +103,8 @@ Define (App UI)  →  Persist (.aib/workspace.yaml)  →  Generate (services.yam
 - `service_ref` uses namespaced format: `{services_namespace}/{service_id}` (e.g., `mcp-node/web`)
 - This is the single source of truth for topology
 
-#### 3. Generate — `aib workspace sync`
-- Produces `.aib/services.yaml` (gateway routing config) from workspace.yaml
+#### 3. Resolve — `WorkspaceSyncer.resolveConfig()`
+- Flattens workspace.yaml repos into `AIBConfig` in memory (no intermediate file)
 - Produces `.aib/generated/runtime/connections/{namespace}__{service_id}.json` per Agent
   - Contains resolved connection URLs for the local gateway (e.g., `http://localhost:8080/mcp/node/mcp`)
   - Injected into Agent processes as environment context
@@ -180,21 +180,14 @@ workspace.yaml  ──→  aib deploy plan   ──→  Show: services, connecti
   - Cloud Run: `https://{service-name}-{hash}.{region}.run.app`
 - This resolution is the core job of `aib deploy plan` — it maps topology edges to concrete URLs
 
-#### services.yaml Deprecation Plan
-`services.yaml` is a local-only intermediate generated from `workspace.yaml`. It adds no information that cannot be derived:
-- Namespaced IDs (`agent-py/app`) are computed from `services_namespace` + `id`
-- Absolute `cwd` is computed from repo `path` + relative `cwd`
-- All runtime defaults (health, restart, concurrency, auth, path_rewrite) are already hardcoded in `AIBConfigLoader` with `??` fallbacks
-
-**Target state**: Gateway/Supervisor read `workspace.yaml` directly. `AIBConfigLoader` is extended to accept workspace format (repos with inline services) and flatten + resolve internally. `services.yaml` generation is removed from `WorkspaceSyncer`. The `.aib/generated/runtime/connections/` directory remains for injecting resolved connection URLs into Agent processes.
-
 ## Change Policy
 
-### When modifying `services.yaml` schema
-1. Update decode + validation in `AIBConfig`
-2. Reflect changes in `AIBCore` models
-3. Update at least one test (Config or E2E-equivalent)
-4. Update docs
+### When modifying workspace.yaml schema or service config
+1. Update `WorkspaceModels` + `WorkspaceYAMLCodec` in `AIBWorkspace`
+2. Update `AIBConfig` types + `AIBConfigValidator` if needed
+3. Reflect changes in `AIBCore` models
+4. Update at least one test (Workspace or Config)
+5. Update docs
 
 ### When modifying Gateway or Supervisor
 - Never change one without verifying consistency with the other

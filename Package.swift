@@ -10,6 +10,7 @@ let package = Package(
     products: [
         .executable(name: "aib-dev", targets: ["AIBCLI"]),
         .executable(name: "aib", targets: ["AIBCLI"]),
+        .library(name: "AIBCore", targets: ["AIBCore"]),
         .library(name: "AIBRuntimeCore", targets: ["AIBRuntimeCore"]),
         .library(name: "AIBConfig", targets: ["AIBConfig"]),
         .library(name: "AIBGateway", targets: ["AIBGateway"]),
@@ -17,18 +18,24 @@ let package = Package(
         .library(name: "AIBWorkspace", targets: ["AIBWorkspace"]),
     ],
     dependencies: [
-        .package(
-            url: "https://github.com/apple/swift-configuration",
-            from: "1.0.0",
-            traits: [.defaults, "YAML", "Reloading", "CommandLineArguments", "Logging"]
-        ),
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.74.0"),
         .package(url: "https://github.com/swift-server/async-http-client.git", from: "1.25.0"),
         .package(url: "https://github.com/apple/swift-log.git", from: "1.6.0"),
-        .package(url: "https://github.com/apple/swift-system", from: "1.6.0"),
         .package(url: "https://github.com/jpsim/Yams", from: "6.2.0"),
     ],
     targets: [
+        .target(
+            name: "AIBCore",
+            dependencies: [
+                "AIBWorkspace",
+                "AIBConfig",
+                "AIBGateway",
+                "AIBSupervisor",
+                "AIBRuntimeCore",
+                .product(name: "Logging", package: "swift-log"),
+                .product(name: "Yams", package: "Yams"),
+            ]
+        ),
         .target(
             name: "AIBRuntimeCore",
             dependencies: [
@@ -39,9 +46,6 @@ let package = Package(
             name: "AIBConfig",
             dependencies: [
                 "AIBRuntimeCore",
-                .product(name: "Configuration", package: "swift-configuration"),
-                .product(name: "SystemPackage", package: "swift-system"),
-                .product(name: "Yams", package: "Yams"),
             ]
         ),
         .target(
@@ -78,11 +82,7 @@ let package = Package(
         .executableTarget(
             name: "AIBCLI",
             dependencies: [
-                "AIBRuntimeCore",
-                "AIBConfig",
-                "AIBGateway",
-                "AIBSupervisor",
-                "AIBWorkspace",
+                "AIBCore",
                 .product(name: "Logging", package: "swift-log"),
             ]
         ),

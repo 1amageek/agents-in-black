@@ -6,7 +6,7 @@ It provides:
 - single-port local access via `DevGateway`
 - multi-process orchestration via `DevSupervisor`
 - multi-runtime support (Swift / Node / Deno / Python discovery)
-- workspace composition of repo-owned service manifests
+- workspace-level service configuration (`.aib/` at workspace root only)
 
 ## Current Status (v1 prototype)
 
@@ -14,7 +14,7 @@ Implemented:
 - `aib init` (workspace bootstrap + repo discovery)
 - `aib workspace list|scan|sync`
 - `aib emulator start|validate|status|stop` (runtime wrapper)
-- repo manifest composition to generated `.aib/services.yaml`
+- workspace-level `.aib/services.yaml` generation
 - reverse proxy + supervisor runtime (`aib-dev` internals)
 
 Planned / partial:
@@ -26,15 +26,17 @@ Planned / partial:
 
 AIB manages a **workspace**, not project initialization.
 
-- each Agent/MCP repo remains an independent git repository
-- each repo may define its own manifest (`.aib/services.yaml` or `aib.services.yaml`)
-- AIB discovers repos, composes manifests, and runs them together locally
+- `.aib/` exists **only at the workspace root** — individual repositories are never invaded
+- Each Agent/MCP repo remains an independent git repository with no AIB-specific files
+- AIB discovers repos from native build files (`Package.swift`, `package.json`, etc.)
+- All service configuration is managed in the workspace-level `.aib/services.yaml`
 
-Generated workspace files:
-- `.aib/workspace.yaml`
-- `.aib/services.yaml` (generated local runtime config)
-- `.aib/state/`
-- `.aib/logs/`
+Workspace directory structure:
+- `.aib/workspace.yaml` — discovered repos and workspace metadata
+- `.aib/services.yaml` — generated local runtime config (source of truth for emulator)
+- `.aib/generated/` — runtime artifacts (connection files, etc.)
+- `.aib/state/` — runtime state (PID files, etc.)
+- `.aib/logs/` — service logs
 
 ## Build
 

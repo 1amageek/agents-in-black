@@ -1,0 +1,4 @@
+version: 1
+target: aws-template
+notes: Placeholder for future AWS renderer support.
+services: {}

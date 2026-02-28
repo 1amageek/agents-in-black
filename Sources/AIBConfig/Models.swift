@@ -56,6 +56,7 @@ public struct GatewayConfig: Sendable, Codable, Equatable {
 
 public struct ServiceConfig: Sendable, Codable, Equatable {
     public var id: ServiceID
+    public var kind: ServiceKind
     public var mountPath: String
     public var port: Int
     public var cwd: String?
@@ -72,9 +73,13 @@ public struct ServiceConfig: Sendable, Codable, Equatable {
     public var restart: ServiceRestartConfig
     public var concurrency: ServiceConcurrencyConfig
     public var auth: ServiceAuthConfig
+    public var connections: ServiceConnectionsConfig
+    public var mcp: MCPServiceConfig?
+    public var a2a: A2AServiceConfig?
 
     public init(
         id: ServiceID,
+        kind: ServiceKind = .unknown,
         mountPath: String,
         port: Int,
         cwd: String? = nil,
@@ -90,9 +95,13 @@ public struct ServiceConfig: Sendable, Codable, Equatable {
         health: ServiceHealthConfig,
         restart: ServiceRestartConfig,
         concurrency: ServiceConcurrencyConfig = .init(),
-        auth: ServiceAuthConfig = .init()
+        auth: ServiceAuthConfig = .init(),
+        connections: ServiceConnectionsConfig = .init(),
+        mcp: MCPServiceConfig? = nil,
+        a2a: A2AServiceConfig? = nil
     ) {
         self.id = id
+        self.kind = kind
         self.mountPath = mountPath
         self.port = port
         self.cwd = cwd
@@ -109,6 +118,75 @@ public struct ServiceConfig: Sendable, Codable, Equatable {
         self.restart = restart
         self.concurrency = concurrency
         self.auth = auth
+        self.connections = connections
+        self.mcp = mcp
+        self.a2a = a2a
+    }
+}
+
+public enum ServiceKind: String, Sendable, Codable, Equatable {
+    case agent
+    case mcp
+    case unknown
+}
+
+public struct ServiceConnectionsConfig: Sendable, Codable, Equatable {
+    public var mcpServers: [ServiceConnectionTarget]
+    public var a2aAgents: [ServiceConnectionTarget]
+
+    public init(mcpServers: [ServiceConnectionTarget] = [], a2aAgents: [ServiceConnectionTarget] = []) {
+        self.mcpServers = mcpServers
+        self.a2aAgents = a2aAgents
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case mcpServers = "mcp_servers"
+        case a2aAgents = "a2a_agents"
+    }
+}
+
+public struct ServiceConnectionTarget: Sendable, Codable, Equatable, Hashable {
+    public var serviceRef: String?
+    public var url: String?
+
+    public init(serviceRef: String? = nil, url: String? = nil) {
+        self.serviceRef = serviceRef
+        self.url = url
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case serviceRef = "service_ref"
+        case url
+    }
+}
+
+public enum MCPTransport: String, Sendable, Codable, Equatable {
+    case streamableHTTP = "streamable_http"
+    case unknown
+}
+
+public struct MCPServiceConfig: Sendable, Codable, Equatable {
+    public var transport: MCPTransport
+    public var path: String
+
+    public init(transport: MCPTransport = .streamableHTTP, path: String = "/mcp") {
+        self.transport = transport
+        self.path = path
+    }
+}
+
+public struct A2AServiceConfig: Sendable, Codable, Equatable {
+    public var cardPath: String
+    public var rpcPath: String
+
+    public init(cardPath: String = "/.well-known/agent.json", rpcPath: String = "/a2a") {
+        self.cardPath = cardPath
+        self.rpcPath = rpcPath
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case cardPath = "card_path"
+        case rpcPath = "rpc_path"
     }
 }
 
@@ -181,22 +259,14 @@ public struct DurationString: Sendable, Codable, Hashable, ExpressibleByStringLi
     public func parse() throws -> Duration { try DurationParser.parse(rawValue) }
 }
 
-public struct ConfigOverrides: Sendable {
-    public var gatewayPort: Int?
-    public var logLevel: String?
-    public var configPath: String?
-    public var reloadEnabled: Bool?
-
-    public init(gatewayPort: Int? = nil, logLevel: String? = nil, configPath: String? = nil, reloadEnabled: Bool? = nil) {
-        self.gatewayPort = gatewayPort
-        self.logLevel = logLevel
-        self.configPath = configPath
-        self.reloadEnabled = reloadEnabled
-    }
-}
-
 public struct LoadedConfig: Sendable {
     public var config: AIBConfig
     public var warnings: [String]
     public var configPath: String
+
+    public init(config: AIBConfig, warnings: [String], configPath: String) {
+        self.config = config
+        self.warnings = warnings
+        self.configPath = configPath
+    }
 }

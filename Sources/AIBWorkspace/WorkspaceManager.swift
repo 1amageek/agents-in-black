@@ -1,5 +1,7 @@
 import AIBRuntimeCore
+import AIBConfig
 import Foundation
+import Yams
 
 public enum AIBWorkspaceManager {
     public static let workspaceDirectoryName = ".aib"
@@ -18,6 +20,7 @@ public enum AIBWorkspaceManager {
         try FileManager.default.createDirectory(atPath: URL(fileURLWithPath: "state", relativeTo: URL(fileURLWithPath: workspaceDir)).path, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(atPath: URL(fileURLWithPath: "logs", relativeTo: URL(fileURLWithPath: workspaceDir)).path, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(atPath: URL(fileURLWithPath: "environments", relativeTo: URL(fileURLWithPath: workspaceDir)).path, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(atPath: URL(fileURLWithPath: "targets", relativeTo: URL(fileURLWithPath: workspaceDir)).path, withIntermediateDirectories: true)
 
         let workspaceName = URL(fileURLWithPath: workspaceRoot).lastPathComponent
         let repos = options.scanEnabled ? try WorkspaceDiscovery.discoverRepos(workspaceRoot: workspaceRoot, scanPath: options.scanPath) : []
@@ -25,6 +28,7 @@ public enum AIBWorkspaceManager {
 
         try WorkspaceYAMLCodec.saveWorkspace(workspace, to: workspaceConfigPath)
         try ensureEnvironmentTemplates(workspaceRoot: workspaceRoot)
+        try ensureTargetTemplates(workspaceRoot: workspaceRoot)
         try ensureGitignoreEntries(workspaceRoot: workspaceRoot)
 
         let syncResult = try WorkspaceSyncer.sync(workspaceRoot: workspaceRoot, workspace: workspace)
@@ -55,6 +59,63 @@ public enum AIBWorkspaceManager {
         return try WorkspaceSyncer.sync(workspaceRoot: workspaceRoot, workspace: workspace)
     }
 
+    public static func updateServiceMCPProfile(
+        workspaceRoot: String,
+        namespacedServiceID: String,
+        path: String
+    ) throws {
+        var workspace = try loadWorkspace(workspaceRoot: workspaceRoot)
+        let parts = namespacedServiceID.split(separator: "/", maxSplits: 1).map(String.init)
+        guard parts.count == 2 else {
+            throw ConfigError("Invalid namespaced service ID", metadata: ["id": namespacedServiceID])
+        }
+        let namespace = parts[0]
+        let localID = parts[1]
+
+        guard let repoIndex = workspace.repos.firstIndex(where: { $0.namespace == namespace }),
+              var services = workspace.repos[repoIndex].services,
+              let serviceIndex = services.firstIndex(where: { $0.id == localID })
+        else {
+            throw ConfigError("Service not found", metadata: ["id": namespacedServiceID])
+        }
+
+        let transport = "streamable_http"
+        if services[serviceIndex].mcp == nil {
+            services[serviceIndex].mcp = WorkspaceRepoMCPConfig(transport: transport, path: path)
+        } else {
+            services[serviceIndex].mcp?.path = path
+        }
+        workspace.repos[repoIndex].services = services
+
+        try saveWorkspace(workspace, workspaceRoot: workspaceRoot)
+    }
+
+    public static func updateServiceConnections(
+        workspaceRoot: String,
+        connectionsByNamespacedServiceID: [String: ServiceConnectionsConfig]
+    ) throws {
+        var workspace = try loadWorkspace(workspaceRoot: workspaceRoot)
+
+        for repoIndex in workspace.repos.indices {
+            let repo = workspace.repos[repoIndex]
+            guard repo.enabled, let services = repo.services, !services.isEmpty else { continue }
+
+            var updatedServices = services
+            for serviceIndex in updatedServices.indices {
+                let localID = updatedServices[serviceIndex].id
+                let namespacedID = "\(repo.namespace)/\(localID)"
+                guard let updatedConnections = connectionsByNamespacedServiceID[namespacedID] else { continue }
+                updatedServices[serviceIndex].connections = localizedConnections(
+                    from: updatedConnections,
+                    localNamespace: repo.namespace
+                )
+            }
+            workspace.repos[repoIndex].services = updatedServices
+        }
+
+        try saveWorkspace(workspace, workspaceRoot: workspaceRoot)
+    }
+
     private static func merge(existing: AIBWorkspaceConfig, discovered: [WorkspaceRepo]) -> AIBWorkspaceConfig {
         let existingByPath = Dictionary(uniqueKeysWithValues: existing.repos.map { ($0.path, $0) })
         let mergedRepos = discovered.map { repo -> WorkspaceRepo in
@@ -73,7 +134,6 @@ public enum AIBWorkspaceManager {
         return AIBWorkspaceConfig(
             version: existing.version,
             workspaceName: existing.workspaceName,
-            generatedServicesPath: existing.generatedServicesPath,
             gateway: existing.gateway,
             repos: mergedRepos
         )
@@ -84,6 +144,40 @@ public enum AIBWorkspaceManager {
             (".aib/environments/local.yaml", "version: 1\nname: local\n"),
             (".aib/environments/staging.yaml", "version: 1\nname: staging\n"),
             (".aib/environments/prod.yaml", "version: 1\nname: prod\n"),
+        ]
+        for (relativePath, content) in files {
+            let path = URL(fileURLWithPath: relativePath, relativeTo: URL(fileURLWithPath: workspaceRoot)).standardizedFileURL.path
+            if !FileManager.default.fileExists(atPath: path) {
+                try content.write(toFile: path, atomically: true, encoding: .utf8)
+            }
+        }
+    }
+
+    private static func ensureTargetTemplates(workspaceRoot: String) throws {
+        let files: [(String, String)] = [
+            (
+                ".aib/targets/gcp-cloudrun.yaml",
+                """
+                version: 1
+                target: gcp-cloudrun
+                defaults:
+                  region: us-central1
+                  auth: private
+                  transport:
+                    mcp: streamable_http
+                    a2a_card_path: /.well-known/agent.json
+                services: {}
+                """
+            ),
+            (
+                ".aib/targets/aws-template.yaml",
+                """
+                version: 1
+                target: aws-template
+                notes: Placeholder for future AWS renderer support.
+                services: {}
+                """
+            ),
         ]
         for (relativePath, content) in files {
             let path = URL(fileURLWithPath: relativePath, relativeTo: URL(fileURLWithPath: workspaceRoot)).standardizedFileURL.path
@@ -130,5 +224,26 @@ public enum AIBWorkspaceManager {
         } else {
             try block.write(toFile: gitignorePath, atomically: true, encoding: .utf8)
         }
+    }
+
+    private static func localizedConnections(
+        from connections: ServiceConnectionsConfig,
+        localNamespace: String
+    ) -> WorkspaceRepoConnectionsConfig {
+        WorkspaceRepoConnectionsConfig(
+            mcpServers: connections.mcpServers.map { localizedConnectionTarget(from: $0, localNamespace: localNamespace) },
+            a2aAgents: connections.a2aAgents.map { localizedConnectionTarget(from: $0, localNamespace: localNamespace) }
+        )
+    }
+
+    private static func localizedConnectionTarget(
+        from target: ServiceConnectionTarget,
+        localNamespace: String
+    ) -> WorkspaceRepoConnectionTarget {
+        var normalizedServiceRef = target.serviceRef
+        if let serviceRef = normalizedServiceRef, serviceRef.hasPrefix(localNamespace + "/") {
+            normalizedServiceRef = String(serviceRef.dropFirst(localNamespace.count + 1))
+        }
+        return WorkspaceRepoConnectionTarget(serviceRef: normalizedServiceRef, url: target.url)
     }
 }

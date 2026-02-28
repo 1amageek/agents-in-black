@@ -1,0 +1,324 @@
+import AIBConfig
+import AIBGateway
+import AIBSupervisor
+import AIBWorkspace
+import Darwin
+import Foundation
+import Logging
+
+public struct EmulatorStartResult: Sendable {
+    public var pid: Int32?
+
+    public init(pid: Int32?) {
+        self.pid = pid
+    }
+}
+
+public enum EmulatorControllerError: Error, LocalizedError {
+    case alreadyRunning
+    case notRunning
+    case failedToStart(String)
+    case failedToStop(String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .alreadyRunning:
+            return "Emulator is already running"
+        case .notRunning:
+            return "Emulator is not running"
+        case .failedToStart(let message):
+            return "Failed to start emulator: \(message)"
+        case .failedToStop(let message):
+            return "Failed to stop emulator: \(message)"
+        }
+    }
+}
+
+private struct AIBClosureLogHandler: LogHandler {
+    var metadata: Logger.Metadata = [:]
+    var logLevel: Logger.Level = .info
+
+    private let label: String
+    private let sink: @Sendable (AIBEmulatorLogEntry) -> Void
+
+    init(label: String, sink: @escaping @Sendable (AIBEmulatorLogEntry) -> Void) {
+        self.label = label
+        self.sink = sink
+    }
+
+    subscript(metadataKey key: String) -> Logger.Metadata.Value? {
+        get { metadata[key] }
+        set { metadata[key] = newValue }
+    }
+
+    func log(
+        level: Logger.Level,
+        message: Logger.Message,
+        metadata localMetadata: Logger.Metadata?,
+        source: String,
+        file: String,
+        function: String,
+        line: UInt
+    ) {
+        guard level >= logLevel else { return }
+        let mergedMetadata: Logger.Metadata
+        if let localMetadata {
+            mergedMetadata = metadata.merging(localMetadata, uniquingKeysWith: { _, new in new })
+        } else {
+            mergedMetadata = metadata
+        }
+        let normalizedMetadata = mergedMetadata.reduce(into: [String: String]()) { partial, pair in
+            partial[pair.key] = pair.value.description
+        }
+        sink(
+            AIBEmulatorLogEntry(
+                timestamp: Date(),
+                level: level,
+                loggerLabel: label,
+                message: message.description,
+                metadata: normalizedMetadata
+            )
+        )
+    }
+}
+
+@MainActor
+public final class AIBEmulatorController {
+    private var gateway: DevGateway?
+    private var supervisor: DevSupervisor?
+    private var state: State = .stopped
+    private var eventContinuations: [UUID: AsyncStream<AIBEmulatorEvent>.Continuation] = [:]
+    private var serviceSnapshotPollTask: Task<Void, Never>?
+    private var latestServiceSnapshots: [AIBServiceRuntimeSnapshot] = []
+
+    private enum State {
+        case stopped
+        case running(workspaceURL: URL, workspacePath: String, gatewayPort: Int)
+    }
+
+    public init() {}
+
+    public func events() -> AsyncStream<AIBEmulatorEvent> {
+        let id = UUID()
+        return AsyncStream { continuation in
+            eventContinuations[id] = continuation
+            continuation.yield(.lifecycleChanged(currentLifecycleState()))
+            continuation.yield(.serviceSnapshotsChanged(latestServiceSnapshots))
+            continuation.onTermination = { [weak self] _ in
+                Task { @MainActor in
+                    self?.eventContinuations.removeValue(forKey: id)
+                }
+            }
+        }
+    }
+
+    public func shutdown() {
+        serviceSnapshotPollTask?.cancel()
+        serviceSnapshotPollTask = nil
+        finishEventStreams()
+    }
+
+    public func start(
+        workspaceURL: URL,
+        gatewayPort: Int
+    ) async throws -> EmulatorStartResult {
+        guard gateway == nil, supervisor == nil else {
+            throw EmulatorControllerError.alreadyRunning
+        }
+        emit(.lifecycleChanged(.starting))
+
+        let workspaceRoot = workspaceURL.standardizedFileURL.path
+        let workspacePath = AIBRuntimeCoreService.workspaceYAMLPath(workspaceRoot: workspaceRoot)
+
+        var logger = Logger(label: "aib.app-emulator") { label in
+            AIBClosureLogHandler(label: label) { [weak self] entry in
+                Task { @MainActor in
+                    self?.emit(.log(entry))
+                }
+            }
+        }
+        logger.logLevel = .info
+
+        do {
+            logger.info(
+                "Starting emulator",
+                metadata: [
+                    "workspace_path": "\(workspaceRoot)",
+                    "workspace_yaml": "\(workspacePath)",
+                    "gateway_port": "\(gatewayPort)"
+                ]
+            )
+            let loaded = try AIBRuntimeCoreService.resolveWorkspaceConfig(
+                workspaceRoot: workspaceRoot,
+                gatewayPort: gatewayPort
+            )
+            for warning in loaded.warnings {
+                logger.warning("Config warning", metadata: ["warning": "\(warning)"])
+            }
+
+            let gatewayControl = GatewayControl()
+            let gateway = DevGateway(gatewayConfig: loaded.config.gateway, control: gatewayControl, logger: logger)
+            try await gateway.start()
+
+            let configProvider: ConfigProvider = { @Sendable in
+                try AIBRuntimeCoreService.resolveWorkspaceConfig(
+                    workspaceRoot: workspaceRoot,
+                    gatewayPort: gatewayPort
+                )
+            }
+            let supervisor = DevSupervisor(
+                gatewayControl: gatewayControl,
+                configProvider: configProvider,
+                watchFilePath: workspacePath,
+                gatewayPort: loaded.config.gateway.port,
+                reloadEnabled: true,
+                logger: logger
+            )
+            await supervisor.startAll()
+
+            self.gateway = gateway
+            self.supervisor = supervisor
+            self.state = .running(
+                workspaceURL: workspaceURL.standardizedFileURL,
+                workspacePath: workspacePath,
+                gatewayPort: loaded.config.gateway.port
+            )
+            startServiceSnapshotPolling(supervisor: supervisor)
+            emit(.lifecycleChanged(.running(pid: getpid(), port: loaded.config.gateway.port)))
+
+            return EmulatorStartResult(pid: getpid())
+        } catch {
+            logger.error(
+                "Emulator start failed",
+                metadata: [
+                    "workspace_yaml": "\(workspacePath)",
+                    "gateway_port": "\(gatewayPort)",
+                    "error": "\(error)"
+                ]
+            )
+            serviceSnapshotPollTask?.cancel()
+            serviceSnapshotPollTask = nil
+            latestServiceSnapshots = []
+            if let supervisor {
+                await supervisor.stopAll(graceful: true)
+                self.supervisor = nil
+            }
+            if let gateway {
+                do {
+                    try await gateway.stop()
+                } catch {
+                    emit(
+                        .log(
+                            AIBEmulatorLogEntry(
+                                timestamp: Date(),
+                                level: .warning,
+                                loggerLabel: "aib.app-emulator",
+                                message: "gateway stop failed during rollback: \(error)",
+                                metadata: [:]
+                            )
+                        )
+                    )
+                }
+                self.gateway = nil
+            }
+            self.state = .stopped
+            emit(.lifecycleChanged(.failed(error.localizedDescription)))
+            throw EmulatorControllerError.failedToStart(error.localizedDescription)
+        }
+    }
+
+    public func stop() async throws {
+        guard let gateway, let supervisor else {
+            throw EmulatorControllerError.notRunning
+        }
+        emit(.lifecycleChanged(.stopping))
+
+        serviceSnapshotPollTask?.cancel()
+        serviceSnapshotPollTask = nil
+        await supervisor.stopAll(graceful: true)
+
+        var stopFailure: Error?
+        do {
+            try await gateway.stop()
+        } catch {
+            stopFailure = error
+            emit(
+                .log(
+                    AIBEmulatorLogEntry(
+                        timestamp: Date(),
+                        level: .error,
+                        loggerLabel: "aib.app-emulator",
+                        message: "Emulator stop failed: \(error)",
+                        metadata: [:]
+                    )
+                )
+            )
+        }
+
+        // Always release runtime references so the next start can proceed,
+        // even if shutdown reported an error.
+        self.supervisor = nil
+        self.gateway = nil
+        self.state = .stopped
+        latestServiceSnapshots = []
+        emit(.serviceSnapshotsChanged([]))
+        emit(.lifecycleChanged(.stopped))
+
+        if let stopFailure {
+            throw EmulatorControllerError.failedToStop(stopFailure.localizedDescription)
+        }
+    }
+
+    private func emit(_ event: AIBEmulatorEvent) {
+        for continuation in eventContinuations.values {
+            continuation.yield(event)
+        }
+    }
+
+    private func finishEventStreams() {
+        for continuation in eventContinuations.values {
+            continuation.finish()
+        }
+        eventContinuations.removeAll()
+    }
+
+    private func startServiceSnapshotPolling(supervisor: DevSupervisor) {
+        serviceSnapshotPollTask?.cancel()
+        serviceSnapshotPollTask = Task { [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled {
+                let snapshots = await supervisor.serviceStatusSnapshots().map { snapshot in
+                    AIBServiceRuntimeSnapshot(
+                        serviceID: snapshot.serviceID.rawValue,
+                        lifecycleState: snapshot.lifecycleState,
+                        desiredState: snapshot.desiredState,
+                        mountPath: snapshot.mountPath,
+                        backendPort: snapshot.backendPort,
+                        consecutiveProbeFailures: snapshot.consecutiveProbeFailures,
+                        lastExitStatus: snapshot.lastExitStatus
+                    )
+                }
+
+                if snapshots != latestServiceSnapshots {
+                    latestServiceSnapshots = snapshots
+                    emit(.serviceSnapshotsChanged(snapshots))
+                }
+
+                do {
+                    try await Task.sleep(for: .milliseconds(300))
+                } catch {
+                    break
+                }
+            }
+        }
+    }
+
+    private func currentLifecycleState() -> AIBEmulatorLifecycleState {
+        switch state {
+        case .stopped:
+            return .stopped
+        case .running(_, _, let gatewayPort):
+            return .running(pid: getpid(), port: gatewayPort)
+        }
+    }
+}

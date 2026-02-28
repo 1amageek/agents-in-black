@@ -1,0 +1,75 @@
+import SwiftUI
+
+/// A layout container with a collapsible bottom panel backed by `AIBVSplitView`.
+///
+/// When expanded, the main content and the footer panel are arranged in a
+/// split view with a draggable divider. When collapsed, only the header bar
+/// is visible below the main content.
+///
+///     CollapsibleSplitView(isExpanded: $showList) {
+///         CanvasView()
+///     } content: {
+///         ScrollView { ... }
+///     } header: {
+///         Label("Items", systemImage: "list.bullet")
+///     }
+struct CollapsibleSplitView<Main: View, Content: View, Header: View>: View {
+    @Binding var isExpanded: Bool
+    @ViewBuilder var main: Main
+    @ViewBuilder var content: Content
+    @ViewBuilder var header: Header
+
+    var body: some View {
+        if isExpanded {
+            AIBVSplitView {
+                main
+                footerPanel
+            }
+        } else {
+            VStack(spacing: 0) {
+                main
+                headerBar
+            }
+        }
+    }
+
+    private var footerPanel: some View {
+        VStack(spacing: 0) {
+            headerBar
+            Divider()
+            content
+        }
+    }
+
+    private var headerBar: some View {
+        ZStack {
+            Rectangle().fill(.bar)
+
+            HStack(spacing: 8) {
+                header
+
+                Spacer(minLength: 8)
+
+                panelVisibilityButton
+            }
+            .padding(.horizontal, 10)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+        }
+        .frame(height: 30)
+        .clipped()
+    }
+
+    private var panelVisibilityButton: some View {
+        Button {
+            isExpanded.toggle()
+        } label: {
+            Image(systemName: "rectangle.bottomthird.inset.filled")
+                .symbolRenderingMode(.hierarchical)
+                .font(.body)
+                .frame(width: 26, height: 26)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(isExpanded ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.secondary))
+        .help(isExpanded ? "Hide Panel" : "Show Panel")
+    }
+}

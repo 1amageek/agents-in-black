@@ -8,8 +8,9 @@ Each Agent/MCP repository remains an independent Git repository. AIB manages onl
 ## Core Principles
 
 - AIB manages the workspace, not project initialization.
-- Repositories are discovered and registered; repo files are not modified by default.
-- Local execution is composed from repo-provided manifests and workspace-generated defaults.
+- `.aib/` exists **only at the workspace root**. Individual repositories are never invaded with AIB-specific files or directories.
+- Repositories are discovered by scanning for native build files (`Package.swift`, `package.json`, `deno.json`, `pyproject.toml`, etc.).
+- All service definitions are managed entirely within the workspace-level `.aib/services.yaml`.
 - Services are language-agnostic HTTP units.
 
 ## Commands
@@ -19,12 +20,11 @@ Each Agent/MCP repository remains an independent Git repository. AIB manages onl
 Initializes a workspace at the current directory.
 
 Responsibilities:
-- Create `.aib/` workspace directory structure
+- Create `.aib/` workspace directory structure (only at workspace root)
 - Discover repositories by scanning for `.git`
-- Detect runtime/framework hints (`swift`, `node`, `deno`, `python`)
-- Detect repo service manifests (`.aib/services.yaml`, `aib.services.yaml`)
-- Generate `.aib/workspace.yaml`
-- Generate composed local runtime config `.aib/services.yaml`
+- Detect runtime/framework from native build files (`Package.swift`, `package.json`, `deno.json`, `pyproject.toml`, etc.)
+- Generate `.aib/workspace.yaml` with discovered repo metadata
+- Generate `.aib/services.yaml` (local runtime config) from workspace configuration
 
 Options:
 - `--scan <path>`: scan root (default current directory)
@@ -41,7 +41,7 @@ Re-scan workspace repositories and refresh `.aib/workspace.yaml`, then regenerat
 
 ### `aib workspace sync`
 
-Regenerate `.aib/services.yaml` from `.aib/workspace.yaml` and repo manifests.
+Regenerate `.aib/services.yaml` from `.aib/workspace.yaml`.
 
 ### `aib emulator start`
 
@@ -83,13 +83,12 @@ Reserved for Cloud Run deployment workflows.
 ## Workspace Source of Truth
 
 - Workspace orchestration config: `.aib/workspace.yaml`
-- Repo service definitions: repo-owned manifests (`<repo>/.aib/services.yaml` etc.)
-- Local runtime config (`.aib/services.yaml`) is generated from the above
+- Local runtime config: `.aib/services.yaml` (generated from workspace config)
+- **No per-repo manifests**: `.aib/` does not exist inside individual repositories
 
 ## Repo Status Classification
 
-- `managed`: repo manifest exists and is readable
-- `discoverable`: runtime/framework detected, no repo manifest
+- `discoverable`: runtime/framework detected from native build files
 - `unresolved`: repo detected but no reliable command candidate
 - `ignored`: explicitly disabled/ignored
 
@@ -112,25 +111,25 @@ Examples (non-exhaustive):
 
 ## Service Namespacing
 
-Workspace-generated service IDs are namespaced as:
+Service IDs are namespaced as `<repoName>/<serviceID>` to avoid collisions across independent repositories.
 
-- `<repoName>/<serviceID>` for managed repo manifests
-- `<repoName>/main` for discoverable repos with selected command
+For auto-discovered repos, the default service ID is `<repoName>/main`.
 
-This avoids collisions across independent repositories.
+## Generated Local Service Defaults
 
-## Generated Local Service Defaults (Discoverable repos)
+When a repo is discovered and a command candidate is selected, AIB generates a default service entry in `.aib/services.yaml` with:
 
-When no repo manifest exists but a command candidate is selected, AIB may generate a default service with:
-
+- `id`: `<repoName>/main`
 - `mount_path`: `/<repoName>`
 - `port`: `0`
 - `watch_mode`: runtime default (`swift=external`, others usually `internal`)
 - default health/restart/concurrency values
 
+Users can customize service configuration by editing `.aib/services.yaml` directly.
+
 ## Non-goals (v1)
 
-- Project initialization inside individual Agent/MCP repositories
+- Creating `.aib/` directories inside individual repositories
 - Editing repo `Package.swift` / `package.json` / source files
 - Forcing framework-specific application structure
 - Full Cloud Run deploy implementation

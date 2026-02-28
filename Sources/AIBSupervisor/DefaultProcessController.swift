@@ -33,11 +33,26 @@ public final class DefaultProcessController: ProcessController {
         process.arguments = [command] + arguments
 
         var env = ProcessInfo.processInfo.environment
+        env["PATH"] = enrichedPATH(from: env["PATH"])
+        guard commandIsResolvable(command, pathEnv: env["PATH"] ?? "", cwd: cwd) else {
+            throw ProcessSpawnError("Command not found in PATH", metadata: [
+                "service_id": service.id.rawValue,
+                "command": command,
+                "path": env["PATH"] ?? "",
+            ])
+        }
         env["PORT"] = "\(resolvedPort)"
         env["AIB_SERVICE_ID"] = service.id.rawValue
         env["AIB_MOUNT_PATH"] = service.mountPath
         env["AIB_REQUEST_BASE_URL"] = "http://localhost:\(gatewayPort)\(service.mountPath)"
         env["AIB_DEV"] = "1"
+        let sanitizedID = service.id.rawValue.replacingOccurrences(of: "/", with: "__")
+        let connectionsFilePath = URL(fileURLWithPath: configBaseDirectory)
+            .appendingPathComponent("generated/runtime/connections/\(sanitizedID).json")
+            .standardizedFileURL.path
+        if FileManager.default.fileExists(atPath: connectionsFilePath) {
+            env["AIB_CONNECTIONS_FILE"] = connectionsFilePath
+        }
         for (key, value) in service.env {
             env[key] = value
         }
@@ -72,6 +87,42 @@ public final class DefaultProcessController: ProcessController {
         )
     }
 
+    private func enrichedPATH(from current: String?) -> String {
+        var components = (current ?? "")
+            .split(separator: ":")
+            .map(String.init)
+            .filter { !$0.isEmpty }
+
+        let preferred = [
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "/Library/Frameworks/Python.framework/Versions/Current/bin",
+            "/usr/bin",
+            "/bin",
+            "/usr/sbin",
+            "/sbin",
+        ]
+        for path in preferred where !components.contains(path) {
+            components.append(path)
+        }
+        return components.joined(separator: ":")
+    }
+
+    private func commandIsResolvable(_ command: String, pathEnv: String, cwd: String) -> Bool {
+        if command.contains("/") {
+            let resolved = URL(fileURLWithPath: command, relativeTo: URL(fileURLWithPath: cwd)).standardizedFileURL.path
+            return FileManager.default.isExecutableFile(atPath: resolved)
+        }
+
+        for directory in pathEnv.split(separator: ":") {
+            let candidate = URL(fileURLWithPath: String(directory)).appendingPathComponent(command).path
+            if FileManager.default.isExecutableFile(atPath: candidate) {
+                return true
+            }
+        }
+        return false
+    }
+
     public func terminateGroup(_ handle: ChildHandle, grace: Duration) async -> TerminationResult {
         let pid = handle.process.processIdentifier
         if pid > 0 {
@@ -83,7 +134,11 @@ public final class DefaultProcessController: ProcessController {
         }
         let deadline = Date().addingTimeInterval(grace.timeInterval)
         while handle.process.isRunning, Date() < deadline {
-            try? await Task.sleep(for: .milliseconds(100))
+            do {
+                try await Task.sleep(for: .milliseconds(100))
+            } catch {
+                break
+            }
         }
         return TerminationResult(terminatedGracefully: !handle.process.isRunning, exitCode: handle.process.isRunning ? nil : handle.process.terminationStatus)
     }
@@ -98,7 +153,11 @@ public final class DefaultProcessController: ProcessController {
             }
         }
         while handle.process.isRunning {
-            try? await Task.sleep(for: .milliseconds(50))
+            do {
+                try await Task.sleep(for: .milliseconds(50))
+            } catch {
+                break
+            }
         }
     }
 }

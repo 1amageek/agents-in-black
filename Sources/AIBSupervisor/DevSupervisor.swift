@@ -4,6 +4,8 @@ import AIBRuntimeCore
 import Foundation
 import Logging
 
+public typealias ConfigProvider = @Sendable () async throws -> LoadedConfig
+
 public actor DevSupervisor {
     public nonisolated let gatewayControl: GatewayControl
 
@@ -11,8 +13,8 @@ public actor DevSupervisor {
     private let healthClient: HealthProbeClient
     private let logger: Logger
     private let logMux: LogMux
-    private let configPath: String
-    private let overrides: ConfigOverrides
+    private let configProvider: ConfigProvider
+    private let watchFilePath: String
     private let gatewayPort: Int
     private let reloadEnabled: Bool
 
@@ -25,8 +27,8 @@ public actor DevSupervisor {
 
     public init(
         gatewayControl: GatewayControl,
-        configPath: String,
-        overrides: ConfigOverrides = .init(),
+        configProvider: @escaping ConfigProvider,
+        watchFilePath: String,
         gatewayPort: Int,
         reloadEnabled: Bool = true,
         processController: ProcessController = DefaultProcessController(),
@@ -34,8 +36,8 @@ public actor DevSupervisor {
         logger: Logger
     ) {
         self.gatewayControl = gatewayControl
-        self.configPath = configPath
-        self.overrides = overrides
+        self.configProvider = configProvider
+        self.watchFilePath = watchFilePath
         self.gatewayPort = gatewayPort
         self.reloadEnabled = reloadEnabled
         self.processController = processController
@@ -46,12 +48,12 @@ public actor DevSupervisor {
 
     public func startAll() async {
         do {
-            let loaded = try await AIBConfigLoader.load(configPath: configPath, overrides: overrides)
+            let loaded = try await configProvider()
             for warning in loaded.warnings {
                 logger.warning("Config warning", metadata: ["warning": "\(warning)"])
             }
             try await applyInitialConfig(loaded.config)
-            configFileMTime = fileMTime(path: loaded.configPath)
+            configFileMTime = fileMTime(path: watchFilePath)
             if reloadEnabled {
                 startConfigPolling()
             }
@@ -64,12 +66,12 @@ public actor DevSupervisor {
     public func reloadConfig(trigger: ReloadTrigger) async {
         do {
             logger.info("Reloading config", metadata: ["trigger": "\(trigger.rawValue)"])
-            let loaded = try await AIBConfigLoader.load(configPath: configPath, overrides: overrides)
+            let loaded = try await configProvider()
             for warning in loaded.warnings {
                 logger.warning("Config warning", metadata: ["warning": "\(warning)"])
             }
             try await applyReloadedConfig(loaded.config)
-            configFileMTime = fileMTime(path: loaded.configPath)
+            configFileMTime = fileMTime(path: watchFilePath)
         } catch {
             logger.error("Config reload failed", metadata: ["error": "\(error)", "trigger": "\(trigger.rawValue)"])
         }
@@ -101,6 +103,22 @@ public actor DevSupervisor {
         } catch {
             logger.error("Failed to clear routes", metadata: ["error": "\(error)"])
         }
+    }
+
+    public func serviceStatusSnapshots() -> [SupervisorServiceStatusSnapshot] {
+        runtimes.values
+            .map { runtime in
+                SupervisorServiceStatusSnapshot(
+                    serviceID: runtime.service.id,
+                    lifecycleState: runtime.lifecycleState,
+                    desiredState: runtime.desiredState,
+                    mountPath: runtime.service.mountPath,
+                    backendPort: runtime.resolvedPort,
+                    consecutiveProbeFailures: runtime.consecutiveProbeFailures,
+                    lastExitStatus: runtime.lastExitStatus
+                )
+            }
+            .sorted { $0.serviceID.rawValue < $1.serviceID.rawValue }
     }
 
     private func applyInitialConfig(_ config: AIBConfig) async throws {
@@ -191,7 +209,7 @@ public actor DevSupervisor {
             service: runtime.service,
             resolvedPort: resolvedPort,
             gatewayPort: gatewayPort,
-            configBaseDirectory: configDirectoryPath
+            configBaseDirectory: configBaseDirectory
         )
         logMux.attach(handle)
 
@@ -293,8 +311,8 @@ public actor DevSupervisor {
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         process.arguments = [command] + Array(argv.dropFirst())
         process.currentDirectoryURL = URL(fileURLWithPath: service.cwd.map { path in
-            URL(fileURLWithPath: path, relativeTo: URL(fileURLWithPath: configDirectoryPath)).standardizedFileURL.path
-        } ?? configDirectoryPath)
+            URL(fileURLWithPath: path, relativeTo: URL(fileURLWithPath: configBaseDirectory)).standardizedFileURL.path
+        } ?? configBaseDirectory)
 
         pipe.fileHandleForReading.readabilityHandler = { [logger, serviceID = service.id.rawValue] handle in
             let data = handle.availableData
@@ -335,7 +353,7 @@ public actor DevSupervisor {
     }
 
     private func pollConfigFileChange() async {
-        let current = fileMTime(path: configPath)
+        let current = fileMTime(path: watchFilePath)
         guard let current else { return }
         if let previous = configFileMTime, current > previous {
             await reloadConfig(trigger: .configFileChanged)
@@ -373,8 +391,8 @@ public actor DevSupervisor {
         }
     }
 
-    private var configDirectoryPath: String {
-        URL(fileURLWithPath: configPath).deletingLastPathComponent().path
+    private var configBaseDirectory: String {
+        URL(fileURLWithPath: watchFilePath).deletingLastPathComponent().path
     }
 
     private func fileMTime(path: String) -> Date? {

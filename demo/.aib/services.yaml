@@ -11,6 +11,7 @@ gateway:
     enabled: false
 services:
 - id: agent-py/app
+  kind: agent
   mount_path: /agents/py
   port: 0
   cwd: /Users/1amageek/Desktop/agents-in-black/demo/agent-py
@@ -41,7 +42,12 @@ services:
     overflow_mode: reject
   auth:
     mode: 'off'
+  connections:
+    mcp_servers:
+    - service_ref: mcp-node/web
+    a2a_agents: []
 - id: mcp-node/web
+  kind: mcp
   mount_path: /mcp/node
   port: 0
   cwd: /Users/1amageek/Desktop/agents-in-black/demo/mcp-node
@@ -72,4 +78,10 @@ services:
     overflow_mode: reject
   auth:
     mode: 'off'
+  connections:
+    mcp_servers: []
+    a2a_agents: []
+  mcp:
+    transport: streamable_http
+    path: /mcp
 log_level: info

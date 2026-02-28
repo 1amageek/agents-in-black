@@ -1,0 +1,9 @@
+version: 1
+target: gcp-cloudrun
+defaults:
+  region: us-central1
+  auth: private
+  transport:
+    mcp: streamable_http
+    a2a_card_path: /.well-known/agent.json
+services: {}

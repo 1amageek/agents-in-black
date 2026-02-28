@@ -6,22 +6,42 @@ gateway:
 repos:
 - name: agent-py
   path: agent-py
-  manifest_path: .aib/services.yaml
   runtime: python
   framework: plain
   package_manager: pip
-  status: managed
+  status: discoverable
   detection_confidence: high
   command_candidates: []
   services_namespace: agent-py
   enabled: true
+  services:
+  - id: app
+    kind: agent
+    mount_path: /agents/py
+    port: 0
+    cwd: "."
+    run: [python3, server.py]
+    watch_mode: internal
+    watch_paths: [server.py, pyproject.toml]
+    connections:
+      mcp_servers:
+      - service_ref: mcp-node/web
+      - service_ref: mcp-web/web
+    ui:
+      primary_mode: chat
+      chat:
+        method: POST
+        path: /
+        request_content_type: application/json
+        request_message_json_path: message
+        response_message_json_path: body
+        streaming: false
 - name: mcp-node
   path: mcp-node
-  manifest_path: .aib/services.yaml
   runtime: node
   framework: fastify
   package_manager: npm
-  status: managed
+  status: discoverable
   detection_confidence: high
   command_candidates:
   - argv:
@@ -35,3 +55,79 @@ repos:
   - dev
   services_namespace: mcp-node
   enabled: true
+  services:
+  - id: web
+    kind: mcp
+    mount_path: /mcp/node
+    port: 0
+    cwd: "."
+    run: [node, server.js]
+    watch_mode: internal
+    watch_paths: [server.js, package.json]
+    mcp:
+      transport: streamable_http
+      path: /mcp
+- name: mcp-web
+  path: mcp-web
+  runtime: python
+  framework: plain
+  package_manager: pip
+  status: discoverable
+  detection_confidence: high
+  command_candidates: []
+  services_namespace: mcp-web
+  enabled: true
+  services:
+  - id: web
+    kind: mcp
+    mount_path: /mcp/web
+    port: 0
+    cwd: "."
+    run: [python3, server.py]
+    watch_mode: internal
+    watch_paths: [server.py, pyproject.toml]
+    mcp:
+      transport: streamable_http
+      path: /mcp
+- name: agent-swift
+  path: agent-swift
+  runtime: swift
+  framework: plain
+  package_manager: swiftpm
+  status: discoverable
+  detection_confidence: high
+  command_candidates:
+  - argv:
+    - swift
+    - run
+    reason: SwiftPM repository
+  selected_command:
+  - swift
+  - run
+  services_namespace: agent-swift
+  enabled: true
+  services:
+  - id: app
+    kind: agent
+    mount_path: /agents/swift
+    port: 0
+    cwd: "."
+    run: [.build/debug/AgentSwift]
+    build: [swift, build]
+    watch_mode: external
+    watch_paths: [Sources/Server.swift, Package.swift]
+    health:
+      startup_ready_timeout: 120s
+    connections:
+      mcp_servers:
+      - service_ref: mcp-node/web
+      - service_ref: mcp-web/web
+    ui:
+      primary_mode: chat
+      chat:
+        method: POST
+        path: /
+        request_content_type: application/json
+        request_message_json_path: message
+        response_message_json_path: body
+        streaming: false

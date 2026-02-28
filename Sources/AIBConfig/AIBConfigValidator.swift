@@ -34,12 +34,14 @@ public enum AIBConfigValidator {
         }
 
         var ids = Set<ServiceID>()
+        var servicesByID: [ServiceID: ServiceConfig] = [:]
         var mounts = Set<String>()
 
         for service in config.services {
             if !ids.insert(service.id).inserted {
                 result.errors.append("duplicate service id: \(service.id)")
             }
+            servicesByID[service.id] = service
             if !mounts.insert(service.mountPath).inserted {
                 result.errors.append("duplicate mount_path: \(service.mountPath)")
             }
@@ -66,6 +68,11 @@ public enum AIBConfigValidator {
             }
             if service.auth.mode != .off {
                 result.errors.append("service \(service.id): auth.mode=\(service.auth.mode.rawValue) is unsupported in v1")
+            }
+            if service.kind != .agent,
+               (!service.connections.mcpServers.isEmpty || !service.connections.a2aAgents.isEmpty)
+            {
+                result.errors.append("service \(service.id): only kind=agent can declare connections")
             }
             if service.watchMode == .external && service.watchPaths.isEmpty {
                 result.warnings.append("service \(service.id): watch_mode=external but watch_paths is empty")
@@ -99,7 +106,104 @@ public enum AIBConfigValidator {
             }
         }
 
+        validateConnections(config.services, servicesByID: servicesByID, errors: &result.errors)
+
         return result
+    }
+
+    private static func validateConnections(
+        _ services: [ServiceConfig],
+        servicesByID: [ServiceID: ServiceConfig],
+        errors: inout [String]
+    ) {
+        for service in services {
+            var seenTargets: Set<String> = []
+            for target in service.connections.mcpServers {
+                validateConnectionTarget(
+                    sourceService: service,
+                    target: target,
+                    group: "mcp_servers",
+                    expectedTargetKind: .mcp,
+                    servicesByID: servicesByID,
+                    seenTargets: &seenTargets,
+                    errors: &errors
+                )
+            }
+            for target in service.connections.a2aAgents {
+                validateConnectionTarget(
+                    sourceService: service,
+                    target: target,
+                    group: "a2a_agents",
+                    expectedTargetKind: .agent,
+                    servicesByID: servicesByID,
+                    seenTargets: &seenTargets,
+                    errors: &errors
+                )
+            }
+        }
+    }
+
+    private static func validateConnectionTarget(
+        sourceService: ServiceConfig,
+        target: ServiceConnectionTarget,
+        group: String,
+        expectedTargetKind: ServiceKind,
+        servicesByID: [ServiceID: ServiceConfig],
+        seenTargets: inout Set<String>,
+        errors: inout [String]
+    ) {
+        let serviceRef = target.serviceRef?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let url = target.url?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if serviceRef == nil || serviceRef?.isEmpty == true {
+            if url == nil || url?.isEmpty == true {
+                errors.append("service \(sourceService.id): \(group) target must set either service_ref or url")
+                return
+            }
+            if !isValidURL(url!) {
+                errors.append("service \(sourceService.id): \(group) has invalid url '\(url!)'")
+                return
+            }
+            let key = "\(group):url:\(url!)"
+            if !seenTargets.insert(key).inserted {
+                errors.append("service \(sourceService.id): duplicate \(group) target '\(url!)'")
+            }
+            return
+        }
+
+        if url != nil && url?.isEmpty == false {
+            errors.append("service \(sourceService.id): \(group) target cannot set both service_ref and url")
+            return
+        }
+
+        guard let resolvedRef = serviceRef, !resolvedRef.isEmpty else {
+            errors.append("service \(sourceService.id): \(group) has empty service_ref")
+            return
+        }
+
+        let targetID = ServiceID(resolvedRef)
+        if targetID == sourceService.id {
+            errors.append("service \(sourceService.id): \(group) cannot reference itself")
+        }
+        guard let resolved = servicesByID[targetID] else {
+            errors.append("service \(sourceService.id): \(group) references unknown service \(targetID)")
+            return
+        }
+        if resolved.kind != expectedTargetKind {
+            errors.append(
+                "service \(sourceService.id): \(group) target \(targetID) must be kind=\(expectedTargetKind.rawValue), got \(resolved.kind.rawValue)"
+            )
+        }
+
+        let key = "\(group):ref:\(targetID.rawValue)"
+        if !seenTargets.insert(key).inserted {
+            errors.append("service \(sourceService.id): duplicate \(group) target '\(targetID)'")
+        }
+    }
+
+    private static func isValidURL(_ value: String) -> Bool {
+        guard let url = URL(string: value) else { return false }
+        return url.scheme?.isEmpty == false && url.host?.isEmpty == false
     }
 
     private static func validateMountPath(_ mountPath: String, errors: inout [String]) {
