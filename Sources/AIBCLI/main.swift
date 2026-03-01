@@ -159,23 +159,142 @@ struct AIBDevMain {
             throw ConfigError("Missing deploy subcommand")
         }
         let cwd = FileManager.default.currentDirectoryPath
-        let workspace = try AIBWorkspaceCore.loadWorkspace(workspaceRoot: cwd)
+
+        // Detect provider from .aib/targets/ or use default
+        let provider = try DeploymentProviderRegistry.detect(workspaceRoot: cwd)
+
         switch subcommand {
+        case "preflight":
+            print("Running preflight checks for \(provider.displayName)...")
+            let report = await AIBDeployService.preflightCheck(provider: provider)
+            for result in report.results {
+                let icon: String
+                switch result.status {
+                case .passed: icon = "PASS"
+                case .failed: icon = "FAIL"
+                case .warning: icon = "WARN"
+                case .skipped: icon = "SKIP"
+                case .pending, .running: icon = "..."
+                }
+                print("  [\(icon)] \(result.title)")
+                if case .failed(let msg) = result.status {
+                    print("         \(msg)")
+                    if let cmd = result.remediationCommand {
+                        print("         Fix: \(cmd)")
+                    }
+                }
+                if case .warning(let msg) = result.status {
+                    print("         \(msg)")
+                }
+            }
+            if report.canProceed {
+                print("\nAll preflight checks passed.")
+                Foundation.exit(Int32(ExitCode.ok))
+            } else {
+                print("\nPreflight checks failed. Resolve issues above before deploying.")
+                Foundation.exit(Int32(ExitCode.deployError))
+            }
+
         case "plan", "diff":
-            let configured = workspace.repos.filter { $0.enabled && !($0.services ?? []).isEmpty }
-            let discoverable = workspace.repos.filter { $0.enabled && $0.status == .discoverable && ($0.services ?? []).isEmpty }
-            logger.info("Deploy plan (stub)", metadata: [
-                "workspace": "\(workspace.workspaceName)",
-                "configured_repos": "\(configured.count)",
-                "discoverable_repos": "\(discoverable.count)",
-            ])
-            print("Deploy plan is stubbed in v1. Use workspace sync + repo-specific deploy commands for now.")
+            let report = await AIBDeployService.preflightCheck(provider: provider)
+            guard report.canProceed else {
+                logger.error("Preflight checks failed. Run 'aib deploy preflight' for details.")
+                Foundation.exit(Int32(ExitCode.deployError))
+            }
+
+            var targetConfig = try AIBDeployService.loadTargetConfig(
+                workspaceRoot: cwd,
+                providerID: provider.providerID
+            )
+            // Enrich config with auto-detected values from preflight
+            let detectedValues = provider.extractDetectedConfig(from: report)
+            for (key, value) in detectedValues where targetConfig.providerConfig[key] == nil {
+                targetConfig.providerConfig[key] = value
+            }
+            try provider.validateTargetConfig(targetConfig)
+
+            let plan = try AIBDeployService.generatePlan(
+                workspaceRoot: cwd,
+                targetConfig: targetConfig,
+                provider: provider
+            )
+            try AIBDeployService.writeArtifacts(plan: plan, workspaceRoot: cwd)
+
+            print("Deploy Plan: \(plan.workspaceName)")
+            print("  Provider: \(provider.displayName)")
+            print("  Region: \(targetConfig.region)")
+            print("  Services: \(plan.services.count)")
+            for service in plan.services {
+                let sourceLabel = service.artifacts.dockerfile.source == .custom ? "(custom Dockerfile)" : "(generated)"
+                print("    - \(service.id) -> \(service.deployedServiceName) \(sourceLabel)")
+            }
+            print("  Auth Bindings: \(plan.authBindings.count)")
+            print("  Warnings: \(plan.warnings.count)")
+            for warning in plan.warnings {
+                print("    ! \(warning)")
+            }
+            print("\nArtifacts written to .aib/generated/deploy/")
+            print("Run 'aib deploy apply' to execute deployment.")
             Foundation.exit(Int32(ExitCode.ok))
+
         case "apply":
-            logger.error("Deploy apply is not implemented in v1")
-            Foundation.exit(Int32(ExitCode.deployError))
+            let report = await AIBDeployService.preflightCheck(provider: provider)
+            guard report.canProceed else {
+                logger.error("Preflight checks failed. Run 'aib deploy preflight' for details.")
+                Foundation.exit(Int32(ExitCode.deployError))
+            }
+
+            var targetConfig = try AIBDeployService.loadTargetConfig(
+                workspaceRoot: cwd,
+                providerID: provider.providerID
+            )
+            // Enrich config with auto-detected values from preflight
+            let detectedApplyValues = provider.extractDetectedConfig(from: report)
+            for (key, value) in detectedApplyValues where targetConfig.providerConfig[key] == nil {
+                targetConfig.providerConfig[key] = value
+            }
+            try provider.validateTargetConfig(targetConfig)
+
+            let plan = try AIBDeployService.generatePlan(
+                workspaceRoot: cwd,
+                targetConfig: targetConfig,
+                provider: provider
+            )
+            try AIBDeployService.writeArtifacts(plan: plan, workspaceRoot: cwd)
+
+            print("Deploying \(plan.services.count) services via \(provider.displayName)...")
+            let overallProgress = Progress(totalUnitCount: Int64(plan.services.count))
+            let result = try await AIBDeployExecutor.execute(
+                plan: plan,
+                provider: provider,
+                workspaceRoot: cwd,
+                overallProgress: overallProgress,
+                logHandler: { entry in
+                    logger.log(level: entry.level, "\(entry.message)")
+                }
+            )
+
+            print("\nDeployment complete:")
+            for serviceResult in result.serviceResults {
+                let status = serviceResult.success ? "OK" : "FAILED"
+                print("  [\(status)] \(serviceResult.id)")
+                if let url = serviceResult.deployedURL {
+                    print("         URL: \(url)")
+                }
+                if let error = serviceResult.errorMessage {
+                    print("         Error: \(error)")
+                }
+            }
+            print("  Auth Bindings applied: \(result.authBindingsApplied)")
+
+            if result.allSucceeded {
+                Foundation.exit(Int32(ExitCode.ok))
+            } else {
+                Foundation.exit(Int32(ExitCode.deployError))
+            }
+
         default:
-            throw ConfigError("Unknown deploy subcommand", metadata: ["subcommand": subcommand])
+            throw ConfigError("Unknown deploy subcommand. Use: preflight, plan, apply", metadata: ["subcommand": subcommand])
         }
     }
 

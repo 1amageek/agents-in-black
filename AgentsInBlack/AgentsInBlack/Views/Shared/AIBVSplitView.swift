@@ -85,9 +85,6 @@ private struct AIBVSplitViewRepresentable: NSViewRepresentable {
     }
 
     final class Coordinator: NSObject, NSSplitViewDelegate {
-        /// Height of the bottom pane's header bar that should also act as a drag handle.
-        var headerDragHeight: CGFloat = 30
-
         func splitView(
             _ splitView: NSSplitView,
             constrainMinCoordinate proposedMinimumPosition: CGFloat,
@@ -117,15 +114,14 @@ private struct AIBVSplitViewRepresentable: NSViewRepresentable {
             }
             let bottomPane = splitView.arrangedSubviews[dividerIndex + 1]
             let paneFrame = bottomPane.frame
-            // Extend the divider hit area to cover the header of the bottom pane,
-            // but leave the trailing edge free so buttons can receive clicks.
-            let trailingInset: CGFloat = 80
-            let dragWidth = max(0, paneFrame.width - trailingInset)
+            // Extend the drag area into only the top strip of the bottom pane
+            // (the visual Divider line area) so interactive controls below remain clickable.
+            let dragStripHeight: CGFloat = 8
             return NSRect(
                 x: paneFrame.origin.x,
                 y: paneFrame.origin.y,
-                width: dragWidth,
-                height: headerDragHeight
+                width: paneFrame.width,
+                height: dragStripHeight
             )
         }
     }

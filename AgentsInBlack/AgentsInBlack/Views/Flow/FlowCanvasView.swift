@@ -9,16 +9,9 @@ struct FlowCanvasView: View {
     @State private var store = FlowStore<String>()
     @State private var canvasSize: CGSize = .zero
     @State private var hasFittedInitialContent = false
-    @State private var showConnectionsList = false
 
     var body: some View {
-        CollapsibleSplitView(isExpanded: $showConnectionsList) {
-            canvas
-        } content: {
-            connectionsContent
-        } header: {
-            connectionsHeader
-        }
+        canvas
         .onAppear {
             synchronizeStoreFromModel(resetViewport: true)
         }
@@ -42,6 +35,9 @@ struct FlowCanvasView: View {
                 FlowCanvas(store: store) { node in
                         FlowServiceNodeContent(node: node)
                     }
+                    .nodeAccessory(placement: .bottom) { node in
+                        nodeAccessoryContent(for: node, canvasSize: geometry.size)
+                    }
                     .environment(\.flowNodeVisualsByID, nodeVisualsByID)
                     .focusEffectDisabled()
                     .onTapGesture(count: 2) {
@@ -60,6 +56,21 @@ struct FlowCanvasView: View {
             }
         }
         .frame(minHeight: 400)
+    }
+
+    // MARK: - Node Accessory
+
+    @ViewBuilder
+    private func nodeAccessoryContent(for node: FlowNode<String>, canvasSize: CGSize) -> some View {
+        if let service = model.service(by: node.id), model.canOpenChat(for: service) {
+            NodeAccessoryInputBar(service: service) { text in
+                let chatSession = model.createSession(for: service, activate: true)
+                chatSession.composerText = text
+                store.clearSelection()
+                model.openPiPChat(serviceID: service.id, sessionID: chatSession.id)
+                Task { await chatSession.send() }
+            }
+        }
     }
 
     // MARK: - HUD Overlay
@@ -150,130 +161,57 @@ struct FlowCanvasView: View {
 
     @ViewBuilder
     private func pipChatOverlay(canvasSize: CGSize) -> some View {
-        ForEach($model.openPiPChats) { $pip in
-            if let service = model.service(by: pip.id) {
+        let pipBindable = Bindable(model.pipManager)
+        ForEach(pipBindable.items) { $pip in
+            let sessionID = pip.id
+            let serviceID = pip.serviceID
+            if let service = model.service(by: serviceID),
+               let chatSession = model.session(serviceID: serviceID, sessionID: sessionID) {
                 PiPContainer(
                     isExpanded: $pip.isExpanded,
                     position: $pip.position,
                     canvasSize: canvasSize,
-                    minimizedSize: PiPGeometry.defaultBubbleSize,
-                    expandedSize: PiPChatPanel.panelSize
+                    layout: model.pipManager.layout,
+                    resolveSnapPosition: { proposed, contentSize in
+                        model.pipManager.resolveSnapPosition(
+                            for: sessionID,
+                            proposed: proposed,
+                            contentSize: contentSize
+                        )
+                    },
+                    onInteraction: {
+                        model.pipManager.bringToFront(sessionID: sessionID)
+                    }
                 ) {
                     AgentBubble(service: service)
                         .onTapGesture {
                             withAnimation(.spring(duration: 0.35, bounce: 0.15)) {
-                                pip.position = PiPGeometry.correspondingCorner(
-                                    from: pip.position, in: canvasSize,
-                                    fromSize: PiPGeometry.defaultBubbleSize,
-                                    toSize: PiPChatPanel.panelSize
-                                )
-                                pip.isExpanded = true
+                                model.pipManager.toggleExpanded(sessionID: sessionID)
                             }
                         }
                 } expanded: {
                     PiPChatPanel(
-                        store: model.chatStore(for: service),
+                        session: chatSession,
                         service: service,
                         onMinimize: {
                             withAnimation(.spring(duration: 0.35, bounce: 0.15)) {
-                                pip.position = PiPGeometry.correspondingCorner(
-                                    from: pip.position, in: canvasSize,
-                                    fromSize: PiPChatPanel.panelSize,
-                                    toSize: PiPGeometry.defaultBubbleSize
-                                )
-                                pip.isExpanded = false
+                                model.pipManager.toggleExpanded(sessionID: sessionID)
                             }
                         },
                         onClose: {
                             withAnimation(.spring(duration: 0.25)) {
-                                model.closePiPChat(serviceID: pip.id)
+                                model.pipManager.close(sessionID: sessionID)
                             }
+                        },
+                        onSelectMessage: { message in
+                            model.selectedChatMessage = message
+                            if message != nil { model.showInspector = true }
                         }
                     )
                 }
+                .zIndex(Double(pip.zIndex))
             }
         }
-    }
-
-    // MARK: - Connections List
-
-    @ViewBuilder
-    private var connectionsHeader: some View {
-        Image(systemName: "arrow.triangle.branch")
-            .font(.caption)
-            .foregroundStyle(.secondary)
-        Text("Connections")
-            .font(.caption.weight(.medium))
-            .foregroundStyle(.secondary)
-        Text("\(model.flowConnections().count)")
-            .font(.caption2.monospacedDigit())
-            .foregroundStyle(.tertiary)
-
-        if model.hasUnsavedFlowChanges {
-            Spacer(minLength: 8)
-            Button("Save") {
-                Task { await model.saveFlowConnections() }
-            }
-            .buttonStyle(.borderless)
-            .font(.caption.weight(.medium))
-            .foregroundStyle(Color.accentColor)
-        }
-    }
-
-    private var connectionsContent: some View {
-        ScrollView {
-            LazyVStack(spacing: 0) {
-                ForEach(model.flowConnections()) { connection in
-                    connectionRow(connection)
-                    if connection.id != model.flowConnections().last?.id {
-                        Divider().padding(.leading, 40)
-                    }
-                }
-            }
-            .padding(.vertical, 4)
-        }
-    }
-
-    private func connectionRow(_ connection: FlowConnectionModel) -> some View {
-        HStack(spacing: 8) {
-            Image(systemName: connection.kind == .mcp ? "wrench.and.screwdriver" : "arrow.left.arrow.right")
-                .font(.caption)
-                .foregroundStyle(connectionColor(for: connection.kind))
-                .frame(width: 20, alignment: .center)
-
-            Text(connection.kind.rawValue)
-                .font(.caption2.weight(.bold))
-                .foregroundStyle(connectionColor(for: connection.kind))
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(connectionColor(for: connection.kind).opacity(0.12), in: Capsule())
-
-            Text(connectionSummary(connection))
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .truncationMode(.middle)
-
-            Spacer(minLength: 4)
-
-            Button {
-                model.removeFlowConnection(connection)
-            } label: {
-                Image(systemName: "xmark")
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(.tertiary)
-            }
-            .buttonStyle(.plain)
-            .help("Remove connection")
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
-    }
-
-    private func connectionSummary(_ connection: FlowConnectionModel) -> String {
-        let source = model.service(by: connection.sourceServiceID)?.namespacedID ?? connection.sourceServiceID
-        let target = model.service(by: connection.targetServiceID)?.namespacedID ?? connection.targetServiceID
-        return "\(source)  \u{2192}  \(target)"
     }
 
     // MARK: - Store Synchronization
@@ -419,8 +357,22 @@ struct FlowCanvasView: View {
 
     private func updateCanvasSize(_ size: CGSize) {
         guard size.width > 0, size.height > 0 else { return }
+        let wasZero = canvasSize.width <= 0 || canvasSize.height <= 0
         canvasSize = size
-        model.flowCanvasSize = size
+
+        if wasZero {
+            // Initial placement: no animation
+            var t = Transaction(animation: nil)
+            t.disablesAnimations = true
+            withTransaction(t) {
+                model.pipManager.updateCanvasSize(size)
+            }
+        } else {
+            // Resize: animate the snap
+            withAnimation(.spring(duration: 0.35, bounce: 0.15)) {
+                model.pipManager.updateCanvasSize(size)
+            }
+        }
 
         if !hasFittedInitialContent, !store.nodes.isEmpty {
             fitToContent()
@@ -467,45 +419,6 @@ struct FlowCanvasView: View {
         )
     }
 
-    private func connectionColor(for kind: FlowConnectionKind) -> Color {
-        switch kind {
-        case .mcp: AIBFlowPalette.mcp
-        case .a2a: AIBFlowPalette.a2a
-        }
-    }
-}
-
-// MARK: - Color Palette
-
-private enum AIBFlowPalette {
-    static let agent = Color.mint
-    static let mcp = Color.cyan
-    static let a2a = Color.orange
-    static let unknown = Color.secondary
-
-    static func tint(for kind: AIBServiceKind) -> Color {
-        switch kind {
-        case .agent: agent
-        case .mcp: mcp
-        case .unknown: unknown
-        }
-    }
-
-    static func symbol(for kind: AIBServiceKind) -> String {
-        switch kind {
-        case .agent: "sparkles"
-        case .mcp: "wrench.and.screwdriver.fill"
-        case .unknown: "square.stack.3d.up.fill"
-        }
-    }
-
-    static func label(for kind: AIBServiceKind) -> String {
-        switch kind {
-        case .agent: "Agent"
-        case .mcp: "MCP"
-        case .unknown: "Other"
-        }
-    }
 }
 
 // MARK: - Node Content
@@ -542,7 +455,7 @@ private struct FlowServiceNodeContent: View {
             Image(systemName: AIBFlowPalette.symbol(for: kind))
                 .font(.system(size: 16, weight: .medium))
                 .foregroundStyle(tint)
-                .frame(width: 20)
+                .frame(width: 18)
 
             VStack(alignment: .leading, spacing: 1) {
                 Text(parts.primary)
@@ -561,7 +474,7 @@ private struct FlowServiceNodeContent: View {
 
             Spacer(minLength: 0)
         }
-        .padding(.horizontal, 6)
+        .padding(.horizontal, 12)
         .padding(.vertical, 2)
         .frame(width: node.size.width, height: node.size.height)
         .background(cardBackground, in: RoundedRectangle(cornerRadius: 8))

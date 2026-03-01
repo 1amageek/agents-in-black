@@ -44,18 +44,21 @@ struct CollapsibleSplitView<Main: View, Content: View, Header: View>: View {
     private var headerBar: some View {
         ZStack {
             Rectangle().fill(.bar)
+            VStack(spacing: 0) {
+                Divider()
+                HStack(spacing: 8) {
+                    header
 
-            HStack(spacing: 8) {
-                header
+                    Spacer(minLength: 8)
 
-                Spacer(minLength: 8)
-
-                panelVisibilityButton
+                    panelVisibilityButton
+                }
+                .padding(.horizontal, 10)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
             }
-            .padding(.horizontal, 10)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(height: 30)
+        .frame(height: 40)
         .clipped()
     }
 
@@ -66,7 +69,8 @@ struct CollapsibleSplitView<Main: View, Content: View, Header: View>: View {
             Image(systemName: "rectangle.bottomthird.inset.filled")
                 .symbolRenderingMode(.hierarchical)
                 .font(.body)
-                .frame(width: 26, height: 26)
+                .frame(width: 28, height: 28)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .foregroundStyle(isExpanded ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.secondary))

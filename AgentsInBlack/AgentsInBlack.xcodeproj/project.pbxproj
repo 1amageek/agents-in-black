@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		A1B000000000000000000003 /* AIBCore in Frameworks */ = {isa = PBXBuildFile; productRef = A1B000000000000000000002 /* AIBCore */; };
 		A1B000000000000000000006 /* SwiftFlow in Frameworks */ = {isa = PBXBuildFile; productRef = A1B000000000000000000005 /* SwiftFlow */; };
+		A1B000000000000000000009 /* SwiftTerm in Frameworks */ = {isa = PBXBuildFile; productRef = A1B000000000000000000008 /* SwiftTerm */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -59,6 +60,7 @@
 			files = (
 				A1B000000000000000000003 /* AIBCore in Frameworks */,
 				A1B000000000000000000006 /* SwiftFlow in Frameworks */,
+				A1B000000000000000000009 /* SwiftTerm in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -121,6 +123,7 @@
 			packageProductDependencies = (
 				A1B000000000000000000002 /* AIBCore */,
 				A1B000000000000000000005 /* SwiftFlow */,
+				A1B000000000000000000008 /* SwiftTerm */,
 			);
 			productName = AgentsInBlack;
 			productReference = 12BDD1172F501E3200FB156D /* AgentsInBlack.app */;
@@ -207,6 +210,7 @@
 			packageReferences = (
 				A1B000000000000000000001 /* XCLocalSwiftPackageReference ".." */,
 				A1B000000000000000000004 /* XCRemoteSwiftPackageReference "swift-flow" */,
+				A1B000000000000000000007 /* XCRemoteSwiftPackageReference "SwiftTerm" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 12BDD1182F501E3200FB156D /* Products */;
@@ -603,6 +607,14 @@
 				kind = branch;
 			};
 		};
+		A1B000000000000000000007 /* XCRemoteSwiftPackageReference "SwiftTerm" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/migueldeicaza/SwiftTerm.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 1.2.0;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -615,6 +627,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = A1B000000000000000000004 /* XCRemoteSwiftPackageReference "swift-flow" */;
 			productName = SwiftFlow;
+		};
+		A1B000000000000000000008 /* SwiftTerm */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A1B000000000000000000007 /* XCRemoteSwiftPackageReference "SwiftTerm" */;
+			productName = SwiftTerm;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

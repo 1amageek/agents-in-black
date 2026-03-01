@@ -3,27 +3,43 @@ import SwiftUI
 /// A Messages-style chat bubble aligned by role.
 struct CompactChatMessageRow: View {
     let message: ChatMessageItem
+    var isSelected: Bool = false
 
     private var isUser: Bool { message.role == .user }
     private var isError: Bool { message.role == .error }
 
     var body: some View {
         HStack(alignment: .bottom, spacing: 0) {
-            if isUser { Spacer(minLength: 32) }
+            if isUser { Spacer(minLength: 48) }
 
-            VStack(alignment: isUser ? .trailing : .leading, spacing: 2) {
-                Text(message.text)
-                    .font(.system(.caption))
-                    .foregroundStyle(textColor)
-                    .textSelection(.enabled)
+            VStack(alignment: isUser ? .trailing : .leading, spacing: 3) {
+                // Bubble
+                VStack(alignment: isUser ? .trailing : .leading, spacing: 4) {
+                    Text(message.text)
+                        .font(.body)
+                        .foregroundStyle(textColor)
+                        .textSelection(.enabled)
 
-                metadata
+                    metadata
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(bubbleBackground, in: BubbleShape(isUser: isUser))
+                .overlay {
+                    if isSelected {
+                        BubbleShape(isUser: isUser)
+                            .stroke(Color.accentColor, lineWidth: 1.5)
+                    }
+                }
+
+                // Timestamp outside the bubble
+                Text(message.timestamp, style: .time)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .padding(.horizontal, 4)
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7)
-            .background(bubbleBackground, in: BubbleShape(isUser: isUser))
 
-            if !isUser { Spacer(minLength: 32) }
+            if !isUser { Spacer(minLength: 48) }
         }
     }
 
@@ -36,11 +52,11 @@ struct CompactChatMessageRow: View {
             HStack(spacing: 4) {
                 if let code = message.statusCode {
                     Text("\(code)")
-                        .font(.system(size: 9).monospacedDigit())
+                        .font(.system(size: 10).monospacedDigit())
                 }
                 if let ms = message.latencyMs {
                     Text("\(ms)ms")
-                        .font(.system(size: 9).monospacedDigit())
+                        .font(.system(size: 10).monospacedDigit())
                 }
             }
             .foregroundStyle(metadataColor)
@@ -65,7 +81,7 @@ struct CompactChatMessageRow: View {
         case .user:
             AnyShapeStyle(Color.accentColor)
         case .assistant:
-            AnyShapeStyle(.regularMaterial)
+            AnyShapeStyle(Color(.controlBackgroundColor))
         case .error:
             AnyShapeStyle(Color.red.opacity(0.1))
         case .system, .info:
@@ -81,7 +97,7 @@ private struct BubbleShape: Shape {
     let isUser: Bool
 
     func path(in rect: CGRect) -> Path {
-        let r: CGFloat = 12
+        let r: CGFloat = 14
         let tail: CGFloat = 4
         return Path(
             roundedRect: rect,

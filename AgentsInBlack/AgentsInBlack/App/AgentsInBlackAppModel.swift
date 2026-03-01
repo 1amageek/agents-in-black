@@ -21,20 +21,27 @@ final class AgentsInBlackAppModel {
     var flowConnectionTargetServiceID: String?
     var selectedFlowNodeID: String?
 
-    // MARK: - PiP Chat
-    var openPiPChats: [PiPItemState] = []
-    var chatStores: [String: ChatStore] = [:]
-    var flowCanvasSize: CGSize = .zero
+    // MARK: - Chat Sessions
+    let pipManager = PiPManager(layout: PiPLayout(
+        expandedSize: PiPChatPanel.panelSize,
+        minimizedSize: PiPGeometry.defaultBubbleSize,
+        headerHeight: 40,
+        edgeInset: 16,
+        bottomInset: 76
+    ))
+    var chatSessionsByService: [String: [ChatSession]] = [:]
+    var activeSessionIDByService: [String: UUID] = [:]
 
-    var terminalTabs: [TerminalTabModel] = []
-    var selectedTerminalTabID: String?
+    let terminalManager = TerminalManager()
 
     var emulatorState: EmulatorState = .stopped
     var emulatorOutput: String = ""
     var serviceLogOutputByServiceID: [String: String] = [:]
     var serviceSnapshotsByID: [String: AIBServiceRuntimeSnapshot] = [:]
     var showInspector: Bool = false
+    var selectedChatMessage: ChatMessageItem?
     var lastErrorMessage: String?
+    let runtimeAnnouncementCenter = RuntimeAnnouncementCenter()
     var gatewayPort: Int = 8080
     var showUtilityPanel: Bool = true
     var utilityPanelMode: UtilityPanelMode = .aibRuntime
@@ -42,19 +49,37 @@ final class AgentsInBlackAppModel {
     var utilityServiceLogTarget: UtilityServiceLogTarget = .selection
     var sidebarRepoStatusByRepoID: [String: SidebarRepoStatus] = [:]
     var workbenchModeByServiceID: [String: AIBWorkbenchMode] = [:]
-    var chatSessionsByServiceID: [String: ChatSessionState] = [:]
     var rawDraftByServiceID: [String: RawRequestDraft] = [:]
     var serviceLogsExpandedByServiceID: [String: Bool] = [:]
     var runtimeIssues: [RuntimeIssue] = []
     var showIssuesInSidebar: Bool = false
     var issueListFilter: RuntimeIssueSeverity?
     private var emulatorEventsTask: Task<Void, Never>?
+    private var lastEmulatorLifecycleState: AIBEmulatorLifecycleState?
     private var hasShutdown = false
+
+    // MARK: - Deploy
+    let deployController = AIBDeployController()
+    var deployPhase: AIBDeployPhase = .idle
+    var showDeploySheet: Bool = false
+    var showCloudSettings: Bool = false
+    private var deployEventsTask: Task<Void, Never>?
+    private let configStore: DeployTargetConfigStore = DefaultDeployTargetConfigStore()
+
+    // MARK: - Deploy Environment Status
+    var dockerCheckResult: PreflightCheckResult?
+    var cloudProviderCheckResult: PreflightCheckResult?
+    var detectedProvider: (any DeploymentProvider)?
+    var isCheckingEnvironment: Bool = false
+    private var environmentCheckTask: Task<Void, Never>?
+
+    // MARK: - Docker Runtime
+    var installedDockerRuntimes: [DockerRuntime] = []
+    var preferredDockerRuntime: DockerRuntime?
 
     let workspaceDiscovery = WorkspaceDiscoveryService()
     let emulatorController = AIBEmulatorController()
     let editorService = ExternalEditorService()
-    let shellRunner = ShellCommandRunner()
 
     init() {
         emulatorEventsTask = Task { [weak self] in
@@ -71,9 +96,15 @@ final class AgentsInBlackAppModel {
 
         emulatorEventsTask?.cancel()
         emulatorEventsTask = nil
+        deployEventsTask?.cancel()
+        deployEventsTask = nil
+        environmentCheckTask?.cancel()
+        environmentCheckTask = nil
+        runtimeAnnouncementCenter.clear()
 
         let shouldAttemptStop = emulatorState.isRunning || emulatorState.isBusy
         emulatorController.shutdown()
+        deployController.shutdown()
 
         if shouldAttemptStop {
             Task { @MainActor [weak self] in
@@ -169,10 +200,12 @@ final class AgentsInBlackAppModel {
             }
             flowConnectionTargetServiceID = nil
             hasUnsavedFlowChanges = false
-            openPiPChats.removeAll()
-            chatStores.removeAll()
+            pipManager.closeAll()
+            chatSessionsByService.removeAll()
+            activeSessionIDByService.removeAll()
             rebuildSidebarRepoStatuses()
             lastErrorMessage = nil
+            refreshEnvironmentStatus()
         } catch {
             lastErrorMessage = "Failed to load workspace: \(error.localizedDescription)"
         }
@@ -232,17 +265,19 @@ final class AgentsInBlackAppModel {
     }
 
     func ensureTerminalTab(for repo: AIBRepoModel) {
-        if terminalTabs.contains(where: { $0.repoID == repo.id }) {
-            selectedTerminalTabID = repo.id
-            return
-        }
-        let tab = TerminalTabModel(repoID: repo.id, repoName: repo.name, cwdURL: repo.rootURL)
-        terminalTabs.append(tab)
-        selectedTerminalTabID = tab.id
+        terminalManager.ensureTab(contextKey: repo.id, label: repo.name, workingDirectory: repo.rootURL)
     }
 
     func select(_ target: SelectionTarget) {
         selection = target
+        applySelectionSideEffects(target)
+    }
+
+    /// Apply side effects for a selection change without setting `selection`.
+    /// Called from both `select(_:)` and `onChange(of: selection)` to ensure
+    /// `detailSurfaceMode` stays in sync even when `List(selection:)` binding
+    /// updates `selection` directly (bypassing `select(_:)`).
+    func applySelectionSideEffects(_ target: SelectionTarget) {
         switch target {
         case .topology:
             selectedSidebarSection = .workspace
@@ -280,24 +315,25 @@ final class AgentsInBlackAppModel {
         }
     }
 
-    func runTerminalCommand(for tabID: String) async {
-        guard let tab = terminalTabs.first(where: { $0.id == tabID }) else { return }
-        let command = tab.commandInput.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !command.isEmpty else { return }
+    /// Send a command to a terminal tab's session.
+    func sendTerminalCommand(_ command: String, toTabID tabID: String) {
+        terminalManager.sendCommand(command, toTabID: tabID)
         utilityPanelMode = .repositoryTerminal
         showUtilityPanel = true
-        tab.appendOutput("$ \(command)")
-        tab.isRunningCommand = true
-        let stableTabID = tab.id
-        let result = await shellRunner.run(command: command, workingDirectory: tab.cwdURL) { [stableTabID, model = self] line in
-            Task { @MainActor in
-                model.appendTerminalOutput(line, toTabID: stableTabID)
-            }
-        }
-        tab.isRunningCommand = false
-        tab.lastExitCode = result.exitCode
-        tab.appendOutput("[exit \(result.exitCode)]")
-        tab.commandInput = ""
+    }
+
+    /// Send a command to any terminal session, creating one if needed for a specific working directory.
+    /// Returns the session used, allowing callers to observe its state.
+    @discardableResult
+    func runCommandInTerminal(_ command: String, workingDirectory: URL, label: String) -> TerminalSession {
+        let contextKey = "cmd-\(workingDirectory.lastPathComponent)"
+        let tab = terminalManager.openTab(contextKey: contextKey, label: label, workingDirectory: workingDirectory)
+        utilityPanelMode = .repositoryTerminal
+        showUtilityPanel = true
+
+        tab.session.startIfNeeded()
+        tab.session.sendCommand(command)
+        return tab.session
     }
 
     func toggleEmulator() async {
@@ -483,32 +519,57 @@ final class AgentsInBlackAppModel {
 
     // MARK: - PiP Chat
 
-    func openPiPChat(for service: AIBServiceModel, initialPosition: CGPoint) {
-        guard service.serviceKind == .agent else { return }
-        if let index = openPiPChats.firstIndex(where: { $0.id == service.id }) {
-            openPiPChats[index].isExpanded = true
-            return
+    func openPiPChat(serviceID: String, sessionID: UUID) {
+        // Ensure topology mode so the FlowCanvas (and PiP overlay) is visible.
+        if detailSurfaceMode != .topology {
+            detailSurfaceMode = .topology
         }
-        openPiPChats.append(PiPItemState(
-            id: service.id,
-            isExpanded: true,
-            position: initialPosition
-        ))
+        pipManager.open(serviceID: serviceID, sessionID: sessionID)
     }
 
-    func closePiPChat(serviceID: String) {
-        openPiPChats.removeAll(where: { $0.id == serviceID })
+    // MARK: - Chat Session CRUD
+
+    func activeSession(for service: AIBServiceModel) -> ChatSession {
+        if let sessionID = activeSessionIDByService[service.id],
+           let session = chatSessionsByService[service.id]?.first(where: { $0.id == sessionID }) {
+            session.updateEndpoint(makeChatEndpoint(for: service))
+            return session
+        }
+        return createSession(for: service, activate: true)
     }
 
-    func chatStore(for service: AIBServiceModel) -> ChatStore {
+    @discardableResult
+    func createSession(for service: AIBServiceModel, activate: Bool) -> ChatSession {
         let endpoint = makeChatEndpoint(for: service)
-        if let existing = chatStores[service.id] {
-            existing.updateEndpoint(endpoint)
-            return existing
+        let session = ChatSession(serviceID: service.id, endpoint: endpoint)
+        var sessions = chatSessionsByService[service.id] ?? []
+        sessions.insert(session, at: 0)
+        chatSessionsByService[service.id] = sessions
+        if activate {
+            activeSessionIDByService[service.id] = session.id
         }
-        let store = ChatStore(endpoint: endpoint)
-        chatStores[service.id] = store
-        return store
+        return session
+    }
+
+    func session(serviceID: String, sessionID: UUID) -> ChatSession? {
+        chatSessionsByService[serviceID]?.first(where: { $0.id == sessionID })
+    }
+
+    func sessions(for service: AIBServiceModel) -> [ChatSession] {
+        chatSessionsByService[service.id] ?? []
+    }
+
+    func activateSession(_ sessionID: UUID, for service: AIBServiceModel) {
+        guard chatSessionsByService[service.id]?.contains(where: { $0.id == sessionID }) == true else { return }
+        activeSessionIDByService[service.id] = sessionID
+    }
+
+    func deleteSession(_ sessionID: UUID, for service: AIBServiceModel) {
+        chatSessionsByService[service.id]?.removeAll(where: { $0.id == sessionID })
+        if activeSessionIDByService[service.id] == sessionID {
+            activeSessionIDByService[service.id] = chatSessionsByService[service.id]?.first?.id
+        }
+        pipManager.close(sessionID: sessionID)
     }
 
     func canOpenChat(for service: AIBServiceModel) -> Bool {
@@ -726,28 +787,233 @@ final class AgentsInBlackAppModel {
         }
     }
 
-    func deployToCloudRun() {
+    func startDeploy() {
         guard let workspace else { return }
         if hasUnsavedFlowChanges {
             lastErrorMessage = "Save topology changes before deploying."
             return
         }
 
-        let services = workspace.services
-        let connections = flowConnections()
-        var planLines: [String] = ["Deploy Plan:"]
-        planLines.append("  Services: \(services.count)")
-        for service in services {
-            planLines.append("    - \(service.namespacedID) (\(service.serviceKind))")
+        // Check if cloud settings are configured before starting deploy flow.
+        // If not configured, show cloud settings first — deploy resumes after save.
+        do {
+            let provider = try DeploymentProviderRegistry.detect(workspaceRoot: workspace.rootURL.path)
+            if !configStore.isConfigured(
+                workspaceRoot: workspace.rootURL.path,
+                providerID: provider.providerID,
+                provider: provider
+            ) {
+                showCloudSettings = true
+                return
+            }
+        } catch {
+            // Provider detection failed — proceed and let the deploy pipeline surface the error
         }
-        planLines.append("  Connections: \(connections.count)")
-        for conn in connections {
-            planLines.append("    - \(conn.sourceServiceID) → \(conn.targetServiceID) [\(conn.kind.rawValue)]")
-        }
-        planLines.append("")
-        planLines.append("deploy apply is not yet implemented.")
 
-        lastErrorMessage = planLines.joined(separator: "\n")
+        beginDeployPipeline()
+    }
+
+    /// Resume deploy pipeline after cloud settings are saved.
+    func onCloudSettingsDismissed() {
+        guard let workspace else { return }
+
+        // Check if settings are now configured (user saved, not cancelled)
+        do {
+            let provider = try DeploymentProviderRegistry.detect(workspaceRoot: workspace.rootURL.path)
+            if configStore.isConfigured(
+                workspaceRoot: workspace.rootURL.path,
+                providerID: provider.providerID,
+                provider: provider
+            ) {
+                beginDeployPipeline()
+            }
+        } catch {
+            // Settings still not configured — do nothing
+        }
+
+        refreshEnvironmentStatus()
+    }
+
+    /// Open cloud settings from menu bar (independent of deploy flow).
+    func openCloudSettings() {
+        showCloudSettings = true
+    }
+
+    /// Run prerequisite tool-installation checks (Docker + cloud provider CLI)
+    /// and update toolbar indicators. Called on workspace load and cloud settings dismiss.
+    func selectDockerRuntime(_ runtime: DockerRuntime) {
+        preferredDockerRuntime = runtime
+        DockerRuntimeSettings.preferredRuntimeID = runtime.id
+    }
+
+    func launchDockerRuntime() {
+        guard let runtime = preferredDockerRuntime else { return }
+        NSWorkspace.shared.openApplication(
+            at: runtime.appURL,
+            configuration: NSWorkspace.OpenConfiguration()
+        ) { [weak self] _, _ in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
+                self?.refreshEnvironmentStatus()
+            }
+        }
+    }
+
+    func refreshEnvironmentStatus() {
+        // Detect installed Docker runtimes
+        installedDockerRuntimes = DockerRuntime.detectInstalled()
+        preferredDockerRuntime = DockerRuntimeSettings.resolvePreferred(from: installedDockerRuntimes)
+
+        guard let workspace else {
+            dockerCheckResult = nil
+            cloudProviderCheckResult = nil
+            detectedProvider = nil
+            return
+        }
+
+        environmentCheckTask?.cancel()
+        isCheckingEnvironment = true
+
+        environmentCheckTask = Task { [weak self] in
+            guard let self else { return }
+
+            let provider: any DeploymentProvider
+            do {
+                provider = try DeploymentProviderRegistry.detect(workspaceRoot: workspace.rootURL.path)
+            } catch {
+                self.isCheckingEnvironment = false
+                return
+            }
+
+            // Run prerequisite checks + Docker daemon check in parallel.
+            // prerequisiteCheckIDs only contains Phase 1 (dockerInstalled, gcloudInstalled),
+            // but toolbar needs dockerDaemonRunning too for accurate Docker status.
+            let dockerRelated: Set<PreflightCheckID> = [.dockerInstalled, .dockerDaemonRunning]
+            let toolbarCheckIDs = provider.prerequisiteCheckIDs.union(dockerRelated)
+            let checkers = provider.preflightCheckers().filter { toolbarCheckIDs.contains($0.checkID) }
+
+            let results = await withTaskGroup(
+                of: PreflightCheckResult.self,
+                returning: [PreflightCheckResult].self
+            ) { group in
+                for checker in checkers {
+                    group.addTask { await checker.run() }
+                }
+                var collected: [PreflightCheckResult] = []
+                for await result in group {
+                    collected.append(result)
+                }
+                return collected
+            }
+
+            guard !Task.isCancelled else { return }
+
+            // Docker status: worst of dockerInstalled and dockerDaemonRunning
+            let dockerInstalled = results.first(where: { $0.id == .dockerInstalled })
+            let dockerDaemon = results.first(where: { $0.id == .dockerDaemonRunning })
+            let dockerStatus: PreflightCheckResult? = {
+                guard let installed = dockerInstalled else { return nil }
+                if installed.isFailed { return installed }
+                if let daemon = dockerDaemon, daemon.isFailed { return daemon }
+                return installed
+            }()
+
+            let cloudPrereqID = provider.prerequisiteCheckIDs.first(where: { !dockerRelated.contains($0) })
+            let cloudResult = cloudPrereqID.flatMap { id in results.first(where: { $0.id == id }) }
+
+            self.detectedProvider = provider
+            self.dockerCheckResult = dockerStatus
+            self.cloudProviderCheckResult = cloudResult
+            self.isCheckingEnvironment = false
+        }
+    }
+
+    private func beginDeployPipeline() {
+        guard let workspace else { return }
+
+        showDeploySheet = true
+        deployPhase = .idle
+        startDeployEventStream()
+
+        Task {
+            do {
+                let provider = try DeploymentProviderRegistry.detect(workspaceRoot: workspace.rootURL.path)
+                let targetConfig = try AIBDeployService.loadTargetConfig(
+                    workspaceRoot: workspace.rootURL.path,
+                    providerID: provider.providerID
+                )
+                deployController.startPlan(
+                    workspaceRoot: workspace.rootURL.path,
+                    targetConfig: targetConfig,
+                    provider: provider
+                )
+            } catch {
+                deployPhase = .failed(AIBDeployError(
+                    phase: "config",
+                    message: error.localizedDescription
+                ))
+            }
+        }
+    }
+
+    /// Trigger sheet dismissal. Actual cleanup happens in `cleanupDeployState()`
+    /// via `.sheet(onDismiss:)`, ensuring ALL dismiss paths (button, Esc, click-outside)
+    /// go through the same cleanup.
+    func dismissDeploySheet() {
+        showDeploySheet = false
+    }
+
+    /// Cleanup deploy state. Called exclusively from `.sheet(onDismiss:)`.
+    func cleanupDeployState() {
+        deployController.reset()
+        deployPhase = .idle
+        deployEventsTask?.cancel()
+        deployEventsTask = nil
+    }
+
+    private func startDeployEventStream() {
+        deployEventsTask?.cancel()
+        deployEventsTask = Task { [weak self] in
+            guard let self else { return }
+            for await event in deployController.events() {
+                self.handleDeployEvent(event)
+            }
+        }
+    }
+
+    private func handleDeployEvent(_ event: AIBDeployEvent) {
+        switch event {
+        case .phaseChanged(let phase):
+            self.deployPhase = phase
+            appendDeployPhaseLog(phase)
+            if case .applying = phase {
+                showUtilityPanel = true
+                utilityPanelMode = .aibRuntime
+            }
+        case .log(let entry):
+            let servicePrefix = entry.serviceID.map { "[\($0)] " } ?? ""
+            appendDeployLogLine(level: entry.level, message: "\(servicePrefix)\(entry.message)")
+        }
+    }
+
+    private func appendDeployPhaseLog(_ phase: AIBDeployPhase) {
+        switch phase {
+        case .idle:
+            break
+        case .preflight:
+            appendDeployLogLine(level: .info, message: "Running preflight checks...")
+        case .planning:
+            appendDeployLogLine(level: .info, message: "Generating deploy plan...")
+        case .reviewing:
+            appendDeployLogLine(level: .info, message: "Deploy plan ready for review")
+        case .applying:
+            appendDeployLogLine(level: .info, message: "Applying deploy plan...")
+        case .completed(let result):
+            appendDeployLogLine(level: .info, message: "Deploy completed: \(result.serviceResults.count) service(s)")
+        case .failed(let error):
+            appendDeployLogLine(level: .error, message: "Deploy failed (\(error.phase)): \(error.message)")
+        case .cancelled:
+            appendDeployLogLine(level: .warning, message: "Deploy cancelled")
+        }
     }
 
     private func positionedFlowNodes(_ services: [AIBServiceModel], x: CGFloat) -> [FlowNodeModel] {
@@ -761,30 +1027,12 @@ final class AgentsInBlackAppModel {
         }
     }
 
-    func selectedTerminalTab() -> TerminalTabModel? {
-        if let repo = selectedRepo() {
-            return terminalTabs.first(where: { $0.repoID == repo.id })
-        }
-        if let selectedRepoIDForFiles {
-            return terminalTabs.first(where: { $0.repoID == selectedRepoIDForFiles })
-        }
-        if let firstRepoID = workspace?.repos.first?.id {
-            return terminalTabs.first(where: { $0.repoID == firstRepoID })
-        }
-        return nil
-    }
-
     func aibLogOutput() -> String {
         emulatorOutput
     }
 
     func clearAIBLogs() {
         emulatorOutput = ""
-    }
-
-    func clearSelectedTerminalOutput() {
-        guard let tab = selectedTerminalTab() else { return }
-        tab.output = ""
     }
 
     func toggleUtilityPanelVisibility() {
@@ -878,10 +1126,6 @@ final class AgentsInBlackAppModel {
         serviceSnapshotsByID[service.namespacedID]
     }
 
-    func chatSessionSnapshot(for service: AIBServiceModel) -> ChatSessionState {
-        chatSessionsByServiceID[service.id] ?? ChatSessionState()
-    }
-
     func rawDraftSnapshot(for service: AIBServiceModel) -> RawRequestDraft {
         rawDraftByServiceID[service.id] ?? RawRequestDraft()
     }
@@ -910,19 +1154,6 @@ final class AgentsInBlackAppModel {
         initializeWorkbenchStateIfNeeded(for: service)
     }
 
-    func chatSession(for service: AIBServiceModel) -> ChatSessionState {
-        if let existing = chatSessionsByServiceID[service.id] {
-            return existing
-        }
-        let initial = ChatSessionState()
-        chatSessionsByServiceID[service.id] = initial
-        return initial
-    }
-
-    func setChatSession(_ session: ChatSessionState, for service: AIBServiceModel) {
-        chatSessionsByServiceID[service.id] = session
-    }
-
     func rawDraft(for service: AIBServiceModel) -> RawRequestDraft {
         if let existing = rawDraftByServiceID[service.id] {
             return existing
@@ -947,7 +1178,7 @@ final class AgentsInBlackAppModel {
     func clearWorkbench(for service: AIBServiceModel) {
         switch effectiveWorkbenchMode(for: service) {
         case .chat:
-            resetChatSession(for: service)
+            activeSession(for: service).reset()
         case .raw:
             rawDraftByServiceID[service.id] = RawRequestDraft()
         }
@@ -975,109 +1206,6 @@ final class AgentsInBlackAppModel {
             return "ui.chat.response_message_json_path is required."
         }
         return nil
-    }
-
-    func sendChatMessage() async {
-        guard let service = primaryWorkbenchService() else { return }
-        await sendChatMessage(for: service)
-    }
-
-    func sendChatMessage(for service: AIBServiceModel) async {
-        initializeWorkbenchStateIfNeeded(for: service)
-        var session = chatSession(for: service)
-        let text = session.composerText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
-
-        guard let port = effectiveGatewayPort(for: service) else {
-            appendChatEvent(.error("Start the emulator before sending chat messages."), to: service, latencyMs: nil, statusCode: nil, requestID: nil)
-            return
-        }
-
-        guard let profile = service.uiProfile?.chatProfile else {
-            appendChatEvent(.error("Chat is not configured for this service. Add ui.chat to the manifest or use Raw mode."), to: service, latencyMs: nil, statusCode: nil, requestID: nil)
-            return
-        }
-
-        if profile.streaming {
-            appendChatEvent(.error("Streaming chat is not supported yet. Use Raw mode."), to: service, latencyMs: nil, statusCode: nil, requestID: nil)
-            return
-        }
-
-        appendChatEvent(.user(text), to: service, latencyMs: nil, statusCode: nil, requestID: nil)
-        session = chatSession(for: service)
-        session.composerText = ""
-        session.isSending = true
-        setChatSession(session, for: service)
-
-        let requestPath = normalizedPath(profile.path)
-        let urlString = "http://127.0.0.1:\(port)\(service.mountPath)\(requestPath)"
-        guard let url = URL(string: urlString) else {
-            appendChatEvent(.error("Invalid chat URL: \(urlString)"), to: service, latencyMs: nil, statusCode: nil, requestID: nil)
-            finishChatSend(for: service)
-            return
-        }
-
-        var payload: [String: Any] = [:]
-        do {
-            try setJSONValue(text, path: profile.requestMessageJSONPath, in: &payload)
-        } catch {
-            appendChatEvent(.error("Invalid request_message_json_path: \(error.localizedDescription)"), to: service, latencyMs: nil, statusCode: nil, requestID: nil)
-            finishChatSend(for: service)
-            return
-        }
-
-        let bodyData: Data
-        do {
-            bodyData = try JSONSerialization.data(withJSONObject: payload, options: [])
-        } catch {
-            appendChatEvent(.error("Failed to encode chat payload: \(error.localizedDescription)"), to: service, latencyMs: nil, statusCode: nil, requestID: nil)
-            finishChatSend(for: service)
-            return
-        }
-
-        var request = URLRequest(url: url)
-        request.httpMethod = profile.method
-        request.httpBody = bodyData
-        request.setValue(profile.requestContentType, forHTTPHeaderField: "Content-Type")
-
-        let startedAt = Date()
-        do {
-            let (data, response) = try await URLSession.shared.data(for: request)
-            guard let httpResponse = response as? HTTPURLResponse else {
-                throw ServiceRequestError.invalidResponse
-            }
-            let latency = Int(Date().timeIntervalSince(startedAt) * 1000)
-            let requestID = httpResponse.value(forHTTPHeaderField: "X-Request-Id")
-            let headersText = httpResponse.allHeaderFields.map { "\($0.key): \($0.value)" }.sorted().joined(separator: "\n")
-            let bodyText = String(data: data, encoding: .utf8) ?? "<\(data.count) bytes binary>"
-            let responseJSON = try decodeJSONObject(from: data)
-            let message = try extractJSONString(path: profile.responseMessageJSONPath, from: responseJSON)
-            let trace = RawRequestTrace(
-                method: profile.method,
-                urlString: urlString,
-                requestHeadersText: "Content-Type: \(profile.requestContentType)",
-                requestBodyText: String(data: bodyData, encoding: .utf8) ?? "",
-                response: ServiceRequestResult(
-                    urlString: urlString,
-                    statusCode: httpResponse.statusCode,
-                    headersText: headersText,
-                    bodyText: bodyText,
-                    latencyMilliseconds: latency
-                )
-            )
-            appendChatEvent(.assistant(message), to: service, latencyMs: latency, statusCode: httpResponse.statusCode, requestID: requestID)
-            var updatedSession = chatSession(for: service)
-            updatedSession.lastRequestTrace = trace
-            setChatSession(updatedSession, for: service)
-        } catch {
-            appendChatEvent(.error(error.localizedDescription), to: service, latencyMs: nil, statusCode: nil, requestID: nil)
-        }
-
-        finishChatSend(for: service)
-    }
-
-    func resetChatSession(for service: AIBServiceModel) {
-        chatSessionsByServiceID[service.id] = ChatSessionState()
     }
 
     func sendRawRequest() async {
@@ -1200,13 +1328,15 @@ final class AgentsInBlackAppModel {
         setRawDraft(draft, for: service)
     }
 
-    private func appendTerminalOutput(_ text: String, toTabID tabID: String) {
-        guard let tab = terminalTabs.first(where: { $0.id == tabID }) else { return }
-        tab.appendOutput(text)
-    }
-
     private func appendAIBSystemLogLine(_ message: String) {
         emulatorOutput.append("[aib][app][info] \(message)\n")
+        if emulatorOutput.count > 200_000 {
+            emulatorOutput.removeFirst(emulatorOutput.count - 200_000)
+        }
+    }
+
+    private func appendDeployLogLine(level: Logger.Level, message: String) {
+        emulatorOutput.append("[aib][deploy][\(level)] \(message)\n")
         if emulatorOutput.count > 200_000 {
             emulatorOutput.removeFirst(emulatorOutput.count - 200_000)
         }
@@ -1254,9 +1384,6 @@ final class AgentsInBlackAppModel {
     private func initializeWorkbenchStateIfNeeded(for service: AIBServiceModel) {
         if rawDraftByServiceID[service.id] == nil {
             rawDraftByServiceID[service.id] = RawRequestDraft()
-        }
-        if chatSessionsByServiceID[service.id] == nil {
-            chatSessionsByServiceID[service.id] = ChatSessionState()
         }
         if workbenchModeByServiceID[service.id] == nil, let preferred = service.uiProfile?.primaryMode {
             workbenchModeByServiceID[service.id] = preferred
@@ -1308,79 +1435,6 @@ final class AgentsInBlackAppModel {
             headers.append((String(name), String(value)))
         }
         return headers
-    }
-
-    private func appendChatEvent(
-        _ kind: ChatMessageKind,
-        to service: AIBServiceModel,
-        latencyMs: Int?,
-        statusCode: Int?,
-        requestID: String?
-    ) {
-        var session = chatSession(for: service)
-        session.messages.append(
-            ChatMessageItem(
-                role: kind.defaultRole,
-                text: kind.text,
-                timestamp: Date(),
-                latencyMs: latencyMs,
-                statusCode: statusCode,
-                requestID: requestID,
-                kind: kind
-            )
-        )
-        setChatSession(session, for: service)
-    }
-
-    private func finishChatSend(for service: AIBServiceModel) {
-        var session = chatSession(for: service)
-        session.isSending = false
-        setChatSession(session, for: service)
-    }
-
-    private func setJSONValue(_ value: String, path: String, in object: inout [String: Any]) throws {
-        let components = path.split(separator: ".").map(String.init).filter { !$0.isEmpty }
-        guard !components.isEmpty else {
-            throw ChatProfilePathError.emptyPath
-        }
-        try setJSONValue(value, components: components[...], in: &object)
-    }
-
-    private func setJSONValue(_ value: String, components: ArraySlice<String>, in object: inout [String: Any]) throws {
-        guard let head = components.first else { return }
-        if components.count == 1 {
-            object[head] = value
-            return
-        }
-        var nested = object[head] as? [String: Any] ?? [:]
-        try setJSONValue(value, components: components.dropFirst(), in: &nested)
-        object[head] = nested
-    }
-
-    private func decodeJSONObject(from data: Data) throws -> [String: Any] {
-        let json = try JSONSerialization.jsonObject(with: data, options: [])
-        guard let object = json as? [String: Any] else {
-            throw ChatProfilePathError.nonObjectResponse
-        }
-        return object
-    }
-
-    private func extractJSONString(path: String, from object: [String: Any]) throws -> String {
-        let components = path.split(separator: ".").map(String.init).filter { !$0.isEmpty }
-        guard !components.isEmpty else {
-            throw ChatProfilePathError.emptyPath
-        }
-        var current: Any = object
-        for key in components {
-            guard let dictionary = current as? [String: Any], let next = dictionary[key] else {
-                throw ChatProfilePathError.missingKey(key)
-            }
-            current = next
-        }
-        guard let text = current as? String else {
-            throw ChatProfilePathError.nonStringValue(path)
-        }
-        return text
     }
 
     private func extractServiceID(from entry: AIBEmulatorLogEntry) -> String? {
@@ -1505,6 +1559,7 @@ final class AgentsInBlackAppModel {
                 serviceLogOutputByServiceID[serviceID] = output
             }
         case .lifecycleChanged(let lifecycle):
+            handleLifecycleTransitionForAnnouncement(next: lifecycle)
             switch lifecycle {
             case .stopped:
                 emulatorState = .stopped
@@ -1537,6 +1592,26 @@ final class AgentsInBlackAppModel {
         case .serviceSnapshotsChanged(let snapshots):
             serviceSnapshotsByID = Dictionary(uniqueKeysWithValues: snapshots.map { ($0.serviceID, $0) })
             rebuildSidebarRepoStatuses()
+        }
+    }
+
+    private func handleLifecycleTransitionForAnnouncement(next lifecycle: AIBEmulatorLifecycleState) {
+        let previous = lastEmulatorLifecycleState
+        lastEmulatorLifecycleState = lifecycle
+
+        guard let previous else {
+            return
+        }
+
+        switch (previous, lifecycle) {
+        case (.starting, .running(_, let port)):
+            runtimeAnnouncementCenter.enqueue(.runtimeStarted(port: port))
+        case (.stopping, .stopped), (.running(_, _), .stopped):
+            runtimeAnnouncementCenter.enqueue(.runtimeStopped())
+        case (_, .failed(let message)):
+            runtimeAnnouncementCenter.enqueue(.runtimeStartFailed(message))
+        default:
+            break
         }
     }
 
@@ -1607,6 +1682,7 @@ enum UtilityPanelMode: String, CaseIterable, Identifiable {
     case aibRuntime
     case serviceRuntime
     case repositoryTerminal
+    case connections
 
     var id: String { rawValue }
 
@@ -1618,6 +1694,8 @@ enum UtilityPanelMode: String, CaseIterable, Identifiable {
             return "Service Runtime"
         case .repositoryTerminal:
             return "Repository Terminal"
+        case .connections:
+            return "Connections"
         }
     }
 }
@@ -1700,14 +1778,6 @@ struct RawRequestDraft {
     var lastTrace: RawRequestTrace?
 }
 
-struct ChatSessionState {
-    var messages: [ChatMessageItem] = []
-    var composerText: String = ""
-    var isSending: Bool = false
-    var lastRequestTrace: RawRequestTrace?
-}
-
-
 enum ServiceRequestError: LocalizedError {
     case invalidHeaderLine(String)
     case invalidResponse
@@ -1718,26 +1788,6 @@ enum ServiceRequestError: LocalizedError {
             return "Invalid header line: \(line)"
         case .invalidResponse:
             return "Invalid HTTP response"
-        }
-    }
-}
-
-enum ChatProfilePathError: LocalizedError {
-    case emptyPath
-    case nonObjectResponse
-    case missingKey(String)
-    case nonStringValue(String)
-
-    var errorDescription: String? {
-        switch self {
-        case .emptyPath:
-            return "JSON path must not be empty."
-        case .nonObjectResponse:
-            return "Chat response must be a JSON object."
-        case .missingKey(let key):
-            return "Response JSON is missing key: \(key)"
-        case .nonStringValue(let path):
-            return "Response value at path '\(path)' is not a string."
         }
     }
 }

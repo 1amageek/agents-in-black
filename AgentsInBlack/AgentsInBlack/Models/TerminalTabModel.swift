@@ -1,36 +1,25 @@
 import Foundation
 import Observation
 
+/// A terminal tab backed by a `TerminalSession`.
+/// Each tab owns an independent shell process.
+/// `contextKey` allows open-or-reuse semantics for sidebar navigation.
 @MainActor
 @Observable
 final class TerminalTabModel: Identifiable {
     let id: String
-    let repoID: String
+    let contextKey: String?
     let repoName: String
-    let cwdURL: URL
+    let session: TerminalSession
 
-    var title: String
-    var commandInput: String
-    var output: String
-    var isRunningCommand: Bool
-    var lastExitCode: Int32?
-
-    init(repoID: String, repoName: String, cwdURL: URL) {
-        self.id = repoID
-        self.repoID = repoID
+    init(id: String, contextKey: String?, repoName: String, workingDirectory: URL) {
+        self.id = id
+        self.contextKey = contextKey
         self.repoName = repoName
-        self.cwdURL = cwdURL
-        self.title = repoName
-        self.commandInput = ""
-        self.output = ""
-        self.isRunningCommand = false
-        self.lastExitCode = nil
-    }
-
-    func appendOutput(_ text: String) {
-        output.append(text)
-        if !output.hasSuffix("\n") {
-            output.append("\n")
-        }
+        self.session = TerminalSession(
+            id: id,
+            label: repoName,
+            workingDirectory: workingDirectory
+        )
     }
 }

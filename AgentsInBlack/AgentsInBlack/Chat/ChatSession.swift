@@ -1,20 +1,30 @@
 import Foundation
 
-/// A standalone, @Observable chat session manager.
+/// A single chat conversation session with an agent service.
 ///
-/// Each instance manages a single chat conversation against one HTTP endpoint.
+/// Each instance manages one conversation against one HTTP endpoint.
 /// It is independent of `AgentsInBlackAppModel` and can be used in any context
-/// (PiP panel, sheet, inspector, etc.).
+/// (PiP panel, workbench, inspector, etc.).
 @MainActor
 @Observable
-final class ChatStore {
+final class ChatSession: Identifiable {
+    let id: UUID
+    let serviceID: String
+    let createdAt: Date
+    private(set) var title: String
+
     private(set) var messages: [ChatMessageItem] = []
     var composerText: String = ""
     private(set) var isSending: Bool = false
+    var selectedMessageID: UUID?
 
     private(set) var endpoint: ChatEndpoint
 
-    init(endpoint: ChatEndpoint) {
+    init(id: UUID = UUID(), serviceID: String, endpoint: ChatEndpoint, title: String = "New Chat") {
+        self.id = id
+        self.serviceID = serviceID
+        self.createdAt = Date()
+        self.title = title
         self.endpoint = endpoint
     }
 
@@ -23,6 +33,10 @@ final class ChatStore {
     func updateEndpoint(_ newEndpoint: ChatEndpoint) {
         guard endpoint != newEndpoint else { return }
         endpoint = newEndpoint
+    }
+
+    func updateTitle(_ newTitle: String) {
+        title = newTitle
     }
 
     func send() async {
@@ -71,13 +85,15 @@ final class ChatStore {
             }
             let latency = Int(Date().timeIntervalSince(startedAt) * 1000)
             let requestID = httpResponse.value(forHTTPHeaderField: "X-Request-Id")
+            let rawBody = String(data: data, encoding: .utf8)
             let responseJSON = try Self.decodeJSONObject(from: data)
             let message = try Self.extractJSONString(path: endpoint.responseMessageJSONPath, from: responseJSON)
             appendMessage(
                 .assistant(message),
                 latencyMs: latency,
                 statusCode: httpResponse.statusCode,
-                requestID: requestID
+                requestID: requestID,
+                rawResponseBody: rawBody
             )
         } catch {
             appendMessage(.error(error.localizedDescription))
@@ -88,6 +104,24 @@ final class ChatStore {
         messages = []
         composerText = ""
         isSending = false
+        selectedMessageID = nil
+    }
+
+    // MARK: - Selection
+
+    func selectMessage(_ id: UUID?) {
+        selectedMessageID = (selectedMessageID == id) ? nil : id
+    }
+
+    var selectedMessage: ChatMessageItem? {
+        guard let id = selectedMessageID else { return nil }
+        return messages.first(where: { $0.id == id })
+    }
+
+    // MARK: - Session Metadata
+
+    var lastMessageAt: Date? {
+        messages.last?.timestamp
     }
 
     // MARK: - Internal
@@ -96,7 +130,8 @@ final class ChatStore {
         _ kind: ChatMessageKind,
         latencyMs: Int? = nil,
         statusCode: Int? = nil,
-        requestID: String? = nil
+        requestID: String? = nil,
+        rawResponseBody: String? = nil
     ) {
         messages.append(
             ChatMessageItem(
@@ -106,9 +141,18 @@ final class ChatStore {
                 latencyMs: latencyMs,
                 statusCode: statusCode,
                 requestID: requestID,
-                kind: kind
+                kind: kind,
+                rawResponseBody: rawResponseBody
             )
         )
+        deriveTitleIfNeeded()
+    }
+
+    private func deriveTitleIfNeeded() {
+        guard title == "New Chat" else { return }
+        guard let firstUserMessage = messages.first(where: { $0.role == .user }) else { return }
+        let truncated = String(firstUserMessage.text.prefix(40))
+        title = truncated.count < firstUserMessage.text.count ? truncated + "..." : truncated
     }
 
     // MARK: - JSON Helpers
@@ -116,7 +160,7 @@ final class ChatStore {
     private static func setJSONValue(_ value: String, path: String, in object: inout [String: Any]) throws {
         let components = path.split(separator: ".").map(String.init).filter { !$0.isEmpty }
         guard !components.isEmpty else {
-            throw ChatStoreError.emptyPath
+            throw ChatSessionError.emptyPath
         }
         try setJSONValue(value, components: components[...], in: &object)
     }
@@ -135,7 +179,7 @@ final class ChatStore {
     private static func decodeJSONObject(from data: Data) throws -> [String: Any] {
         let json = try JSONSerialization.jsonObject(with: data, options: [])
         guard let object = json as? [String: Any] else {
-            throw ChatStoreError.nonObjectResponse
+            throw ChatSessionError.nonObjectResponse
         }
         return object
     }
@@ -143,17 +187,17 @@ final class ChatStore {
     private static func extractJSONString(path: String, from object: [String: Any]) throws -> String {
         let components = path.split(separator: ".").map(String.init).filter { !$0.isEmpty }
         guard !components.isEmpty else {
-            throw ChatStoreError.emptyPath
+            throw ChatSessionError.emptyPath
         }
         var current: Any = object
         for key in components {
             guard let dictionary = current as? [String: Any], let next = dictionary[key] else {
-                throw ChatStoreError.missingKey(key)
+                throw ChatSessionError.missingKey(key)
             }
             current = next
         }
         guard let text = current as? String else {
-            throw ChatStoreError.nonStringValue(path)
+            throw ChatSessionError.nonStringValue(path)
         }
         return text
     }
@@ -161,7 +205,7 @@ final class ChatStore {
 
 // MARK: - Errors
 
-enum ChatStoreError: LocalizedError {
+enum ChatSessionError: LocalizedError {
     case emptyPath
     case nonObjectResponse
     case missingKey(String)

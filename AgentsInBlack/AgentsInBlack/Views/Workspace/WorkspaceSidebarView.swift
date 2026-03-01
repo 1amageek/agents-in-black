@@ -16,7 +16,10 @@ struct WorkspaceSidebarView: View {
         .onAppear {
             normalizeSidebarSelectionIfNeeded()
         }
-        .onChange(of: model.selection) { _, _ in
+        .onChange(of: model.selection) { _, newValue in
+            if let newValue {
+                model.applySelectionSideEffects(newValue)
+            }
             normalizeSidebarSelectionIfNeeded()
         }
     }
@@ -32,6 +35,7 @@ struct WorkspaceSidebarView: View {
         } header: {
             HStack(spacing: 8) {
                 Text("Workspace")
+                Spacer()
                 Button {
                     model.addRepositoryPicker()
                 } label: {
@@ -40,10 +44,11 @@ struct WorkspaceSidebarView: View {
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
+                .clipShape(Capsule())
                 .help("Add Repository to Workspace")
                 .disabled(model.workspace == nil)
-                Spacer()
             }
+            .padding(.trailing, 8)
         }
     }
 
@@ -207,7 +212,7 @@ struct WorkspaceSidebarView: View {
                 model.select(.repo(repo.id))
                 model.openInEditor()
             } label: {
-                Image(systemName: "square.and.arrow.up.right")
+                Image(systemName: "arrow.up.forward.app")
                     .foregroundStyle(.secondary)
             }
             .buttonStyle(.plain)

@@ -1,5 +1,5 @@
 {
-  "originHash" : "b85e4d9a66b0e551afb53861d520d256c5e524fb9ca4686367811965cb44007c",
+  "originHash" : "bdcd4944321ea8b3f191a4556f90607c1b8e0d52538f4803a2a0f4865c264a36",
   "pins" : [
     {
       "identity" : "async-http-client",
@@ -17,6 +17,15 @@
       "state" : {
         "revision" : "87e50f483c54e6efd60e885f7f5aa946cee68023",
         "version" : "1.2.1"
+      }
+    },
+    {
+      "identity" : "swift-argument-parser",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/apple/swift-argument-parser",
+      "state" : {
+        "revision" : "c5d11a805e765f52ba34ec7284bd4fcd6ba68615",
+        "version" : "1.7.0"
       }
     },
     {
@@ -97,7 +106,7 @@
       "location" : "https://github.com/1amageek/swift-flow.git",
       "state" : {
         "branch" : "main",
-        "revision" : "9b5e0719f14cefab3f2e70bff0c63872f25d300f"
+        "revision" : "4b7b4f7bba69c4e0e2e799b43cbd99b84b5ea4a9"
       }
     },
     {
@@ -206,6 +215,15 @@
       "state" : {
         "revision" : "7c6ad0fc39d0763e0b699210e4124afd5041c5df",
         "version" : "1.6.4"
+      }
+    },
+    {
+      "identity" : "swiftterm",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/migueldeicaza/SwiftTerm.git",
+      "state" : {
+        "revision" : "b1262db5b6bea699a8260a8c66999436c508ca56",
+        "version" : "1.11.2"
       }
     },
     {

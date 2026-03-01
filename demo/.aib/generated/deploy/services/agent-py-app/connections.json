@@ -1,0 +1,18 @@
+{
+  "a2a_agents" : [
+
+  ],
+  "mcp_servers" : [
+    {
+      "resolved_url" : "https:\/\/mcp-node-web-us-central1.a.run.app\/mcp",
+      "service_ref" : "mcp-node\/web",
+      "transport" : "streamable_http"
+    },
+    {
+      "resolved_url" : "https:\/\/mcp-web-web-us-central1.a.run.app\/mcp",
+      "service_ref" : "mcp-web\/web",
+      "transport" : "streamable_http"
+    }
+  ],
+  "service_id" : "agent-py\/app"
+}

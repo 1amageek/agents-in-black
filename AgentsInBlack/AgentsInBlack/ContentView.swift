@@ -26,19 +26,12 @@ struct ContentView: View {
                         }
                         .help(model.emulatorState.isRunning ? "Stop Emulator" : "Run Emulator")
                         .disabled(model.emulatorState.isBusy || model.workspace == nil)
-
-                        Button {
-                            model.deployToCloudRun()
-                        } label: {
-                            Label("Deploy", systemImage: "icloud.and.arrow.up.fill")
-                        }
-                        .help("Deploy to Cloud Run")
-                        .disabled(model.detailSurfaceMode != .topology || model.workspace == nil)
                     }
                 }
         } detail: {
             detailContent
                 .navigationTitle(windowHeaderTitle)
+                .toolbarTitleDisplayMode(.inline)
         }
         .inspector(isPresented: $model.showInspector) {
             SelectionInspectorView(model: model)
@@ -57,32 +50,18 @@ struct ContentView: View {
             }
 
             ToolbarItem(placement: .principal) {
-                WorkspaceHeaderView(model: model)
+                ToolbarActivityView(model: model)
+                    .frame(minWidth: 480)
             }
 
             ToolbarItem(placement: .principal) {
-                IssueCountButtonView(
-                    severity: .error,
-                    count: model.issueCount(for: .error),
-                    label: "Errors",
-                    action: { model.showIssueList(filter: .error) }
-                )
-                IssueCountButtonView(
-                    severity: .warning,
-                    count: model.issueCount(for: .warning),
-                    label: "Warnings",
-                    action: { model.showIssueList(filter: .warning) }
-                )
-            }
-
-            ToolbarItemGroup(placement: .secondaryAction) {
                 Button {
-                    model.openInEditor()
+                    model.startDeploy()
                 } label: {
-                    Label("Open Editor", systemImage: "arrow.up.right.square")
+                    Label("Deploy", systemImage: "icloud.and.arrow.up.fill")
                 }
-                .disabled(model.workspace == nil)
-                .help("Open selected repo/file in external editor")
+                .help("Deploy to Cloud Run")
+                .disabled(model.detailSurfaceMode != .topology || model.workspace == nil)
             }
 
             ToolbarItem(placement: .primaryAction) {
@@ -103,6 +82,25 @@ struct ContentView: View {
         .onOpenURL { url in
             model.openIncomingDirectory(url)
         }
+        .sheet(isPresented: $model.showDeploySheet, onDismiss: {
+            model.cleanupDeployState()
+        }) {
+            DeploySheet(model: model)
+        }
+        .sheet(isPresented: $model.showCloudSettings, onDismiss: {
+            model.onCloudSettingsDismissed()
+        }) {
+            if let workspace = model.workspace {
+                CloudSettingsView(
+                    workspaceRootPath: workspace.rootURL.path,
+                    onDismiss: { model.showCloudSettings = false }
+                )
+            }
+        }
+        .overlay {
+            RuntimeAnnouncementOverlay(center: model.runtimeAnnouncementCenter)
+                .zIndex(10_000)
+        }
     }
 
     @ViewBuilder
@@ -120,17 +118,17 @@ struct ContentView: View {
                 .buttonStyle(.borderedProminent)
             }
         } else {
-            switch model.detailSurfaceMode {
-            case .topology:
-                FlowCanvasView(model: model)
-            case .workbench:
-                CollapsibleSplitView(isExpanded: $model.showUtilityPanel) {
+            CollapsibleSplitView(isExpanded: $model.showUtilityPanel) {
+                switch model.detailSurfaceMode {
+                case .topology:
+                    FlowCanvasView(model: model)
+                case .workbench:
                     ServiceWorkbenchView(model: model)
-                } content: {
-                    UtilityPanelView(model: model)
-                } header: {
-                    UtilityPanelHeaderContent(model: model)
                 }
+            } content: {
+                UtilityPanelView(model: model)
+            } header: {
+                UtilityPanelHeaderContent(model: model)
             }
         }
     }
@@ -152,13 +150,7 @@ struct ContentView: View {
     }
 
     private var windowHeaderTitle: String {
-        if let repo = model.selectedRepo() {
-            return repo.name
-        }
-        if let workspace = model.workspace {
-            return workspace.displayName
-        }
-        return ""
+        model.workspace?.displayName ?? ""
     }
 }
 

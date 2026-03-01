@@ -295,7 +295,7 @@ struct AgentSwiftServer {
 
             let response = try await session.respond(to: chatReq.message)
             return try encodedResponse(
-                ChatResponse(body: String(describing: response), service: serviceID)
+                ChatResponse(body: response.content, service: serviceID)
             )
         }
 

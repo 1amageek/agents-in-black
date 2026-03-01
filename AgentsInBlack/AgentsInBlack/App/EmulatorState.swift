@@ -23,7 +23,7 @@ enum EmulatorState: Equatable {
 
     var label: String {
         switch self {
-        case .stopped: return "Stopped"
+        case .stopped: return "Ready"
         case .starting: return "Starting"
         case .running(_, let port):
             if let port {

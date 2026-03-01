@@ -11,10 +11,9 @@ struct UtilityMonospacedOutputView: View {
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                Text(displayText)
+                Text(coloredOutput)
                     .font(.system(.callout, design: .monospaced))
                     .lineSpacing(3)
-                    .foregroundStyle(isPlaceholder ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(12)
@@ -29,31 +28,76 @@ struct UtilityMonospacedOutputView: View {
         }
     }
 
-    private var displayText: String {
+    // MARK: - Colored Output
+
+    private var coloredOutput: AttributedString {
         if output.isEmpty {
-            return emptyMessage
+            var attr = AttributedString(emptyMessage)
+            attr.foregroundColor = .secondary
+            return attr
         }
 
         let query = normalizedFilter
-        guard !query.isEmpty else { return output }
-
-        let filteredLines = output.split(separator: "\n", omittingEmptySubsequences: false)
-            .filter { line in
-                String(line).localizedStandardContains(query)
+        let lines: [Substring]
+        if query.isEmpty {
+            lines = output.split(separator: "\n", omittingEmptySubsequences: false)
+        } else {
+            lines = output.split(separator: "\n", omittingEmptySubsequences: false)
+                .filter { String($0).localizedStandardContains(query) }
+            if lines.isEmpty {
+                var attr = AttributedString(noMatchesMessage)
+                attr.foregroundColor = .secondary
+                return attr
             }
-
-        if filteredLines.isEmpty {
-            return noMatchesMessage
         }
-        return filteredLines.joined(separator: "\n")
+
+        var result = AttributedString()
+        for (index, line) in lines.enumerated() {
+            let lineStr = String(line)
+            let suffix = index < lines.count - 1 ? "\n" : ""
+            var attrLine = AttributedString(lineStr + suffix)
+            attrLine.foregroundColor = Self.lineColor(lineStr)
+            result.append(attrLine)
+        }
+        return result
     }
 
     private var normalizedFilter: String {
         filterText.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private var isPlaceholder: Bool {
-        if output.isEmpty { return true }
-        return !normalizedFilter.isEmpty && displayText == noMatchesMessage
+    // MARK: - Log Level Color
+
+    private static func lineColor(_ line: String) -> Color {
+        let linePrefix = String(line.prefix(60))
+
+        // error / critical
+        if linePrefix.contains(" error ") || linePrefix.contains("[error]")
+            || linePrefix.contains(" critical ") || linePrefix.contains("[critical]")
+        {
+            return .red
+        }
+
+        // warning
+        if linePrefix.contains(" warning ") || linePrefix.contains("[warning]") {
+            return .yellow
+        }
+
+        // debug / trace
+        if linePrefix.contains(" debug ") || linePrefix.contains("[debug]")
+            || linePrefix.contains(" trace ") || linePrefix.contains("[trace]")
+        {
+            return .secondary
+        }
+
+        // JSON gateway logs — HTTP 5xx / 4xx
+        if line.contains("\"status\":5") {
+            return .red
+        }
+        if line.contains("\"status\":4") {
+            return .orange
+        }
+
+        return .primary
     }
 }

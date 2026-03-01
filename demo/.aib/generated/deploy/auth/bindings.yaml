@@ -1,0 +1,17 @@
+# Generated auth bindings
+- source: agent-swift-app
+  target: mcp-web-web
+  role: roles/run.invoker
+  member: serviceAccount:agent-swift-app@vi-dev-b8a52.iam.gserviceaccount.com
+- source: agent-py-app
+  target: mcp-node-web
+  role: roles/run.invoker
+  member: serviceAccount:agent-py-app@vi-dev-b8a52.iam.gserviceaccount.com
+- source: agent-py-app
+  target: mcp-web-web
+  role: roles/run.invoker
+  member: serviceAccount:agent-py-app@vi-dev-b8a52.iam.gserviceaccount.com
+- source: agent-swift-app
+  target: mcp-node-web
+  role: roles/run.invoker
+  member: serviceAccount:agent-swift-app@vi-dev-b8a52.iam.gserviceaccount.com

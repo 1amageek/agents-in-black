@@ -200,6 +200,13 @@ workspace.yaml  ──→  aib deploy plan   ──→  Show: services, connecti
 - System/runtime errors and request-level errors must have separate display paths
 - Inspector shows selection details only — never use it as the primary log/error surface
 
+### When modifying Deploy or Provider
+- **Provider-specific check IDs, service names, CLI commands をハードコードしない** — すべて `DeploymentProvider` protocol 経由で取得する
+- Check ID のフィルタリングは `provider.preflightCheckers()` や `provider.prerequisiteCheckIDs` から動的に導出する — `[.gcloudInstalled, ...]` のようなリテラル列挙は禁止
+- Docker は全 Provider 共通の依存なので `PreflightCheckID.dockerInstalled` / `.dockerDaemonRunning` の直接参照は許容する
+- UI が Provider 情報を表示する場合は `provider.displayName` を使う — "GCP" 等の文字列リテラルを埋め込まない
+- 新しい Provider を追加する際は `DeploymentProvider` を実装し `DeploymentProviderRegistry` に登録するだけで、App / CLI 側のコード変更は不要であるべき
+
 ## Specifications
 - Runtime spec: `docs/cloud-run-aligned-local-runtime-spec.md`
 - CLI spec: `docs/aib-workspace-cli-spec.md`

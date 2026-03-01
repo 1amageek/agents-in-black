@@ -90,12 +90,12 @@ private struct ChatPaneView: View {
     let service: AIBServiceModel
 
     var body: some View {
-        let session = model.chatSessionSnapshot(for: service)
+        let session = model.activeSession(for: service)
         VStack(spacing: 0) {
             if let unavailable = model.chatUnavailableReason(for: service) {
                 chatUnavailableView(unavailable)
             } else {
-                transcript(messages: session.messages)
+                transcript(session: session)
                 Divider()
                 composer(session: session)
             }
@@ -120,11 +120,11 @@ private struct ChatPaneView: View {
         .background(Color(nsColor: .textBackgroundColor))
     }
 
-    private func transcript(messages: [ChatMessageItem]) -> some View {
+    private func transcript(session: ChatSession) -> some View {
         ScrollViewReader { proxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 10) {
-                    if messages.isEmpty {
+                    if session.messages.isEmpty {
                         ContentUnavailableView(
                             "Start a Conversation",
                             systemImage: "text.bubble",
@@ -133,7 +133,7 @@ private struct ChatPaneView: View {
                         .frame(maxWidth: .infinity)
                         .padding(.top, 24)
                     } else {
-                        ForEach(messages) { message in
+                        ForEach(session.messages) { message in
                             ChatMessageRow(message: message)
                                 .id(message.id)
                         }
@@ -143,8 +143,8 @@ private struct ChatPaneView: View {
                 .padding(12)
             }
             .background(Color(nsColor: .textBackgroundColor))
-            .onChange(of: messages.count) {
-                guard let last = messages.last else { return }
+            .onChange(of: session.messages.count) {
+                guard let last = session.messages.last else { return }
                 withAnimation(.easeOut(duration: 0.15)) {
                     proxy.scrollTo(last.id, anchor: .bottom)
                 }
@@ -152,32 +152,23 @@ private struct ChatPaneView: View {
         }
     }
 
-    private func composer(session: ChatSessionState) -> some View {
+    private func composer(session: ChatSession) -> some View {
         VStack(spacing: 8) {
-            TextEditor(
-                text: Binding(
-                    get: { model.chatSessionSnapshot(for: service).composerText },
-                    set: { newValue in
-                        var updated = model.chatSessionSnapshot(for: service)
-                        updated.composerText = newValue
-                        model.setChatSession(updated, for: service)
-                    }
-                )
-            )
-            .font(.system(.body, design: .monospaced))
-            .frame(maxWidth: .infinity)
-            .frame(height: 84)
+            TextEditor(text: Bindable(session).composerText)
+                .font(.system(.body, design: .monospaced))
+                .frame(maxWidth: .infinity)
+                .frame(height: 84)
 
             HStack(spacing: 8) {
                 Button("Reset Conversation") {
-                    model.resetChatSession(for: service)
+                    session.reset()
                 }
                 .buttonStyle(.borderless)
 
                 Spacer()
 
                 Button {
-                    Task { await model.sendChatMessage(for: service) }
+                    Task { await session.send() }
                 } label: {
                     if session.isSending {
                         ProgressView()

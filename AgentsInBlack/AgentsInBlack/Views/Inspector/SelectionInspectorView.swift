@@ -5,32 +5,83 @@ struct SelectionInspectorView: View {
     @Bindable var model: AgentsInBlackAppModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            if model.detailSurfaceMode == .topology {
-                if let flowNode = model.selectedFlowNode() {
-                    FlowNodeInspectorSection(model: model, service: flowNode)
-                }
-            }
+        if hasSelection {
+            if let agentService = selectedAgentForSessions {
+                VSplitView {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 12) {
+                            selectionContent
+                        }
+                        .padding(12)
+                    }
+                    .frame(minHeight: 120)
 
-            if model.detailSurfaceMode != .topology {
-                if let repo = model.selectedRepo(), model.selectedService() == nil, model.selectedFileURL() == nil {
-                    RepoInspectorSection(repo: repo, services: repoServices(for: repo.id))
-                } else if let service = model.selectedService() {
-                    ServiceInspectorSection(service: service, runtime: model.serviceSnapshot(for: service))
-                } else if let fileURL = model.selectedFileURL() {
-                    FileInspectorSection(fileURL: fileURL, onOpen: { model.openInEditor() })
-                } else {
-                    ContentUnavailableView(
-                        "No Selection",
-                        systemImage: "sidebar.right",
-                        description: Text("Select a repository, service, or file from the sidebar.")
-                    )
+                    AgentSessionsSection(model: model, service: agentService)
+                        .frame(minHeight: 100, idealHeight: 200)
                 }
+                .frame(maxWidth: 360, alignment: .leading)
+            } else {
+                VStack(alignment: .leading, spacing: 12) {
+                    selectionContent
+                    Spacer(minLength: 0)
+                }
+                .padding(12)
+                .frame(maxWidth: 360, alignment: .leading)
             }
-            Spacer(minLength: 0)
+        } else {
+            ContentUnavailableView(
+                "No Selection",
+                systemImage: "sidebar.right",
+                description: Text(emptyDescription)
+            )
+            .frame(maxWidth: 360)
         }
-        .padding(12)
-        .frame(maxWidth: 360, alignment: .leading)
+    }
+
+    /// Returns the selected agent service when in topology mode (for session split).
+    private var selectedAgentForSessions: AIBServiceModel? {
+        guard model.detailSurfaceMode == .topology,
+              model.selectedChatMessage == nil,
+              let flowNode = model.selectedFlowNode(),
+              flowNode.serviceKind == .agent else { return nil }
+        return flowNode
+    }
+
+    private var hasSelection: Bool {
+        if model.detailSurfaceMode == .topology {
+            return model.selectedChatMessage != nil || model.selectedFlowNode() != nil
+        } else {
+            return model.selectedRepo() != nil || model.selectedService() != nil || model.selectedFileURL() != nil
+        }
+    }
+
+    @ViewBuilder
+    private var selectionContent: some View {
+        if model.detailSurfaceMode == .topology {
+            if let message = model.selectedChatMessage {
+                ChatMessageInspectorSection(message: message) {
+                    model.selectedChatMessage = nil
+                }
+            } else if let flowNode = model.selectedFlowNode() {
+                FlowNodeInspectorSection(model: model, service: flowNode)
+            }
+        } else {
+            if let repo = model.selectedRepo(), model.selectedService() == nil, model.selectedFileURL() == nil {
+                RepoInspectorSection(repo: repo, services: repoServices(for: repo.id))
+            } else if let service = model.selectedService() {
+                ServiceInspectorSection(service: service, runtime: model.serviceSnapshot(for: service))
+            } else if let fileURL = model.selectedFileURL() {
+                FileInspectorSection(fileURL: fileURL, onOpen: { model.openInEditor() })
+            }
+        }
+    }
+
+    private var emptyDescription: String {
+        if model.detailSurfaceMode == .topology {
+            "Select a node on the canvas to inspect."
+        } else {
+            "Select a repository, service, or file from the sidebar."
+        }
     }
 
     private func repoServices(for repoID: String) -> [AIBServiceModel] {
@@ -57,20 +108,6 @@ private struct FlowNodeInspectorSection: View {
                 MCPConfigSection(model: model, service: service)
                     .id(service.id)
             } else if service.serviceKind == .agent {
-                if model.canOpenChat(for: service) {
-                    Button {
-                        let pos = PiPGeometry.initialExpandedPosition(
-                            in: model.flowCanvasSize,
-                            panelSize: PiPChatPanel.panelSize,
-                            avoiding: model.openPiPChats.map(\.position)
-                        )
-                        model.openPiPChat(for: service, initialPosition: pos)
-                    } label: {
-                        Label("Open Chat", systemImage: "bubble.left.fill")
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.mint)
-                }
                 agentConnectionsSection
                 if !service.runCommand.isEmpty {
                     InspectorKV(label: "Run", value: service.runCommand.joined(separator: " "))
@@ -310,6 +347,171 @@ private struct FileInspectorSection: View {
             InspectorKV(label: "Path", value: fileURL.path)
             Button("Open in Editor", action: onOpen)
                 .buttonStyle(.borderedProminent)
+        }
+    }
+}
+
+// MARK: - Chat Message Inspector
+
+private struct ChatMessageInspectorSection: View {
+    var message: ChatMessageItem
+    var onDismiss: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Response Detail")
+                    .font(.title3).bold()
+                Spacer()
+                Button {
+                    onDismiss()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+
+            if let code = message.statusCode {
+                InspectorKV(label: "Status", value: "\(code)")
+            }
+            if let ms = message.latencyMs {
+                InspectorKV(label: "Latency", value: "\(ms)ms")
+            }
+            if let requestID = message.requestID {
+                InspectorKV(label: "Request ID", value: requestID)
+            }
+
+            InspectorKV(label: "Message", value: message.text)
+
+            if let raw = message.rawResponseBody {
+                Divider()
+                Text("Raw Response")
+                    .font(.headline)
+                ScrollView {
+                    Text(prettyJSON(raw))
+                        .font(.system(size: 10, design: .monospaced))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxHeight: 300)
+            }
+        }
+    }
+
+    private func prettyJSON(_ raw: String) -> String {
+        guard let data = raw.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data),
+              let pretty = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys]),
+              let result = String(data: pretty, encoding: .utf8)
+        else { return raw }
+        return result
+    }
+}
+
+// MARK: - Agent Sessions
+
+private struct AgentSessionsSection: View {
+    @Bindable var model: AgentsInBlackAppModel
+    var service: AIBServiceModel
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Header bar
+            HStack {
+                Text("Sessions")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button {
+                    let session = model.createSession(for: service, activate: true)
+                    openPiPChat(sessionID: session.id)
+                } label: {
+                    Image(systemName: "plus")
+                        .font(.caption2.weight(.semibold))
+                }
+                .buttonStyle(.plain)
+                .help("New Session")
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .background(.bar)
+
+            Divider()
+
+            // Session list
+            let sessions = model.sessions(for: service)
+            let activeID = model.activeSessionIDByService[service.id]
+
+            if sessions.isEmpty {
+                Spacer()
+                Text("No sessions")
+                    .font(.callout)
+                    .foregroundStyle(.tertiary)
+                    .frame(maxWidth: .infinity)
+                Spacer()
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach(sessions) { session in
+                            sessionRow(session, isActive: session.id == activeID)
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+            }
+        }
+    }
+
+    private func openPiPChat(sessionID: UUID) {
+        model.openPiPChat(serviceID: service.id, sessionID: sessionID)
+    }
+
+    private func sessionRow(_ session: ChatSession, isActive: Bool) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: isActive ? "checkmark.circle.fill" : "circle")
+                .font(.caption)
+                .foregroundStyle(isActive ? AnyShapeStyle(.mint) : AnyShapeStyle(.tertiary))
+                .frame(width: 16)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(session.title)
+                    .font(.callout.weight(isActive ? .semibold : .regular))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+
+                HStack(spacing: 6) {
+                    Text("\(session.messages.count) messages")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    if let lastAt = session.lastMessageAt {
+                        Text(lastAt, style: .relative)
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+            }
+
+            Spacer(minLength: 4)
+
+            Button {
+                model.deleteSession(session.id, for: service)
+            } label: {
+                Image(systemName: "trash")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .opacity(0.5)
+            .help("Delete Session")
+        }
+        .padding(.vertical, 5)
+        .padding(.horizontal, 10)
+        .background(isActive ? Color.accentColor.opacity(0.08) : Color.clear)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            model.activateSession(session.id, for: service)
+            openPiPChat(sessionID: session.id)
         }
     }
 }

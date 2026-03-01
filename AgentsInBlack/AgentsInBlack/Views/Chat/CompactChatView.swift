@@ -5,7 +5,8 @@ import SwiftUI
 /// This view is independent of `AgentsInBlackAppModel` and can be placed in
 /// any container: PiP panel, sheet, inspector, etc.
 struct CompactChatView: View {
-    @Bindable var store: ChatStore
+    @Bindable var session: ChatSession
+    var onSelectMessage: ((ChatMessageItem?) -> Void)?
 
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -19,22 +20,29 @@ struct CompactChatView: View {
     private var transcript: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                if store.messages.isEmpty {
+                if session.messages.isEmpty {
                     emptyState
                 } else {
                     LazyVStack(spacing: 6) {
-                        ForEach(store.messages) { message in
-                            CompactChatMessageRow(message: message)
-                                .id(message.id)
+                        ForEach(session.messages) { message in
+                            CompactChatMessageRow(
+                                message: message,
+                                isSelected: session.selectedMessageID == message.id
+                            )
+                            .id(message.id)
+                            .onTapGesture {
+                                session.selectMessage(message.id)
+                                onSelectMessage?(session.selectedMessage)
+                            }
                         }
                     }
                     .padding(.horizontal, 8)
                     .padding(.top, 8)
-                    .padding(.bottom, 52)
+                    .padding(.bottom, 56)
                 }
             }
-            .onChange(of: store.messages.count) {
-                guard let last = store.messages.last else { return }
+            .onChange(of: session.messages.count) {
+                guard let last = session.messages.last else { return }
                 withAnimation(.easeOut(duration: 0.15)) {
                     proxy.scrollTo(last.id, anchor: .bottom)
                 }
@@ -55,12 +63,12 @@ struct CompactChatView: View {
 
     private var floatingComposer: some View {
         HStack(spacing: 6) {
-            TextField("Message...", text: $store.composerText)
+            TextField("Message...", text: $session.composerText)
                 .textFieldStyle(.plain)
-                .font(.system(.caption))
+                .font(.body)
                 .onSubmit {
                     guard canSend else { return }
-                    Task { await store.send() }
+                    Task { await session.send() }
                 }
 
             sendButton
@@ -68,26 +76,24 @@ struct CompactChatView: View {
         .padding(.leading, 10)
         .padding(.trailing, 4)
         .padding(.vertical, 4)
-        .background(.thickMaterial, in: Capsule())
-        .overlay(Capsule().strokeBorder(.tertiary.opacity(0.5), lineWidth: 0.5))
-        .shadow(color: .black.opacity(0.15), radius: 6, y: 2)
+        .glassEffect(.regular, in: .capsule)
         .padding(.horizontal, 8)
         .padding(.bottom, 8)
     }
 
     @ViewBuilder
     private var sendButton: some View {
-        if store.isSending {
+        if session.isSending {
             ProgressView()
                 .controlSize(.small)
                 .padding(.trailing, 4)
         } else {
             Button {
-                Task { await store.send() }
+                Task { await session.send() }
             } label: {
                 Image(systemName: "arrow.up.circle.fill")
                     .font(.system(size: 22))
-                    .foregroundStyle(canSend ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.quaternary))
+                    .foregroundStyle(canSend ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.tertiary))
             }
             .buttonStyle(.plain)
             .disabled(!canSend)
@@ -97,6 +103,6 @@ struct CompactChatView: View {
     }
 
     private var canSend: Bool {
-        !store.isSending && !store.composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        !session.isSending && !session.composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 }

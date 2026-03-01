@@ -13,6 +13,10 @@ struct UtilityPanelHeaderContent: View {
         if model.utilityPanelMode == .serviceRuntime {
             serviceTargetMenu
         }
+
+        if model.utilityPanelMode == .connections {
+            connectionsHeaderExtras
+        }
     }
 
     private var modeSwitcher: some View {
@@ -27,6 +31,7 @@ struct UtilityPanelHeaderContent: View {
                     Image(systemName: mode.symbolName)
                         .font(.caption)
                         .frame(width: 24, height: 22)
+                        .contentShape(Rectangle())
                         .foregroundStyle(model.utilityPanelMode == mode ? AnyShapeStyle(.white) : AnyShapeStyle(.secondary))
                         .background(
                             Group {
@@ -82,6 +87,23 @@ struct UtilityPanelHeaderContent: View {
         .menuStyle(.borderlessButton)
         .help("Choose which service runtime logs to display")
     }
+
+    private var connectionsHeaderExtras: some View {
+        HStack(spacing: 6) {
+            Text("\(model.flowConnections().count)")
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.tertiary)
+
+            if model.hasUnsavedFlowChanges {
+                Button("Save") {
+                    Task { await model.saveFlowConnections() }
+                }
+                .buttonStyle(.borderless)
+                .font(.caption.weight(.medium))
+                .foregroundStyle(Color.accentColor)
+            }
+        }
+    }
 }
 
 // MARK: - Panel Body
@@ -106,7 +128,9 @@ struct UtilityPanelView: View {
         case .serviceRuntime:
             ServiceRuntimeLogsPaneView(model: model)
         case .repositoryTerminal:
-            TerminalTabsView(model: model, showsHeader: false, filterText: model.utilityPanelFilterText)
+            TerminalTabsView(manager: model.terminalManager, highlightedContextKey: model.selectedRepoIDForFiles)
+        case .connections:
+            ConnectionsListView(model: model)
         }
     }
 
@@ -168,6 +192,8 @@ struct UtilityPanelView: View {
         switch model.utilityPanelMode {
         case .aibRuntime, .serviceRuntime, .repositoryTerminal:
             return true
+        case .connections:
+            return false
         }
     }
 
@@ -179,6 +205,8 @@ struct UtilityPanelView: View {
             return "Clear Service Runtime Logs"
         case .repositoryTerminal:
             return "Clear Selected Repository Terminal Output"
+        case .connections:
+            return ""
         }
     }
 
@@ -189,7 +217,9 @@ struct UtilityPanelView: View {
         case .serviceRuntime:
             model.clearUtilityServiceRuntimeLogs()
         case .repositoryTerminal:
-            model.clearSelectedTerminalOutput()
+            model.terminalManager.clearSelectedOutput()
+        case .connections:
+            break
         }
     }
 }
@@ -221,6 +251,8 @@ private extension UtilityPanelMode {
             return "waveform.path.ecg"
         case .repositoryTerminal:
             return "terminal"
+        case .connections:
+            return "arrow.triangle.branch"
         }
     }
 }

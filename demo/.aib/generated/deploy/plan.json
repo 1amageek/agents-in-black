@@ -1,0 +1,7 @@
+{
+  "auth_bindings_count" : 4,
+  "provider" : "gcp-cloudrun",
+  "services_count" : 4,
+  "timestamp" : "2026-03-01T11:22:56Z",
+  "workspace_name" : "demo"
+}

@@ -11,6 +11,7 @@ struct ChatMessageItem: Identifiable {
     var statusCode: Int?
     var requestID: String?
     var kind: ChatMessageKind
+    var rawResponseBody: String?
 }
 
 enum ChatMessageRole: String {

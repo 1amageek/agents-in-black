@@ -1,10 +1,8 @@
 import SwiftUI
 
 struct TerminalTabDetailView: View {
-    @Bindable var model: AgentsInBlackAppModel
     @Bindable var tab: TerminalTabModel
     var showsHeader: Bool = true
-    var filterText: String = ""
 
     var body: some View {
         VStack(spacing: 0) {
@@ -12,31 +10,7 @@ struct TerminalTabDetailView: View {
                 terminalHeader
                 Divider()
             }
-            UtilityMonospacedOutputView(
-                output: tab.output,
-                emptyMessage: "Terminal output will appear here.",
-                scrollAnchorID: "output-bottom",
-                filterText: filterText
-            )
-            Divider()
-            HStack(spacing: 8) {
-                TextField("Run command in \(tab.repoName)", text: $tab.commandInput)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(.callout, design: .monospaced))
-                    .controlSize(.small)
-                    .onSubmit {
-                        Task { await model.runTerminalCommand(for: tab.id) }
-                    }
-                Button {
-                    Task { await model.runTerminalCommand(for: tab.id) }
-                } label: {
-                    Label("Run", systemImage: "return")
-                }
-                .controlSize(.small)
-                .disabled(tab.commandInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || tab.isRunningCommand)
-            }
-            .padding(12)
-            .background(.bar)
+            SwiftTermView(session: tab.session)
         }
     }
 
@@ -44,21 +18,31 @@ struct TerminalTabDetailView: View {
         HStack(spacing: 12) {
             Text(tab.repoName)
                 .font(.headline)
-            Text(abbreviatedPath(tab.cwdURL.path))
-                .help(tab.cwdURL.path)
+
+            Text(tab.session.currentDirectory ?? abbreviatedPath(tab.session.workingDirectory.standardizedFileURL.path(percentEncoded: false)))
+                .help(tab.session.workingDirectory.standardizedFileURL.path(percentEncoded: false))
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .truncationMode(.middle)
+
             Spacer()
-            if let code = tab.lastExitCode {
+
+            if let code = tab.session.lastExitCode {
                 Text("exit \(code)")
                     .font(.caption)
                     .foregroundStyle(code == 0 ? AnyShapeStyle(.secondary) : AnyShapeStyle(Color.red))
             }
-            if tab.isRunningCommand {
-                ProgressView()
-                    .controlSize(.small)
+
+            if !tab.session.isRunning, tab.session.lastExitCode != nil {
+                Button {
+                    tab.session.restart()
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.caption)
+                }
+                .buttonStyle(.borderless)
+                .help("Restart shell")
             }
         }
         .padding(.horizontal, 12)

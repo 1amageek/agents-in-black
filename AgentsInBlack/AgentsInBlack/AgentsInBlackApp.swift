@@ -16,7 +16,7 @@ struct AgentsInBlackApp: App {
                     }
                 }
         }
-        .windowStyle(.hiddenTitleBar)
+        .windowStyle(.titleBar)
         .commands {
             CommandGroup(replacing: .newItem) {
                 Button("New Workspace…") {
@@ -36,6 +36,17 @@ struct AgentsInBlackApp: App {
                 }
                 .keyboardShortcut("i", modifiers: [.command, .option])
             }
+
+            CommandMenu("Cloud") {
+                Button("Cloud Settings\u{2026}") {
+                    model.openCloudSettings()
+                }
+                .disabled(model.workspace == nil)
+            }
+        }
+
+        Settings {
+            AppSettingsView()
         }
     }
 }
@@ -96,8 +107,6 @@ final class AgentsInBlackAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func configureWindowAppearance(_ window: NSWindow) {
-        window.title = ""
-        window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
     }
 }
