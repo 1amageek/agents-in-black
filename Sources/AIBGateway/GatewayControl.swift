@@ -2,12 +2,58 @@ import AIBConfig
 import AIBRuntimeCore
 import Foundation
 
+/// Describes a single request lifecycle event observed by the gateway.
+public struct GatewayRequestActivity: Sendable {
+    public let serviceID: ServiceID
+    public let phase: Phase
+
+    public enum Phase: Sendable {
+        case started
+        case completed
+    }
+
+    public init(serviceID: ServiceID, phase: Phase) {
+        self.serviceID = serviceID
+        self.phase = phase
+    }
+}
+
 public actor GatewayControl {
     private var snapshot: RouteSnapshot = .init(version: 0, entries: [])
     private var unavailable: [ServiceID: UnavailableReason] = [:]
     private var inflight: [ServiceID: Int] = [:]
+    private var activityContinuations: [UUID: AsyncStream<GatewayRequestActivity>.Continuation] = [:]
 
     public init() {}
+
+    // MARK: - Request Activity Stream
+
+    public func requestActivities() -> AsyncStream<GatewayRequestActivity> {
+        let id = UUID()
+        return AsyncStream { continuation in
+            activityContinuations[id] = continuation
+            continuation.onTermination = { [weak self] _ in
+                Task { await self?.removeActivityContinuation(id) }
+            }
+        }
+    }
+
+    public func shutdownActivityStreams() {
+        for continuation in activityContinuations.values {
+            continuation.finish()
+        }
+        activityContinuations.removeAll()
+    }
+
+    private func removeActivityContinuation(_ id: UUID) {
+        activityContinuations.removeValue(forKey: id)
+    }
+
+    private func emitActivity(_ activity: GatewayRequestActivity) {
+        for continuation in activityContinuations.values {
+            continuation.yield(activity)
+        }
+    }
 
     public func applyRouteSnapshot(_ snapshot: RouteSnapshot) async throws {
         self.snapshot = RouteSnapshot(version: snapshot.version, entries: snapshot.entries, unavailable: unavailable)
@@ -65,12 +111,14 @@ public actor GatewayControl {
         let current = inflight[serviceID, default: 0]
         guard current < maxInflight else { return false }
         inflight[serviceID] = current + 1
+        emitActivity(GatewayRequestActivity(serviceID: serviceID, phase: .started))
         return true
     }
 
     public func release(serviceID: ServiceID) async {
         let current = inflight[serviceID, default: 0]
         inflight[serviceID] = max(current - 1, 0)
+        emitActivity(GatewayRequestActivity(serviceID: serviceID, phase: .completed))
     }
 
     public func inflightCount(serviceID: ServiceID) async -> Int {

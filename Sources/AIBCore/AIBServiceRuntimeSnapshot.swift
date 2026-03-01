@@ -27,4 +27,9 @@ public struct AIBServiceRuntimeSnapshot: Sendable, Equatable {
         self.consecutiveProbeFailures = consecutiveProbeFailures
         self.lastExitStatus = lastExitStatus
     }
+
+    /// String representation of the lifecycle state for cross-module access.
+    public var lifecycleStateString: String {
+        lifecycleState.rawValue
+    }
 }

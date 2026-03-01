@@ -90,6 +90,9 @@ public final class AIBEmulatorController {
     private var eventContinuations: [UUID: AsyncStream<AIBEmulatorEvent>.Continuation] = [:]
     private var serviceSnapshotPollTask: Task<Void, Never>?
     private var latestServiceSnapshots: [AIBServiceRuntimeSnapshot] = []
+    private var requestActivityTask: Task<Void, Never>?
+    private var activeServiceIDs: Set<String> = []
+    private var inactiveTimers: [String: Task<Void, Never>] = [:]
 
     private enum State {
         case stopped
@@ -104,6 +107,7 @@ public final class AIBEmulatorController {
             eventContinuations[id] = continuation
             continuation.yield(.lifecycleChanged(currentLifecycleState()))
             continuation.yield(.serviceSnapshotsChanged(latestServiceSnapshots))
+            continuation.yield(.activeServicesChanged(activeServiceIDs))
             continuation.onTermination = { [weak self] _ in
                 Task { @MainActor in
                     self?.eventContinuations.removeValue(forKey: id)
@@ -113,9 +117,20 @@ public final class AIBEmulatorController {
     }
 
     public func shutdown() {
+        requestActivityTask?.cancel()
+        requestActivityTask = nil
+        cancelAllInactiveTimers()
         serviceSnapshotPollTask?.cancel()
         serviceSnapshotPollTask = nil
         finishEventStreams()
+
+        // Synchronously kill all child processes.
+        // This does not require `await` because `forceTerminateAll()` is
+        // nonisolated and uses a Mutex-protected PID registry internally.
+        supervisor?.forceTerminateAll()
+        supervisor = nil
+        gateway = nil
+        state = .stopped
     }
 
     public func start(
@@ -184,6 +199,7 @@ public final class AIBEmulatorController {
                 gatewayPort: loaded.config.gateway.port
             )
             startServiceSnapshotPolling(supervisor: supervisor)
+            startRequestActivitySubscription(control: gatewayControl)
             emit(.lifecycleChanged(.running(pid: getpid(), port: loaded.config.gateway.port)))
 
             return EmulatorStartResult(pid: getpid())
@@ -196,6 +212,10 @@ public final class AIBEmulatorController {
                     "error": "\(error)"
                 ]
             )
+            requestActivityTask?.cancel()
+            requestActivityTask = nil
+            cancelAllInactiveTimers()
+            activeServiceIDs = []
             serviceSnapshotPollTask?.cancel()
             serviceSnapshotPollTask = nil
             latestServiceSnapshots = []
@@ -232,6 +252,13 @@ public final class AIBEmulatorController {
             throw EmulatorControllerError.notRunning
         }
         emit(.lifecycleChanged(.stopping))
+
+        requestActivityTask?.cancel()
+        requestActivityTask = nil
+        cancelAllInactiveTimers()
+        activeServiceIDs = []
+        emit(.activeServicesChanged([]))
+        await gateway.control.shutdownActivityStreams()
 
         serviceSnapshotPollTask?.cancel()
         serviceSnapshotPollTask = nil
@@ -320,5 +347,53 @@ public final class AIBEmulatorController {
         case .running(_, _, let gatewayPort):
             return .running(pid: getpid(), port: gatewayPort)
         }
+    }
+
+    // MARK: - Request Activity Subscription
+
+    private func startRequestActivitySubscription(control: GatewayControl) {
+        requestActivityTask?.cancel()
+        requestActivityTask = Task { [weak self] in
+            for await activity in await control.requestActivities() {
+                guard let self, !Task.isCancelled else { break }
+                await self.handleRequestActivity(activity, control: control)
+            }
+        }
+    }
+
+    private func handleRequestActivity(_ activity: GatewayRequestActivity, control: GatewayControl) async {
+        let serviceKey = activity.serviceID.rawValue
+        switch activity.phase {
+        case .started:
+            inactiveTimers[serviceKey]?.cancel()
+            inactiveTimers.removeValue(forKey: serviceKey)
+            let changed = activeServiceIDs.insert(serviceKey).inserted
+            if changed {
+                emit(.activeServicesChanged(activeServiceIDs))
+            }
+        case .completed:
+            let inflight = await control.inflightCount(serviceID: activity.serviceID)
+            if inflight == 0 {
+                let timer = Task { [weak self] in
+                    do {
+                        try await Task.sleep(for: .milliseconds(500))
+                    } catch {
+                        return
+                    }
+                    guard let self, !Task.isCancelled else { return }
+                    self.activeServiceIDs.remove(serviceKey)
+                    self.inactiveTimers.removeValue(forKey: serviceKey)
+                    self.emit(.activeServicesChanged(self.activeServiceIDs))
+                }
+                inactiveTimers[serviceKey] = timer
+            }
+        }
+    }
+
+    private func cancelAllInactiveTimers() {
+        for timer in inactiveTimers.values {
+            timer.cancel()
+        }
+        inactiveTimers.removeAll()
     }
 }

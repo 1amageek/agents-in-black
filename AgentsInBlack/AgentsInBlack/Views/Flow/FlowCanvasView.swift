@@ -24,7 +24,14 @@ struct FlowCanvasView: View {
     }
 
     private var graphSnapshot: FlowGraphSnapshot {
-        FlowGraphSnapshot(nodes: model.flowNodes(), connections: model.flowConnections())
+        FlowGraphSnapshot(
+            nodes: model.flowNodes(),
+            connections: model.flowConnections(),
+            activeServiceIDs: model.activeServiceIDs,
+            serviceLifecycles: model.serviceSnapshotsByID.reduce(into: [:]) { result, pair in
+                result[pair.key] = pair.value.lifecycleStateString
+            }
+        )
     }
 
     // MARK: - Canvas
@@ -221,6 +228,7 @@ struct FlowCanvasView: View {
         let edgeModels = model.flowConnections().sorted { $0.id.localizedStandardCompare($1.id) == .orderedAscending }
         let serviceKinds = Dictionary(uniqueKeysWithValues: nodeModels.map { ($0.id, $0.serviceKind) })
         let existingPairs = Set(edgeModels.map { "\($0.sourceServiceID)->\($0.targetServiceID)" })
+        let namespacedIDByNodeID = Dictionary(uniqueKeysWithValues: nodeModels.map { ($0.id, $0.namespacedID) })
 
         var configuration = FlowConfiguration(
             defaultEdgePathType: .bezier,
@@ -237,7 +245,8 @@ struct FlowCanvasView: View {
             strokeColor: .primary.opacity(0.5),
             selectedStrokeColor: AIBFlowPalette.mcp,
             lineWidth: 1.5,
-            selectedLineWidth: 2.5
+            selectedLineWidth: 2.5,
+            animatedDashPattern: [6, 4]
         )
         configuration.connectionValidator = AIBFlowConnectionValidator(nodeKindByID: serviceKinds, existingPairs: existingPairs)
 
@@ -245,7 +254,11 @@ struct FlowCanvasView: View {
 
         var newStore = FlowStore<String>(
             nodes: makeFlowNodes(from: nodeModels),
-            edges: makeFlowEdges(from: edgeModels),
+            edges: makeFlowEdges(
+                from: edgeModels,
+                activeServiceIDs: model.activeServiceIDs,
+                namespacedIDByNodeID: namespacedIDByNodeID
+            ),
             viewport: viewport,
             configuration: configuration
         )
@@ -313,16 +326,25 @@ struct FlowCanvasView: View {
         }
     }
 
-    private func makeFlowEdges(from edges: [FlowConnectionModel]) -> [FlowEdge] {
+    private func makeFlowEdges(
+        from edges: [FlowConnectionModel],
+        activeServiceIDs: Set<String>,
+        namespacedIDByNodeID: [String: String]
+    ) -> [FlowEdge] {
         edges.map { connection in
-            FlowEdge(
+            let targetNS = namespacedIDByNodeID[connection.targetServiceID] ?? ""
+            let sourceNS = namespacedIDByNodeID[connection.sourceServiceID] ?? ""
+            let isActive = activeServiceIDs.contains(targetNS)
+                        || activeServiceIDs.contains(sourceNS)
+            return FlowEdge(
                 id: connection.id,
                 sourceNodeID: connection.sourceServiceID,
                 sourceHandleID: "source",
                 targetNodeID: connection.targetServiceID,
                 targetHandleID: "target",
                 pathType: .bezier,
-                label: connection.kind.rawValue
+                label: connection.kind.rawValue,
+                isAnimated: isActive
             )
         }
     }
@@ -406,13 +428,30 @@ struct FlowCanvasView: View {
 
     private var nodeVisualsByID: [String: FlowNodeVisual] {
         let outgoingCounts = Dictionary(grouping: model.flowConnections(), by: \.sourceServiceID).mapValues(\.count)
+        let lifecycles = graphSnapshot.serviceLifecycles
         return Dictionary(
             uniqueKeysWithValues: model.flowNodes().map { node in
-                (
+                let lifecycle = lifecycles[node.namespacedID]
+                let isActive = model.activeServiceIDs.contains(node.namespacedID)
+                let activityState: FlowNodeVisual.ActivityState
+                switch lifecycle {
+                case "ready" where isActive:
+                    activityState = .readyActive
+                case "ready":
+                    activityState = .readyIdle
+                case "starting":
+                    activityState = .starting
+                case "unhealthy", "backoff":
+                    activityState = .unhealthy
+                default:
+                    activityState = .stopped
+                }
+                return (
                     node.id,
                     FlowNodeVisual(
                         kind: node.serviceKind,
-                        outgoingCount: outgoingCounts[node.id, default: 0]
+                        outgoingCount: outgoingCounts[node.id, default: 0],
+                        activityState: activityState
                     )
                 )
             }
@@ -433,13 +472,13 @@ private struct FlowServiceNodeContent: View {
     static let handleInset: CGFloat = 5
 
     var body: some View {
-        let visual = visualsByID[node.id] ?? FlowNodeVisual(kind: .unknown, outgoingCount: 0)
+        let visual = visualsByID[node.id] ?? FlowNodeVisual(kind: .unknown, outgoingCount: 0, activityState: .stopped)
         let tint = AIBFlowPalette.tint(for: visual.kind)
         let parts = splitNamespacedID(node.data)
         let inset = Self.handleInset
 
         ZStack {
-            nodeCard(tint: tint, kind: visual.kind, parts: parts, outgoingCount: visual.outgoingCount)
+            nodeCard(tint: tint, kind: visual.kind, parts: parts, activityState: visual.activityState)
                 .padding(inset)
 
             ForEach(node.handles, id: \.id) { handle in
@@ -450,7 +489,7 @@ private struct FlowServiceNodeContent: View {
         .frame(width: node.size.width + inset * 2, height: node.size.height + inset * 2)
     }
 
-    private func nodeCard(tint: Color, kind: AIBServiceKind, parts: (primary: String, secondary: String?), outgoingCount: Int) -> some View {
+    private func nodeCard(tint: Color, kind: AIBServiceKind, parts: (primary: String, secondary: String?), activityState: FlowNodeVisual.ActivityState) -> some View {
         HStack(spacing: 6) {
             Image(systemName: AIBFlowPalette.symbol(for: kind))
                 .font(.system(size: 16, weight: .medium))
@@ -477,25 +516,41 @@ private struct FlowServiceNodeContent: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 2)
         .frame(width: node.size.width, height: node.size.height)
-        .background(cardBackground, in: RoundedRectangle(cornerRadius: 8))
+        .background(cardBackground(activityState: activityState), in: RoundedRectangle(cornerRadius: 8))
         .overlay {
             RoundedRectangle(cornerRadius: 8)
-                .strokeBorder(cardBorderColor(tint: tint), lineWidth: cardBorderWidth)
+                .strokeBorder(cardBorderColor(tint: tint, activityState: activityState), lineWidth: cardBorderWidth(activityState: activityState))
         }
-        .shadow(color: cardShadowColor(tint: tint), radius: cardShadowRadius, y: cardShadowY)
+        .overlay {
+            if activityState == .readyActive || activityState == .starting || activityState == .unhealthy {
+                NodeActivityOverlay(activityState: activityState, tint: tint)
+            }
+        }
+        .shadow(color: cardShadowColor(tint: tint, activityState: activityState), radius: cardShadowRadius(activityState: activityState), y: cardShadowY)
+        .opacity(activityState == .stopped ? 0.5 : 1.0)
     }
 
     // MARK: - Card Styling
 
-    private var cardBackground: some ShapeStyle {
+    private func cardBackground(activityState: FlowNodeVisual.ActivityState) -> some ShapeStyle {
         colorScheme == .dark
             ? AnyShapeStyle(Color(white: 0.14))
             : AnyShapeStyle(Color.white)
     }
 
-    private func cardBorderColor(tint: Color) -> Color {
+    private func cardBorderColor(tint: Color, activityState: FlowNodeVisual.ActivityState) -> Color {
         if node.isSelected {
             return tint
+        }
+        switch activityState {
+        case .readyActive:
+            return tint.opacity(0.8)
+        case .unhealthy:
+            return Color.red.opacity(0.7)
+        case .starting:
+            return tint.opacity(0.5)
+        default:
+            break
         }
         if node.isHovered {
             return colorScheme == .dark
@@ -507,13 +562,23 @@ private struct FlowServiceNodeContent: View {
             : Color.black.opacity(0.15)
     }
 
-    private var cardBorderWidth: CGFloat {
-        node.isSelected ? 1.5 : 1
+    private func cardBorderWidth(activityState: FlowNodeVisual.ActivityState) -> CGFloat {
+        if node.isSelected { return 1.5 }
+        if activityState == .readyActive { return 1.5 }
+        return 1
     }
 
-    private func cardShadowColor(tint: Color) -> Color {
+    private func cardShadowColor(tint: Color, activityState: FlowNodeVisual.ActivityState) -> Color {
         if node.isSelected {
             return tint.opacity(0.25)
+        }
+        switch activityState {
+        case .readyActive:
+            return tint.opacity(0.3)
+        case .unhealthy:
+            return Color.red.opacity(0.25)
+        default:
+            break
         }
         if node.isHovered {
             return .black.opacity(colorScheme == .dark ? 0.4 : 0.12)
@@ -521,8 +586,14 @@ private struct FlowServiceNodeContent: View {
         return .black.opacity(colorScheme == .dark ? 0.3 : 0.06)
     }
 
-    private var cardShadowRadius: CGFloat {
-        node.isSelected ? 12 : node.isHovered ? 8 : 4
+    private func cardShadowRadius(activityState: FlowNodeVisual.ActivityState) -> CGFloat {
+        if node.isSelected { return 12 }
+        switch activityState {
+        case .readyActive: return 10
+        case .unhealthy: return 8
+        default: break
+        }
+        return node.isHovered ? 8 : 4
     }
 
     private var cardShadowY: CGFloat {
@@ -549,11 +620,75 @@ private struct FlowServiceNodeContent: View {
     }
 }
 
+// MARK: - Node Activity Overlay
+
+private struct NodeActivityOverlay: View {
+    let activityState: FlowNodeVisual.ActivityState
+    let tint: Color
+
+    @State private var isPulsing = false
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: 8)
+            .strokeBorder(borderColor, lineWidth: 1.5)
+            .opacity(isPulsing ? 1.0 : 0.3)
+            .allowsHitTesting(false)
+            .onAppear {
+                isPulsing = shouldPulse
+            }
+            .onChange(of: activityState) { _, newState in
+                withAnimation(pulseAnimation(for: newState)) {
+                    isPulsing = shouldPulse(for: newState)
+                }
+            }
+            .animation(shouldPulse ? .easeInOut(duration: 0.8).repeatForever(autoreverses: true) : .default, value: isPulsing)
+    }
+
+    private var borderColor: Color {
+        switch activityState {
+        case .unhealthy:
+            return .red
+        case .readyActive, .starting:
+            return tint
+        default:
+            return .clear
+        }
+    }
+
+    private var shouldPulse: Bool {
+        shouldPulse(for: activityState)
+    }
+
+    private func shouldPulse(for state: FlowNodeVisual.ActivityState) -> Bool {
+        switch state {
+        case .readyActive, .starting, .unhealthy:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func pulseAnimation(for state: FlowNodeVisual.ActivityState) -> Animation? {
+        shouldPulse(for: state)
+            ? .easeInOut(duration: 0.8).repeatForever(autoreverses: true)
+            : .default
+    }
+}
+
 // MARK: - Supporting Types
 
-private struct FlowNodeVisual {
+private struct FlowNodeVisual: Equatable {
     let kind: AIBServiceKind
     let outgoingCount: Int
+    let activityState: ActivityState
+
+    enum ActivityState: Equatable {
+        case stopped
+        case starting
+        case readyIdle
+        case readyActive
+        case unhealthy
+    }
 }
 
 private struct AIBFlowConnectionValidator: ConnectionValidating {
@@ -576,6 +711,8 @@ private struct AIBFlowConnectionValidator: ConnectionValidating {
 private struct FlowGraphSnapshot: Hashable {
     let nodes: [FlowNodeModel]
     let connections: [FlowConnectionModel]
+    let activeServiceIDs: Set<String>
+    let serviceLifecycles: [String: String]
 }
 
 // MARK: - Environment

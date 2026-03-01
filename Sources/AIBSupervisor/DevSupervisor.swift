@@ -1,10 +1,18 @@
 import AIBConfig
 import AIBGateway
 import AIBRuntimeCore
+import Darwin
 import Foundation
 import Logging
+import Synchronization
 
 public typealias ConfigProvider = @Sendable () async throws -> LoadedConfig
+
+/// Entry in the process registry for synchronous emergency cleanup.
+private struct ChildPIDEntry: Sendable {
+    let pid: pid_t
+    let usesDedicatedGroup: Bool
+}
 
 public actor DevSupervisor {
     public nonisolated let gatewayControl: GatewayControl
@@ -17,6 +25,10 @@ public actor DevSupervisor {
     private let watchFilePath: String
     private let gatewayPort: Int
     private let reloadEnabled: Bool
+
+    /// Thread-safe PID registry for synchronous emergency cleanup.
+    /// Accessible from any isolation domain via `nonisolated` methods.
+    private nonisolated let _activeChildPIDs = Mutex<[ChildPIDEntry]>([])
 
     private var currentConfig: AIBConfig?
     private var configVersion: Int = 0
@@ -211,6 +223,7 @@ public actor DevSupervisor {
             gatewayPort: gatewayPort,
             configBaseDirectory: configBaseDirectory
         )
+        registerChildPID(handle)
         logMux.attach(handle)
 
         runtime.childHandle = handle
@@ -280,6 +293,7 @@ public actor DevSupervisor {
         if !result.terminatedGracefully {
             await processController.killGroup(handle)
         }
+        unregisterChildPID(handle)
         logMux.detach(handle)
 
         runtime.childHandle = nil
@@ -437,5 +451,41 @@ public actor DevSupervisor {
             throw ProcessSpawnError("Failed to inspect ephemeral port", metadata: ["errno": "\(errno)"])
         }
         return Int(UInt16(bigEndian: addr.sin_port))
+    }
+
+    // MARK: - Child PID Registry (thread-safe, synchronous access)
+
+    private func registerChildPID(_ handle: ChildHandle) {
+        let pid = handle.process.processIdentifier
+        guard pid > 0 else { return }
+        _activeChildPIDs.withLock { entries in
+            entries.append(ChildPIDEntry(pid: pid, usesDedicatedGroup: handle.usesDedicatedProcessGroup))
+        }
+    }
+
+    private func unregisterChildPID(_ handle: ChildHandle) {
+        let pid = handle.process.processIdentifier
+        guard pid > 0 else { return }
+        _activeChildPIDs.withLock { entries in
+            entries.removeAll { $0.pid == pid }
+        }
+    }
+
+    /// Synchronously send SIGKILL to all tracked child process groups.
+    /// Safe to call from any isolation domain — does not require `await`.
+    /// Used for emergency cleanup when the app is about to terminate.
+    public nonisolated func forceTerminateAll() {
+        let entries = _activeChildPIDs.withLock { entries in
+            let copy = entries
+            entries.removeAll()
+            return copy
+        }
+        for entry in entries {
+            if entry.usesDedicatedGroup {
+                Darwin.kill(-entry.pid, SIGKILL)
+            } else {
+                Darwin.kill(entry.pid, SIGKILL)
+            }
+        }
     }
 }

@@ -38,6 +38,7 @@ final class AgentsInBlackAppModel {
     var emulatorOutput: String = ""
     var serviceLogOutputByServiceID: [String: String] = [:]
     var serviceSnapshotsByID: [String: AIBServiceRuntimeSnapshot] = [:]
+    var activeServiceIDs: Set<String> = []
     var showInspector: Bool = false
     var selectedChatMessage: ChatMessageItem?
     var lastErrorMessage: String?
@@ -102,23 +103,8 @@ final class AgentsInBlackAppModel {
         environmentCheckTask = nil
         runtimeAnnouncementCenter.clear()
 
-        let shouldAttemptStop = emulatorState.isRunning || emulatorState.isBusy
         emulatorController.shutdown()
         deployController.shutdown()
-
-        if shouldAttemptStop {
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                do {
-                    try await emulatorController.stop()
-                } catch EmulatorControllerError.notRunning {
-                    return
-                } catch {
-                    // Do not surface app-termination errors to the UI.
-                    return
-                }
-            }
-        }
     }
 
     func openWorkspacePicker() {
@@ -1564,6 +1550,7 @@ final class AgentsInBlackAppModel {
             case .stopped:
                 emulatorState = .stopped
                 serviceSnapshotsByID = [:]
+                activeServiceIDs = []
                 rebuildSidebarRepoStatuses()
             case .starting:
                 emulatorState = .starting
@@ -1577,6 +1564,7 @@ final class AgentsInBlackAppModel {
             case .failed(let message):
                 emulatorState = .error(message)
                 serviceSnapshotsByID = [:]
+                activeServiceIDs = []
                 lastErrorMessage = "Failed to start emulator: \(message)"
                 registerIssue(
                     severity: .error,
@@ -1592,6 +1580,8 @@ final class AgentsInBlackAppModel {
         case .serviceSnapshotsChanged(let snapshots):
             serviceSnapshotsByID = Dictionary(uniqueKeysWithValues: snapshots.map { ($0.serviceID, $0) })
             rebuildSidebarRepoStatuses()
+        case .activeServicesChanged(let serviceIDs):
+            activeServiceIDs = serviceIDs
         }
     }
 
