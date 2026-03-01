@@ -12,8 +12,14 @@ public enum AIBWorkspaceManager {
         let workspaceDir = URL(fileURLWithPath: workspaceDirectoryName, relativeTo: URL(fileURLWithPath: workspaceRoot)).standardizedFileURL.path
         let workspaceConfigPath = URL(fileURLWithPath: workspaceConfigRelativePath, relativeTo: URL(fileURLWithPath: workspaceRoot)).standardizedFileURL.path
 
-        if FileManager.default.fileExists(atPath: workspaceConfigPath), !options.force {
-            throw ConfigError("Workspace already initialized", metadata: ["path": workspaceConfigPath])
+        let existingConfig: AIBWorkspaceConfig?
+        if FileManager.default.fileExists(atPath: workspaceConfigPath) {
+            if !options.force {
+                throw ConfigError("Workspace already initialized", metadata: ["path": workspaceConfigPath])
+            }
+            existingConfig = try WorkspaceYAMLCodec.loadWorkspace(at: workspaceConfigPath)
+        } else {
+            existingConfig = nil
         }
 
         try FileManager.default.createDirectory(atPath: workspaceDir, withIntermediateDirectories: true)
@@ -22,9 +28,15 @@ public enum AIBWorkspaceManager {
         try FileManager.default.createDirectory(atPath: URL(fileURLWithPath: "environments", relativeTo: URL(fileURLWithPath: workspaceDir)).path, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(atPath: URL(fileURLWithPath: "targets", relativeTo: URL(fileURLWithPath: workspaceDir)).path, withIntermediateDirectories: true)
 
-        let workspaceName = URL(fileURLWithPath: workspaceRoot).lastPathComponent
+        let workspaceName = existingConfig?.workspaceName ?? URL(fileURLWithPath: workspaceRoot).lastPathComponent
         let repos = options.scanEnabled ? try WorkspaceDiscovery.discoverRepos(workspaceRoot: workspaceRoot, scanPath: options.scanPath) : []
-        let workspace = AIBWorkspaceConfig(workspaceName: workspaceName, repos: repos)
+        var workspace = AIBWorkspaceConfig(workspaceName: workspaceName, repos: repos)
+
+        // Merge with existing config to preserve user-configured services,
+        // connections, UI settings, and gateway config.
+        if let existing = existingConfig {
+            workspace = merge(existing: existing, discovered: workspace.repos)
+        }
 
         try WorkspaceYAMLCodec.saveWorkspace(workspace, to: workspaceConfigPath)
         try ensureEnvironmentTemplates(workspaceRoot: workspaceRoot)
@@ -128,6 +140,10 @@ public enum AIBWorkspaceManager {
             }
             if !prior.commandCandidates.isEmpty {
                 updated.commandCandidates = prior.commandCandidates
+            }
+            // Preserve user-configured services (definitions, connections, UI, health, etc.)
+            if let priorServices = prior.services, !priorServices.isEmpty {
+                updated.services = priorServices
             }
             return updated
         }

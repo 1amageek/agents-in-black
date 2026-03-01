@@ -21,12 +21,20 @@ struct FlowCanvasView: View {
         .onChange(of: colorScheme) { _, _ in
             synchronizeStoreFromModel(resetViewport: false)
         }
+        .onChange(of: activitySnapshot) { _, _ in
+            updateEdgeAnimations()
+        }
     }
 
     private var graphSnapshot: FlowGraphSnapshot {
         FlowGraphSnapshot(
             nodes: model.flowNodes(),
-            connections: model.flowConnections(),
+            connections: model.flowConnections()
+        )
+    }
+
+    private var activitySnapshot: FlowActivitySnapshot {
+        FlowActivitySnapshot(
             activeServiceIDs: model.activeServiceIDs,
             serviceLifecycles: model.serviceSnapshotsByID.reduce(into: [:]) { result, pair in
                 result[pair.key] = pair.value.lifecycleStateString
@@ -140,7 +148,7 @@ struct FlowCanvasView: View {
             Button {
                 fitToContent(animation: .smooth)
             } label: {
-                Text("\(Int((store.viewport.zoom * 100).rounded()))%")
+                Text("\(Int(exactly: (store.viewport.zoom * 100).rounded()) ?? 100)%")
                     .font(.caption2.monospacedDigit().weight(.medium))
                     .foregroundStyle(.secondary)
                     .frame(minWidth: 36, minHeight: 28)
@@ -228,7 +236,6 @@ struct FlowCanvasView: View {
         let edgeModels = model.flowConnections().sorted { $0.id.localizedStandardCompare($1.id) == .orderedAscending }
         let serviceKinds = Dictionary(uniqueKeysWithValues: nodeModels.map { ($0.id, $0.serviceKind) })
         let existingPairs = Set(edgeModels.map { "\($0.sourceServiceID)->\($0.targetServiceID)" })
-        let namespacedIDByNodeID = Dictionary(uniqueKeysWithValues: nodeModels.map { ($0.id, $0.namespacedID) })
 
         var configuration = FlowConfiguration(
             defaultEdgePathType: .bezier,
@@ -252,13 +259,9 @@ struct FlowCanvasView: View {
 
         let viewport = resetViewport ? Viewport() : store.viewport
 
-        var newStore = FlowStore<String>(
+        let newStore = FlowStore<String>(
             nodes: makeFlowNodes(from: nodeModels),
-            edges: makeFlowEdges(
-                from: edgeModels,
-                activeServiceIDs: model.activeServiceIDs,
-                namespacedIDByNodeID: namespacedIDByNodeID
-            ),
+            edges: makeFlowEdges(from: edgeModels),
             viewport: viewport,
             configuration: configuration
         )
@@ -326,25 +329,16 @@ struct FlowCanvasView: View {
         }
     }
 
-    private func makeFlowEdges(
-        from edges: [FlowConnectionModel],
-        activeServiceIDs: Set<String>,
-        namespacedIDByNodeID: [String: String]
-    ) -> [FlowEdge] {
+    private func makeFlowEdges(from edges: [FlowConnectionModel]) -> [FlowEdge] {
         edges.map { connection in
-            let targetNS = namespacedIDByNodeID[connection.targetServiceID] ?? ""
-            let sourceNS = namespacedIDByNodeID[connection.sourceServiceID] ?? ""
-            let isActive = activeServiceIDs.contains(targetNS)
-                        || activeServiceIDs.contains(sourceNS)
-            return FlowEdge(
+            FlowEdge(
                 id: connection.id,
                 sourceNodeID: connection.sourceServiceID,
                 sourceHandleID: "source",
                 targetNodeID: connection.targetServiceID,
                 targetHandleID: "target",
                 pathType: .bezier,
-                label: connection.kind.rawValue,
-                isAnimated: isActive
+                label: connection.kind.rawValue
             )
         }
     }
@@ -428,11 +422,11 @@ struct FlowCanvasView: View {
 
     private var nodeVisualsByID: [String: FlowNodeVisual] {
         let outgoingCounts = Dictionary(grouping: model.flowConnections(), by: \.sourceServiceID).mapValues(\.count)
-        let lifecycles = graphSnapshot.serviceLifecycles
+        let activity = activitySnapshot
         return Dictionary(
             uniqueKeysWithValues: model.flowNodes().map { node in
-                let lifecycle = lifecycles[node.namespacedID]
-                let isActive = model.activeServiceIDs.contains(node.namespacedID)
+                let lifecycle = activity.serviceLifecycles[node.namespacedID]
+                let isActive = activity.activeServiceIDs.contains(node.namespacedID)
                 let activityState: FlowNodeVisual.ActivityState
                 switch lifecycle {
                 case "ready" where isActive:
@@ -456,6 +450,27 @@ struct FlowCanvasView: View {
                 )
             }
         )
+    }
+
+    // MARK: - Lightweight Edge Animation Update
+
+    /// Compute the set of animated edge IDs from active services and push it
+    /// to the store's side-table. No undo, no store rebuild, no edge mutation.
+    private func updateEdgeAnimations() {
+        let nodeModels = model.flowNodes()
+        let namespacedIDByNodeID = Dictionary(uniqueKeysWithValues: nodeModels.map { ($0.id, $0.namespacedID) })
+        let activeIDs = model.activeServiceIDs
+
+        var animatedIDs = Set<String>()
+        for edge in store.edges {
+            let sourceNS = namespacedIDByNodeID[edge.sourceNodeID] ?? ""
+            let targetNS = namespacedIDByNodeID[edge.targetNodeID] ?? ""
+            if activeIDs.contains(sourceNS) && activeIDs.contains(targetNS) {
+                animatedIDs.insert(edge.id)
+            }
+        }
+
+        store.setAnimatedEdges(animatedIDs)
     }
 
 }
@@ -711,6 +726,9 @@ private struct AIBFlowConnectionValidator: ConnectionValidating {
 private struct FlowGraphSnapshot: Hashable {
     let nodes: [FlowNodeModel]
     let connections: [FlowConnectionModel]
+}
+
+private struct FlowActivitySnapshot: Hashable {
     let activeServiceIDs: Set<String>
     let serviceLifecycles: [String: String]
 }

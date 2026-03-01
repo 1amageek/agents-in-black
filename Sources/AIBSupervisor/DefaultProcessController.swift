@@ -53,6 +53,9 @@ public final class DefaultProcessController: ProcessController {
         if FileManager.default.fileExists(atPath: connectionsFilePath) {
             env["AIB_CONNECTIONS_FILE"] = connectionsFilePath
         }
+        // Force line-buffered stdout for Python processes (piped stdout
+        // defaults to 8 KB block buffering, delaying all output).
+        env["PYTHONUNBUFFERED"] = "1"
         for (key, value) in service.env {
             env[key] = value
         }

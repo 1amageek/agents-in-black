@@ -1,4 +1,4 @@
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 import re
@@ -187,10 +187,13 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(json.dumps(data, ensure_ascii=False).encode())
 
     def log_message(self, fmt, *args):
-        print(f'mcp-web {self.address_string()} - ' + (fmt % args))
+        msg = fmt % args
+        if '/health/live' in msg or '/health/ready' in msg:
+            return
+        print(f'mcp-web {self.address_string()} - ' + msg)
 
 
 if __name__ == '__main__':
     print(f'mcp-web listening on {PORT}')
-    server = HTTPServer(('127.0.0.1', PORT), Handler)
+    server = ThreadingHTTPServer(('127.0.0.1', PORT), Handler)
     server.serve_forever()

@@ -282,13 +282,35 @@ public actor DevSupervisor {
             runtime.lifecycleState = .draining
             runtimes[id] = runtime
             await gatewayControl.markServiceDraining(id)
-            let drain = (try? runtime.service.restart.drainTimeout.parse()) ?? .seconds(1)
-            try? await Task.sleep(for: drain)
+            let drain: Duration
+            do {
+                drain = try runtime.service.restart.drainTimeout.parse()
+            } catch {
+                logger.warning("Invalid drain_timeout, using 1s", metadata: [
+                    "service_id": .string(id.rawValue),
+                    "error": .string("\(error)"),
+                ])
+                drain = .seconds(1)
+            }
+            do {
+                try await Task.sleep(for: drain)
+            } catch {
+                // Cancelled — proceed to stop immediately.
+            }
         }
 
         runtime.lifecycleState = .stopping
         runtimes[id] = runtime
-        let grace = (try? runtime.service.restart.shutdownGracePeriod.parse()) ?? .seconds(5)
+        let grace: Duration
+        do {
+            grace = try runtime.service.restart.shutdownGracePeriod.parse()
+        } catch {
+            logger.warning("Invalid shutdown_grace_period, using 5s", metadata: [
+                "service_id": .string(id.rawValue),
+                "error": .string("\(error)"),
+            ])
+            grace = .seconds(5)
+        }
         let result = await processController.terminateGroup(handle, grace: grace)
         if !result.terminatedGracefully {
             await processController.killGroup(handle)
@@ -360,7 +382,11 @@ public actor DevSupervisor {
         configPollTask = Task { [weak self] in
             guard let self else { return }
             while !Task.isCancelled {
-                try? await Task.sleep(for: .milliseconds(500))
+                do {
+                    try await Task.sleep(for: .milliseconds(500))
+                } catch {
+                    break
+                }
                 await self.pollConfigFileChange()
             }
         }
@@ -381,10 +407,33 @@ public actor DevSupervisor {
         livenessTask = Task { [weak self] in
             guard let self else { return }
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(2))
+                let interval = await self.livenessCheckInterval()
+                do {
+                    try await Task.sleep(for: interval)
+                } catch {
+                    break
+                }
                 await self.pollLiveness()
             }
         }
+    }
+
+    private func livenessCheckInterval() -> Duration {
+        var minimum: Duration = .seconds(2)
+        for runtime in runtimes.values where runtime.lifecycleState == .ready {
+            do {
+                let interval = try runtime.service.health.checkInterval.parse()
+                if interval < minimum {
+                    minimum = interval
+                }
+            } catch {
+                logger.warning("Invalid check_interval", metadata: [
+                    "service_id": .string(runtime.service.id.rawValue),
+                    "error": .string("\(error)"),
+                ])
+            }
+        }
+        return minimum
     }
 
     private func pollLiveness() async {

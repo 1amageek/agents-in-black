@@ -9,6 +9,12 @@ import SwiftAgent
 struct MCPToolClient: Sendable {
     let baseURL: String
 
+    /// Maximum characters to return from a tool call.
+    /// The on-device FoundationModels context window is 4096 tokens,
+    /// so tool results must be kept small to leave room for instructions,
+    /// user messages, and model output.
+    static let maxResponseLength = 1500
+
     func callTool(name: String, params: [String: String]) async throws -> String {
         guard let url = URL(string: baseURL) else {
             throw MCPClientError.invalidURL(baseURL)
@@ -26,6 +32,9 @@ struct MCPToolClient: Sendable {
         }
         guard let str = String(data: data, encoding: .utf8) else {
             throw MCPClientError.invalidResponse
+        }
+        if str.count > Self.maxResponseLength {
+            return String(str.prefix(Self.maxResponseLength)) + "\n...[truncated]"
         }
         return str
     }
@@ -135,15 +144,13 @@ struct TransformTextTool: Tool {
 struct FetchURLArguments: Sendable {
     @Guide(description: "The URL to fetch")
     var url: String
-    @Guide(description: "Max characters to return (default 5000)")
-    var maxLength: String
 }
 
 struct FetchURLTool: Tool {
     static let name = "fetch_url"
     var name: String { Self.name }
 
-    static let description = "Fetch a URL and return its text content (HTML tags stripped)"
+    static let description = "Fetch a URL and return its text content (HTML tags stripped, max 1200 chars)"
     var description: String { Self.description }
 
     var parameters: GenerationSchema { FetchURLArguments.generationSchema }
@@ -153,7 +160,7 @@ struct FetchURLTool: Tool {
     func call(arguments: FetchURLArguments) async throws -> String {
         try await client.callTool(
             name: "fetch_url",
-            params: ["url": arguments.url, "max_length": arguments.maxLength]
+            params: ["url": arguments.url, "max_length": "1200"]
         )
     }
 }
@@ -284,19 +291,29 @@ struct AgentSwiftServer {
                 context: context
             )
 
-            let session = LanguageModelSession(
-                model: SystemLanguageModel.default,
-                tools: capturedTools
-            ) {
-                Instructions(
-                    "You are a helpful assistant. Use the available tools to help users with calculations, time queries, text transformations, and web page fetching. Always respond concisely."
+            do {
+                let session = LanguageModelSession(
+                    model: SystemLanguageModel.default,
+                    tools: capturedTools
+                ) {
+                    Instructions(
+                        "You are a helpful assistant. Use the available tools to help users with calculations, time queries, text transformations, and web page fetching. Always respond concisely."
+                    )
+                }
+
+                let response = try await session.respond(to: chatReq.message)
+                return try encodedResponse(
+                    ChatResponse(body: response.content, service: serviceID)
+                )
+            } catch {
+                print("LanguageModelSession error: \(error)")
+                return try encodedResponse(
+                    ChatResponse(
+                        body: "Error: \(error.localizedDescription)",
+                        service: serviceID
+                    )
                 )
             }
-
-            let response = try await session.respond(to: chatReq.message)
-            return try encodedResponse(
-                ChatResponse(body: response.content, service: serviceID)
-            )
         }
 
         print("\(serviceID) listening on \(port) (mcp_servers=\(mcpClients.count))")
