@@ -51,6 +51,13 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple: \
             -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
 
+      - name: Store notarization key
+        env:
+          ASC_KEY_BASE64: ${{ secrets.ASC_AUTH_KEY }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/notarize"
+          echo "$ASC_KEY_BASE64" | base64 --decode > "$RUNNER_TEMP/notarize/AuthKey.p8"
+
       - name: Archive app
         run: |
           xcodebuild archive \
@@ -93,19 +100,15 @@ jobs:
             -exportPath "$RUNNER_TEMP/export"
 
       - name: Notarize app
-        env:
-          APPLE_ID: ${{ secrets.NOTARIZATION_APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.NOTARIZATION_PASSWORD }}
-          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           APP_PATH="$RUNNER_TEMP/export/AgentsInBlack.app"
 
           ditto -c -k --keepParent "$APP_PATH" "$RUNNER_TEMP/app-notarize.zip"
 
           xcrun notarytool submit "$RUNNER_TEMP/app-notarize.zip" \
-            --apple-id "$APPLE_ID" \
-            --password "$APPLE_PASSWORD" \
-            --team-id "$TEAM_ID" \
+            --key "$RUNNER_TEMP/notarize/AuthKey.p8" \
+            --key-id "${{ secrets.ASC_KEY_ID }}" \
+            --issuer "${{ secrets.ASC_ISSUER_ID }}" \
             --wait --timeout 15m
 
           xcrun stapler staple "$APP_PATH"
@@ -127,10 +130,6 @@ jobs:
           rm -rf "$STAGING"
 
       - name: Sign and notarize DMG
-        env:
-          APPLE_ID: ${{ secrets.NOTARIZATION_APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.NOTARIZATION_PASSWORD }}
-          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           DMG_PATH="$RUNNER_TEMP/AgentsInBlack.dmg"
 
@@ -139,9 +138,9 @@ jobs:
             "$DMG_PATH"
 
           xcrun notarytool submit "$DMG_PATH" \
-            --apple-id "$APPLE_ID" \
-            --password "$APPLE_PASSWORD" \
-            --team-id "$TEAM_ID" \
+            --key "$RUNNER_TEMP/notarize/AuthKey.p8" \
+            --key-id "${{ secrets.ASC_KEY_ID }}" \
+            --issuer "${{ secrets.ASC_ISSUER_ID }}" \
             --wait --timeout 15m
 
           xcrun stapler staple "$DMG_PATH"
@@ -154,7 +153,9 @@ jobs:
 
       - name: Cleanup keychain
         if: always()
-        run: security delete-keychain "$RUNNER_TEMP/build.keychain-db" || true
+        run: |
+          security delete-keychain "$RUNNER_TEMP/build.keychain-db" || true
+          rm -rf "$RUNNER_TEMP/notarize" || true
 
   # ── Build & sign CLI binary ────────────────────────────────────
   build-cli:
@@ -170,8 +171,7 @@ jobs:
 
       - name: Build CLI
         run: |
-          swift build -c release --arch ${{ matrix.arch }} \
-            --product aib --product aib-dev
+          swift build -c release --arch ${{ matrix.arch }}
 
       - name: Import signing certificate
         env:
@@ -194,9 +194,16 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple: \
             -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
 
+      - name: Store notarization key
+        env:
+          ASC_KEY_BASE64: ${{ secrets.ASC_AUTH_KEY }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/notarize"
+          echo "$ASC_KEY_BASE64" | base64 --decode > "$RUNNER_TEMP/notarize/AuthKey.p8"
+
       - name: Sign CLI binaries
         run: |
-          BIN_PATH="$(swift build -c release --arch ${{ matrix.arch }} --product aib --show-bin-path)"
+          BIN_PATH="$(swift build -c release --arch ${{ matrix.arch }} --show-bin-path)"
           for bin in aib aib-dev; do
             codesign --force --options runtime --timestamp \
               --sign "Developer ID Application" \
@@ -205,18 +212,14 @@ jobs:
           echo "BIN_PATH=$BIN_PATH" >> "$GITHUB_ENV"
 
       - name: Notarize CLI
-        env:
-          APPLE_ID: ${{ secrets.NOTARIZATION_APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.NOTARIZATION_PASSWORD }}
-          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           zip -j "$RUNNER_TEMP/cli-notarize.zip" \
             "$BIN_PATH/aib" "$BIN_PATH/aib-dev"
 
           xcrun notarytool submit "$RUNNER_TEMP/cli-notarize.zip" \
-            --apple-id "$APPLE_ID" \
-            --password "$APPLE_PASSWORD" \
-            --team-id "$TEAM_ID" \
+            --key "$RUNNER_TEMP/notarize/AuthKey.p8" \
+            --key-id "${{ secrets.ASC_KEY_ID }}" \
+            --issuer "${{ secrets.ASC_ISSUER_ID }}" \
             --wait --timeout 10m
 
       - name: Package CLI archive
@@ -233,7 +236,9 @@ jobs:
 
       - name: Cleanup keychain
         if: always()
-        run: security delete-keychain "$RUNNER_TEMP/build.keychain-db" || true
+        run: |
+          security delete-keychain "$RUNNER_TEMP/build.keychain-db" || true
+          rm -rf "$RUNNER_TEMP/notarize" || true
 
   # ── Create GitHub Release ──────────────────────────────────────
   release:
