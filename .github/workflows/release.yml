@@ -1,0 +1,281 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+env:
+  XCPROJECT: AgentsInBlack/AgentsInBlack.xcodeproj
+  SCHEME: AgentsInBlack
+
+jobs:
+  # ── Build & sign macOS App, create DMG ─────────────────────────
+  build-app:
+    name: Build macOS App
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          BUILD_NUMBER="$(echo "$VERSION" | tr -d '.')"
+          echo "build_number=$BUILD_NUMBER" >> "$GITHUB_OUTPUT"
+
+      - name: Import signing certificate
+        env:
+          P12_BASE64: ${{ secrets.DEVELOPER_ID_APPLICATION_P12 }}
+          P12_PASSWORD: ${{ secrets.DEVELOPER_ID_APPLICATION_P12_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          echo "$P12_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" \
+            -P "$P12_PASSWORD" \
+            -A -t cert -f pkcs12 \
+            -k "$KEYCHAIN_PATH"
+
+          security list-keychains -d user -s "$KEYCHAIN_PATH" login.keychain
+          security set-key-partition-list -S apple-tool:,apple: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+      - name: Archive app
+        run: |
+          xcodebuild archive \
+            -project "$XCPROJECT" \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -destination 'generic/platform=macOS' \
+            -archivePath "$RUNNER_TEMP/AgentsInBlack.xcarchive" \
+            MARKETING_VERSION="${{ steps.version.outputs.version }}" \
+            CURRENT_PROJECT_VERSION="${{ steps.version.outputs.build_number }}" \
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY="Developer ID Application" \
+            DEVELOPMENT_TEAM="${{ secrets.APPLE_TEAM_ID }}" \
+            OTHER_CODE_SIGN_FLAGS="--timestamp" \
+            ONLY_ACTIVE_ARCH=NO
+
+      - name: Export archive
+        run: |
+          cat > "$RUNNER_TEMP/export-options.plist" << 'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+            "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>method</key>
+              <string>developer-id</string>
+              <key>teamID</key>
+              <string>WWCKBW8CKN</string>
+              <key>signingStyle</key>
+              <string>manual</string>
+              <key>signingCertificate</key>
+              <string>Developer ID Application</string>
+          </dict>
+          </plist>
+          PLIST
+
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/AgentsInBlack.xcarchive" \
+            -exportOptionsPlist "$RUNNER_TEMP/export-options.plist" \
+            -exportPath "$RUNNER_TEMP/export"
+
+      - name: Notarize app
+        env:
+          APPLE_ID: ${{ secrets.NOTARIZATION_APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.NOTARIZATION_PASSWORD }}
+          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          APP_PATH="$RUNNER_TEMP/export/AgentsInBlack.app"
+
+          ditto -c -k --keepParent "$APP_PATH" "$RUNNER_TEMP/app-notarize.zip"
+
+          xcrun notarytool submit "$RUNNER_TEMP/app-notarize.zip" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_PASSWORD" \
+            --team-id "$TEAM_ID" \
+            --wait --timeout 15m
+
+          xcrun stapler staple "$APP_PATH"
+
+      - name: Create DMG
+        run: |
+          APP_PATH="$RUNNER_TEMP/export/AgentsInBlack.app"
+          DMG_PATH="$RUNNER_TEMP/AgentsInBlack.dmg"
+
+          STAGING="$(mktemp -d)"
+          cp -a "$APP_PATH" "$STAGING/"
+          ln -s /Applications "$STAGING/Applications"
+
+          hdiutil create \
+            -volname "AgentsInBlack" \
+            -srcfolder "$STAGING" \
+            -ov -format UDZO \
+            "$DMG_PATH"
+          rm -rf "$STAGING"
+
+      - name: Sign and notarize DMG
+        env:
+          APPLE_ID: ${{ secrets.NOTARIZATION_APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.NOTARIZATION_PASSWORD }}
+          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          DMG_PATH="$RUNNER_TEMP/AgentsInBlack.dmg"
+
+          codesign --force --timestamp \
+            --sign "Developer ID Application" \
+            "$DMG_PATH"
+
+          xcrun notarytool submit "$DMG_PATH" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_PASSWORD" \
+            --team-id "$TEAM_ID" \
+            --wait --timeout 15m
+
+          xcrun stapler staple "$DMG_PATH"
+
+      - name: Upload DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: dmg
+          path: ${{ runner.temp }}/AgentsInBlack.dmg
+
+      - name: Cleanup keychain
+        if: always()
+        run: security delete-keychain "$RUNNER_TEMP/build.keychain-db" || true
+
+  # ── Build & sign CLI binary ────────────────────────────────────
+  build-cli:
+    name: Build CLI (${{ matrix.arch }})
+    runs-on: macos-latest
+    timeout-minutes: 20
+    strategy:
+      matrix:
+        arch: [arm64, x86_64]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build CLI
+        run: |
+          swift build -c release --arch ${{ matrix.arch }} \
+            --product aib --product aib-dev
+
+      - name: Import signing certificate
+        env:
+          P12_BASE64: ${{ secrets.DEVELOPER_ID_APPLICATION_P12 }}
+          P12_PASSWORD: ${{ secrets.DEVELOPER_ID_APPLICATION_P12_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          echo "$P12_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" \
+            -P "$P12_PASSWORD" \
+            -A -t cert -f pkcs12 \
+            -k "$KEYCHAIN_PATH"
+
+          security list-keychains -d user -s "$KEYCHAIN_PATH" login.keychain
+          security set-key-partition-list -S apple-tool:,apple: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+      - name: Sign CLI binaries
+        run: |
+          BIN_PATH="$(swift build -c release --arch ${{ matrix.arch }} --product aib --show-bin-path)"
+          for bin in aib aib-dev; do
+            codesign --force --options runtime --timestamp \
+              --sign "Developer ID Application" \
+              "$BIN_PATH/$bin"
+          done
+          echo "BIN_PATH=$BIN_PATH" >> "$GITHUB_ENV"
+
+      - name: Notarize CLI
+        env:
+          APPLE_ID: ${{ secrets.NOTARIZATION_APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.NOTARIZATION_PASSWORD }}
+          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          zip -j "$RUNNER_TEMP/cli-notarize.zip" \
+            "$BIN_PATH/aib" "$BIN_PATH/aib-dev"
+
+          xcrun notarytool submit "$RUNNER_TEMP/cli-notarize.zip" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_PASSWORD" \
+            --team-id "$TEAM_ID" \
+            --wait --timeout 10m
+
+      - name: Package CLI archive
+        run: |
+          ARCHIVE="aib-macos-${{ matrix.arch }}.tar.gz"
+          tar -czf "$RUNNER_TEMP/$ARCHIVE" \
+            -C "$BIN_PATH" aib aib-dev
+
+      - name: Upload CLI archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-${{ matrix.arch }}
+          path: ${{ runner.temp }}/aib-macos-${{ matrix.arch }}.tar.gz
+
+      - name: Cleanup keychain
+        if: always()
+        run: security delete-keychain "$RUNNER_TEMP/build.keychain-db" || true
+
+  # ── Create GitHub Release ──────────────────────────────────────
+  release:
+    name: Create GitHub Release
+    needs: [build-app, build-cli]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Extract version
+        id: version
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "v${{ steps.version.outputs.version }}"
+          tag_name: ${{ github.ref_name }}
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          generate_release_notes: true
+          body: |
+            ## Installation
+
+            ### macOS App
+            Download `AgentsInBlack.dmg`, open it, and drag AgentsInBlack to Applications.
+
+            ### CLI
+            ```bash
+            # Apple Silicon (M1/M2/M3/M4)
+            curl -L https://github.com/1amageek/agents-in-black/releases/download/${{ github.ref_name }}/aib-macos-arm64.tar.gz | tar xz -C /usr/local/bin
+
+            # Intel
+            curl -L https://github.com/1amageek/agents-in-black/releases/download/${{ github.ref_name }}/aib-macos-x86_64.tar.gz | tar xz -C /usr/local/bin
+            ```
+          files: |
+            artifacts/dmg/AgentsInBlack.dmg
+            artifacts/cli-arm64/aib-macos-arm64.tar.gz
+            artifacts/cli-x86_64/aib-macos-x86_64.tar.gz
