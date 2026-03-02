@@ -159,19 +159,16 @@ jobs:
 
   # ── Build & sign CLI binary ────────────────────────────────────
   build-cli:
-    name: Build CLI (${{ matrix.arch }})
+    name: Build CLI (arm64)
     runs-on: macos-26
     timeout-minutes: 20
-    strategy:
-      matrix:
-        arch: [arm64, x86_64]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Build CLI
         run: |
-          swift build -c release --arch ${{ matrix.arch }}
+          swift build -c release --arch arm64
 
       - name: Import signing certificate
         env:
@@ -203,7 +200,7 @@ jobs:
 
       - name: Sign CLI binaries
         run: |
-          BIN_PATH="$(swift build -c release --arch ${{ matrix.arch }} --show-bin-path)"
+          BIN_PATH="$(swift build -c release --arch arm64 --show-bin-path)"
           for bin in aib aib-dev; do
             codesign --force --options runtime --timestamp \
               --sign "Developer ID Application" \
@@ -224,15 +221,14 @@ jobs:
 
       - name: Package CLI archive
         run: |
-          ARCHIVE="aib-macos-${{ matrix.arch }}.tar.gz"
-          tar -czf "$RUNNER_TEMP/$ARCHIVE" \
+          tar -czf "$RUNNER_TEMP/aib-macos-arm64.tar.gz" \
             -C "$BIN_PATH" aib aib-dev
 
       - name: Upload CLI archive
         uses: actions/upload-artifact@v4
         with:
-          name: cli-${{ matrix.arch }}
-          path: ${{ runner.temp }}/aib-macos-${{ matrix.arch }}.tar.gz
+          name: cli-arm64
+          path: ${{ runner.temp }}/aib-macos-arm64.tar.gz
 
       - name: Cleanup keychain
         if: always()
@@ -272,15 +268,10 @@ jobs:
             ### macOS App
             Download `AgentsInBlack.dmg`, open it, and drag AgentsInBlack to Applications.
 
-            ### CLI
+            ### CLI (Apple Silicon)
             ```bash
-            # Apple Silicon (M1/M2/M3/M4)
             curl -L https://github.com/1amageek/agents-in-black/releases/download/${{ github.ref_name }}/aib-macos-arm64.tar.gz | tar xz -C /usr/local/bin
-
-            # Intel
-            curl -L https://github.com/1amageek/agents-in-black/releases/download/${{ github.ref_name }}/aib-macos-x86_64.tar.gz | tar xz -C /usr/local/bin
             ```
           files: |
             artifacts/dmg/AgentsInBlack.dmg
             artifacts/cli-arm64/aib-macos-arm64.tar.gz
-            artifacts/cli-x86_64/aib-macos-x86_64.tar.gz
