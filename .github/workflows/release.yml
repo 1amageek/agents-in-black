@@ -17,10 +17,17 @@ jobs:
   build-app:
     name: Build macOS App
     runs-on: macos-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Install Swift 6.2
+        run: |
+          curl -L https://download.swift.org/swift-6.2-release/xcode/swift-6.2-RELEASE/swift-6.2-RELEASE-osx.pkg -o /tmp/swift.pkg
+          sudo installer -pkg /tmp/swift.pkg -target /
+          export TOOLCHAINS=swift
+          swift --version
 
       - name: Extract version from tag
         id: version
@@ -52,6 +59,8 @@ jobs:
             -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
 
       - name: Archive app
+        env:
+          TOOLCHAINS: swift
         run: |
           xcodebuild archive \
             -project "$XCPROJECT" \
@@ -160,7 +169,7 @@ jobs:
   build-cli:
     name: Build CLI (${{ matrix.arch }})
     runs-on: macos-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     strategy:
       matrix:
         arch: [arm64, x86_64]
@@ -168,7 +177,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Install Swift 6.2
+        run: |
+          curl -L https://download.swift.org/swift-6.2-release/xcode/swift-6.2-RELEASE/swift-6.2-RELEASE-osx.pkg -o /tmp/swift.pkg
+          sudo installer -pkg /tmp/swift.pkg -target /
+          export TOOLCHAINS=swift
+          swift --version
+
       - name: Build CLI
+        env:
+          TOOLCHAINS: swift
         run: |
           swift build -c release --arch ${{ matrix.arch }} \
             --product aib --product aib-dev
@@ -195,6 +213,8 @@ jobs:
             -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
 
       - name: Sign CLI binaries
+        env:
+          TOOLCHAINS: swift
         run: |
           BIN_PATH="$(swift build -c release --arch ${{ matrix.arch }} --product aib --show-bin-path)"
           for bin in aib aib-dev; do

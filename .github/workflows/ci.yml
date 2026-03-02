@@ -14,13 +14,24 @@ jobs:
   build-and-test:
     name: Build & Test
     runs-on: macos-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Install Swift 6.2
+        run: |
+          curl -L https://download.swift.org/swift-6.2-release/xcode/swift-6.2-RELEASE/swift-6.2-RELEASE-osx.pkg -o /tmp/swift.pkg
+          sudo installer -pkg /tmp/swift.pkg -target /
+          export TOOLCHAINS=swift
+          swift --version
+
       - name: Build
+        env:
+          TOOLCHAINS: swift
         run: swift build
 
       - name: Test
-        run: swift test
+        env:
+          TOOLCHAINS: swift
+        run: swift test --timeout 30
