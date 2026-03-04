@@ -21,14 +21,49 @@ public struct SwiftRuntimeAdapter: RuntimeAdapter, Sendable {
         } else {
             framework = .plain
         }
-        let candidates = [CommandCandidate(argv: ["swift", "run"], reason: "SwiftPM repository")]
+        let executableNames = Self.parseExecutableTargetNames(from: content)
+        let candidates = executableNames.map { name in
+            CommandCandidate(argv: ["swift", "run", name], reason: "executableTarget \(name)")
+        }
+        let fallbackCandidates = candidates.isEmpty
+            ? [CommandCandidate(argv: ["swift", "run"], reason: "SwiftPM repository")]
+            : candidates
+
+        // Infer service kind from MCP SDK dependency
+        let serviceKind: ServiceKind = Self.hasMCPDependency(in: content) ? .mcp : .agent
+
         return RuntimeDetectionResult(
             runtime: .swift,
             framework: framework,
             packageManager: .swiftpm,
             confidence: .medium,
-            candidates: candidates
+            candidates: fallbackCandidates,
+            serviceNames: executableNames,
+            suggestedServiceKind: serviceKind
         )
+    }
+
+    /// Check if Package.swift contains MCP-related dependencies.
+    static func hasMCPDependency(in content: String) -> Bool {
+        let mcpIndicators = [
+            "swift-mcp", "SwiftMCP",
+            "mcp-swift", "MCPServer",
+            "model-context-protocol", "ModelContextProtocol",
+        ]
+        return mcpIndicators.contains { content.contains($0) }
+    }
+
+    /// Extract `.executableTarget(name: "...")` names from Package.swift content.
+    static func parseExecutableTargetNames(from content: String) -> [String] {
+        // Match .executableTarget(name: "xxx") or .executableTarget(name:"xxx")
+        let pattern = #"\.executableTarget\s*\(\s*name\s*:\s*"([^"]+)""#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
+        let range = NSRange(content.startIndex..., in: content)
+        let matches = regex.matches(in: content, range: range)
+        return matches.compactMap { match in
+            guard let nameRange = Range(match.range(at: 1), in: content) else { return nil }
+            return String(content[nameRange])
+        }
     }
 
     public func defaults(packageManager: PackageManagerKind) -> RuntimeDefaults {

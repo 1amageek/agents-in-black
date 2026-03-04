@@ -14,9 +14,10 @@ struct IssueCountButtonView: View {
                 Text("\(count)")
                     .font(.caption.weight(.semibold))
             }
+            .padding(.horizontal, 12)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .padding(.horizontal, 12)
         .help("Show \(label.lowercased()) in sidebar")
     }
 

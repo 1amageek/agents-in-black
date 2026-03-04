@@ -135,7 +135,8 @@ public final class AIBEmulatorController {
 
     public func start(
         workspaceURL: URL,
-        gatewayPort: Int
+        gatewayPort: Int,
+        additionalEnvironment: [String: String] = [:]
     ) async throws -> EmulatorStartResult {
         guard gateway == nil, supervisor == nil else {
             throw EmulatorControllerError.alreadyRunning
@@ -187,6 +188,7 @@ public final class AIBEmulatorController {
                 watchFilePath: workspacePath,
                 gatewayPort: loaded.config.gateway.port,
                 reloadEnabled: true,
+                additionalEnvironment: additionalEnvironment,
                 logger: logger
             )
             await supervisor.startAll()

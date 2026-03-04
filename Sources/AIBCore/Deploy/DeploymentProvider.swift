@@ -29,7 +29,7 @@ public protocol DeploymentProvider: Sendable {
     /// Throws `AIBDeployError` if a required field is missing.
     func validateTargetConfig(_ config: AIBDeployTargetConfig) throws
 
-    /// Sanitize a namespaced service ID into a valid deployed service name.
+    /// Sanitize a package-derived service name into a valid deployed service name.
     /// For example, Cloud Run requires lowercase letters, hyphens, max 63 chars.
     func deployedServiceName(from namespacedID: String) -> String
 
@@ -50,6 +50,15 @@ public protocol DeploymentProvider: Sendable {
         targetConfig: AIBDeployTargetConfig
     ) -> String
 
+    /// Return shell commands to configure registry authentication (run once before all services).
+    func registryAuthCommands(targetConfig: AIBDeployTargetConfig) -> [DeployCommand]
+
+    /// Return shell commands to ensure the registry repository exists for a service (idempotent).
+    func ensureRegistryRepoCommands(
+        service: AIBDeployServicePlan,
+        targetConfig: AIBDeployTargetConfig
+    ) -> [DeployCommand]
+
     /// Return shell commands for container build + push.
     func buildAndPushCommands(
         imageTag: String,
@@ -58,10 +67,12 @@ public protocol DeploymentProvider: Sendable {
     ) -> [DeployCommand]
 
     /// Return shell commands for deploying a service.
+    /// - Parameter secrets: User-provided secret values (name → value) for this service.
     func deployCommands(
         service: AIBDeployServicePlan,
         imageTag: String,
-        targetConfig: AIBDeployTargetConfig
+        targetConfig: AIBDeployTargetConfig,
+        secrets: [String: String]
     ) -> [DeployCommand]
 
     /// Return shell commands for auth/access bindings.
@@ -69,6 +80,13 @@ public protocol DeploymentProvider: Sendable {
         binding: AIBDeployAuthBinding,
         targetConfig: AIBDeployTargetConfig
     ) -> [DeployCommand]
+
+    /// Query existing environment variable names already configured on a deployed service.
+    /// Returns an empty set if the service does not exist or has no env vars.
+    func existingEnvVarNames(
+        serviceName: String,
+        targetConfig: AIBDeployTargetConfig
+    ) async -> Set<String>
 
     /// Parse the deployed URL from command output.
     func parseDeployedURL(from output: String) -> String?
@@ -89,4 +107,12 @@ extension DeploymentProvider {
     public var prerequisiteCheckIDs: Set<PreflightCheckID> {
         Set(preflightDependencies().keys)
     }
+
+    public func registryAuthCommands(targetConfig: AIBDeployTargetConfig) -> [DeployCommand] { [] }
+    public func ensureRegistryRepoCommands(service: AIBDeployServicePlan, targetConfig: AIBDeployTargetConfig) -> [DeployCommand] { [] }
+
+    public func existingEnvVarNames(
+        serviceName: String,
+        targetConfig: AIBDeployTargetConfig
+    ) async -> Set<String> { [] }
 }

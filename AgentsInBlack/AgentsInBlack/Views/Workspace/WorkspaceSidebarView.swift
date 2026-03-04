@@ -1,9 +1,15 @@
 import AIBCore
 import AIBRuntimeCore
+import AIBWorkspace
+import os
 import SwiftUI
+import UniformTypeIdentifiers
+
+private let sidebarDropLogger = os.Logger(subsystem: "com.aib.app", category: "SidebarDrop")
 
 struct WorkspaceSidebarView: View {
     @Bindable var model: AgentsInBlackAppModel
+    @State private var isDropTargeted = false
 
     var body: some View {
         List(selection: $model.selection) {
@@ -12,6 +18,65 @@ struct WorkspaceSidebarView: View {
                 issuesSection
             }
             workspaceSection
+        }
+        .onDrop(of: [.fileURL], isTargeted: $isDropTargeted) { providers in
+            sidebarDropLogger.info("[DROP] onDrop called, providers=\(providers.count), workspace=\(model.workspace != nil)")
+            guard model.workspace != nil else {
+                sidebarDropLogger.warning("[DROP] No workspace open, rejecting drop")
+                return false
+            }
+            for (index, provider) in providers.enumerated() {
+                sidebarDropLogger.info("[DROP] Provider \(index): registeredTypes=\(provider.registeredTypeIdentifiers)")
+                provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { data, error in
+                    if let error {
+                        sidebarDropLogger.error("[DROP] loadItem error: \(error.localizedDescription)")
+                        return
+                    }
+                    sidebarDropLogger.info("[DROP] loadItem data type: \(String(describing: type(of: data)))")
+                    guard let data = data as? Data else {
+                        sidebarDropLogger.error("[DROP] data is not Data, actual: \(String(describing: data))")
+                        return
+                    }
+                    guard let path = String(data: data, encoding: .utf8) else {
+                        sidebarDropLogger.error("[DROP] Failed to decode data as UTF-8 string")
+                        return
+                    }
+                    sidebarDropLogger.info("[DROP] Decoded path string: \(path)")
+                    guard let url = URL(string: path) else {
+                        sidebarDropLogger.error("[DROP] Failed to create URL from: \(path)")
+                        return
+                    }
+                    let fileURL = url.standardizedFileURL
+                    sidebarDropLogger.info("[DROP] Resolved fileURL: \(fileURL.path)")
+                    var isDir: ObjCBool = false
+                    let exists = FileManager.default.fileExists(atPath: fileURL.path, isDirectory: &isDir)
+                    sidebarDropLogger.info("[DROP] exists=\(exists), isDir=\(isDir.boolValue)")
+                    guard exists, isDir.boolValue else {
+                        sidebarDropLogger.warning("[DROP] Not a directory or does not exist: \(fileURL.path)")
+                        return
+                    }
+                    sidebarDropLogger.info("[DROP] Dispatching addDroppedRepositories for: \(fileURL.path)")
+                    Task { @MainActor in
+                        await model.addDroppedRepositories([fileURL])
+                    }
+                }
+            }
+            return true
+        }
+        .overlay {
+            if isDropTargeted && model.workspace != nil {
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(.blue, lineWidth: 2)
+                    .allowsHitTesting(false)
+            }
+        }
+        .onCopyCommand {
+            guard case .issue(let issueID) = model.selection,
+                  let issue = model.runtimeIssues.first(where: { $0.id == issueID }) else {
+                return []
+            }
+            let text = "\(issue.sourceTitle): \(issue.message)"
+            return [NSItemProvider(object: text as NSString)]
         }
         .onAppear {
             normalizeSidebarSelectionIfNeeded()
@@ -29,23 +94,32 @@ struct WorkspaceSidebarView: View {
             if let workspace = model.workspace {
                 workspaceGroupedContent(workspace: workspace)
             } else {
-                Text("Open a workspace to view repositories")
+                Text("Open a workspace to view services")
                     .foregroundStyle(.secondary)
             }
         } header: {
             HStack(spacing: 8) {
                 Text("Workspace")
                 Spacer()
-                Button {
-                    model.addRepositoryPicker()
+                Menu {
+                    Button("Clone Repository…", systemImage: "square.and.arrow.down") {
+                        model.showCloneSheet = true
+                    }
+                    Button("Create New Service…", systemImage: "plus.rectangle.on.folder") {
+                        model.showCreateServiceSheet = true
+                    }
+                    Divider()
+                    Button("Add Directory…", systemImage: "folder.badge.plus") {
+                        model.addDirectoryPicker()
+                    }
                 } label: {
                     Label("Add", systemImage: "plus")
                         .labelStyle(.titleAndIcon)
                 }
-                .buttonStyle(.bordered)
+                .menuStyle(.borderlessButton)
                 .controlSize(.small)
-                .clipShape(Capsule())
-                .help("Add Repository to Workspace")
+                .fixedSize()
+                .help("Add Directory to Workspace")
                 .disabled(model.workspace == nil)
             }
             .padding(.trailing, 8)
@@ -109,65 +183,198 @@ struct WorkspaceSidebarView: View {
     }
 
     private func issueRow(_ issue: RuntimeIssue) -> some View {
-        Button {
-            model.selectIssue(issue)
-        } label: {
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 6) {
-                    Image(systemName: issue.severity.symbol)
-                        .foregroundStyle(issue.severity == .error ? .red : .yellow)
-                    Text(issue.sourceTitle)
-                        .font(.subheadline.weight(.semibold))
-                        .lineLimit(1)
-                    if issue.count > 1 {
-                        Text("×\(issue.count)")
-                            .font(.caption2.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                    }
-                    Spacer(minLength: 4)
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Image(systemName: issue.severity.symbol)
+                    .foregroundStyle(issue.severity == .error ? .red : .yellow)
+                Text(issue.sourceTitle)
+                    .font(.subheadline.weight(.semibold))
+                    .lineLimit(1)
+                if issue.count > 1 {
+                    Text("×\(issue.count)")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.secondary)
                 }
-                Text(issue.message)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
+                Spacer(minLength: 4)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .contentShape(Rectangle())
+            Text(issue.message)
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
-        .buttonStyle(.plain)
-        .help("Open issue location")
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+        .tag(SelectionTarget.issue(issue.id))
     }
+
+    // MARK: - Service-Centric Workspace Content
 
     @ViewBuilder
     private func workspaceGroupedContent(workspace: AIBWorkspaceSnapshot) -> some View {
-        let agents = workspace.repos.filter { repoCategory(for: $0) == .agent }
-        let mcps = workspace.repos.filter { repoCategory(for: $0) == .mcp }
-        let others = workspace.repos.filter { repoCategory(for: $0) == .other }
+        let agents = workspace.services
+            .filter { $0.serviceKind == .agent }
+            .sorted { $0.namespacedID.localizedStandardCompare($1.namespacedID) == .orderedAscending }
+        let mcps = workspace.services
+            .filter { $0.serviceKind == .mcp }
+            .sorted { $0.namespacedID.localizedStandardCompare($1.namespacedID) == .orderedAscending }
+        let others = workspace.services
+            .filter { $0.serviceKind == .unknown }
+            .sorted { $0.namespacedID.localizedStandardCompare($1.namespacedID) == .orderedAscending }
+
+        let servicesByRepoID = Dictionary(grouping: workspace.services, by: \.repoID)
+        let unconfiguredServices: [(id: String, runtime: String, repo: AIBRepoModel)] = workspace.repos
+            .flatMap { repo -> [(id: String, runtime: String, repo: AIBRepoModel)] in
+                let repoServices = servicesByRepoID[repo.id] ?? []
+                // Build set of runtimes covered by configured services:
+                // match by localID (auto-generated uses runtime as ID) or by inferring runtime from runCommand
+                var configuredRuntimes = Set(repoServices.map(\.localID))
+                for service in repoServices {
+                    if let first = service.runCommand.first {
+                        let inferred = RuntimeKind.fromCommand(first)
+                        if inferred != .unknown {
+                            configuredRuntimes.insert(inferred.rawValue)
+                        }
+                    }
+                }
+                return repo.detectedRuntimes
+                    .filter { !configuredRuntimes.contains($0) }
+                    .map { rt in (id: "\(repo.id)__\(rt)", runtime: rt, repo: repo) }
+            }
+            .sorted { $0.repo.name.localizedStandardCompare($1.repo.name) == .orderedAscending }
 
         if !agents.isEmpty {
             sidebarGroupHeader("Agents")
-            repoListRows(agents)
+            ForEach(agents, id: \.id) { service in
+                serviceRow(service)
+            }
         }
 
         if !mcps.isEmpty {
             if !agents.isEmpty { sidebarSeparatorRow() }
             sidebarGroupHeader("MCP")
-            repoListRows(mcps)
+            ForEach(mcps, id: \.id) { service in
+                serviceRow(service)
+            }
         }
 
         if !others.isEmpty {
             if !agents.isEmpty || !mcps.isEmpty { sidebarSeparatorRow() }
             sidebarGroupHeader("Other")
-            repoListRows(others)
+            ForEach(others, id: \.id) { service in
+                serviceRow(service)
+            }
+        }
+
+        if !unconfiguredServices.isEmpty {
+            if !agents.isEmpty || !mcps.isEmpty || !others.isEmpty { sidebarSeparatorRow() }
+            sidebarGroupHeader("Unconfigured")
+            ForEach(unconfiguredServices, id: \.id) { item in
+                unconfiguredServiceRow(runtime: item.runtime, repo: item.repo)
+            }
         }
     }
 
-    @ViewBuilder
-    private func repoListRows(_ repos: [AIBRepoModel]) -> some View {
-        ForEach(repos, id: \.id) { repo in
-            repoRow(repo)
+    private func serviceRow(_ service: AIBServiceModel) -> some View {
+        let parentRepo = parentRepo(of: service)
+        let runtime = parentRepo?.runtime ?? "unknown"
+        return HStack(spacing: 8) {
+            Image(systemName: iconName(for: runtime))
+                .foregroundStyle(.secondary)
+                .frame(width: 16)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(service.packageName ?? service.localID)
+                Text(service.namespacedID)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer(minLength: 8)
+
+            if model.sidebarServiceStatus(for: service) == .starting {
+                ProgressView()
+                    .controlSize(.mini)
+                    .help("Service status: starting")
+            } else if let badge = serviceStatusBadge(for: service) {
+                StatusBadgeButton(badge: badge)
+            }
+
+            Button {
+                model.select(.service(service.id))
+                model.openInEditor()
+            } label: {
+                Image(systemName: "arrow.up.forward.app")
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .help("Open \(service.repoName) in Editor")
+        }
+        .contentShape(Rectangle())
+        .onTapGesture {
+            model.select(.service(service.id))
+        }
+        .tag(SelectionTarget.service(service.id))
+        .contextMenu {
+            Button("Open in Editor") {
+                model.select(.service(service.id))
+                model.openInEditor()
+            }
+            Divider()
+            Button("Remove Service", role: .destructive) {
+                model.requestRemoveService(
+                    namespacedServiceID: service.namespacedID,
+                    displayName: service.packageName ?? service.localID
+                )
+            }
         }
     }
+
+    private func unconfiguredServiceRow(runtime: String, repo: AIBRepoModel) -> some View {
+        let namespace = repo.name
+        let namespacedID = "\(namespace)/\(runtime)"
+        let displayName = repo.detectedPackageNames[runtime] ?? runtime
+        return HStack(spacing: 8) {
+            Image(systemName: iconName(for: runtime))
+                .foregroundStyle(.tertiary)
+                .frame(width: 16)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(displayName)
+                    .foregroundStyle(.secondary)
+                Text(namespacedID)
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            }
+
+            Spacer(minLength: 8)
+
+            Button {
+                Task { await model.configureServices(repoID: repo.id, runtimes: [runtime]) }
+            } label: {
+                Image(systemName: "plus.circle")
+                    .foregroundStyle(.secondary)
+                    .frame(width: 20, height: 20)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Configure \(displayName)")
+        }
+        .contentShape(Rectangle())
+        .onTapGesture {
+            model.select(.repo(repo.id))
+        }
+        .tag(SelectionTarget.repo(repo.id))
+        .contextMenu {
+            Button("Configure Service") {
+                Task { await model.configureServices(repoID: repo.id, runtimes: [runtime]) }
+            }
+            Button("Open in Editor") {
+                model.select(.repo(repo.id))
+                model.openInEditor()
+            }
+        }
+    }
+
+    // MARK: - Helpers
 
     private func sidebarGroupHeader(_ title: String) -> some View {
         Text(title)
@@ -183,83 +390,8 @@ struct WorkspaceSidebarView: View {
             .padding(.vertical, 4)
     }
 
-    private func repoRow(_ repo: AIBRepoModel) -> some View {
-        HStack(spacing: 8) {
-            Image(systemName: iconName(for: repo.runtime))
-                .foregroundStyle(.secondary)
-                .frame(width: 16)
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(repo.name)
-                Text("\(repo.runtime)/\(repo.framework)")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            Spacer(minLength: 8)
-
-            if model.sidebarStatus(for: repo) == .starting {
-                ProgressView()
-                    .controlSize(.mini)
-                    .help("Runtime status: starting")
-            } else if let badge = repoStatusBadge(for: repo) {
-                Image(systemName: badge.symbol)
-                    .foregroundStyle(badge.color)
-                    .help(badge.help)
-            }
-
-            Button {
-                model.select(.repo(repo.id))
-                model.openInEditor()
-            } label: {
-                Image(systemName: "arrow.up.forward.app")
-                    .foregroundStyle(.secondary)
-            }
-            .buttonStyle(.plain)
-            .help("Open \(repo.name) in Editor")
-        }
-        .contentShape(Rectangle())
-        .onTapGesture {
-            model.select(.repo(repo.id))
-        }
-        .tag(SelectionTarget.repo(repo.id))
-        .contextMenu {
-            Button("Open in Editor") {
-                model.select(.repo(repo.id))
-                model.openInEditor()
-            }
-        }
-    }
-
-    private func servicesForRepo(_ repo: AIBRepoModel) -> [AIBServiceModel] {
-        guard let workspace = model.workspace else { return [] }
-        return workspace.services
-            .filter { $0.repoID == repo.id }
-            .sorted { $0.namespacedID.localizedStandardCompare($1.namespacedID) == .orderedAscending }
-    }
-
-    private enum RepoCategory {
-        case agent
-        case mcp
-        case other
-    }
-
-    private func repoCategory(for repo: AIBRepoModel) -> RepoCategory {
-        let services = servicesForRepo(repo)
-        if services.contains(where: { $0.serviceKind == .agent }) {
-            return .agent
-        }
-        if services.contains(where: { $0.serviceKind == .mcp }) {
-            return .mcp
-        }
-
-        if services.contains(where: { $0.mountPath.hasPrefix("/agents/") }) {
-            return .agent
-        }
-        if services.contains(where: { $0.mountPath.hasPrefix("/mcp/") }) {
-            return .mcp
-        }
-        return .other
+    private func parentRepo(of service: AIBServiceModel) -> AIBRepoModel? {
+        model.workspace?.repos.first(where: { $0.id == service.repoID })
     }
 
     private func normalizeSidebarSelectionIfNeeded() {
@@ -269,10 +401,6 @@ struct WorkspaceSidebarView: View {
         }
         if let service = model.primaryWorkbenchService() {
             model.selection = .service(service.id)
-            return
-        }
-        if let repo = model.selectedRepo() {
-            model.selection = .repo(repo.id)
         }
     }
 
@@ -286,14 +414,15 @@ struct WorkspaceSidebarView: View {
         }
     }
 
-    private func repoStatusBadge(for repo: AIBRepoModel) -> (symbol: String, color: Color, help: String)? {
-        guard let status = model.sidebarStatus(for: repo) else { return nil }
+    private func serviceStatusBadge(for service: AIBServiceModel) -> (symbol: String, color: Color, help: String)? {
+        guard let status = model.sidebarServiceStatus(for: service) else { return nil }
+        let reason = model.sidebarServiceStatusReason(for: service)
         switch status {
         case .configured:
             return (
                 symbol: "checkmark.seal.fill",
                 color: .secondary,
-                help: "Workspace status: configured"
+                help: reason ?? "Configured"
             )
         case .starting:
             return nil
@@ -301,20 +430,44 @@ struct WorkspaceSidebarView: View {
             return (
                 symbol: "play.circle.fill",
                 color: .secondary,
-                help: "Runtime status: running"
+                help: reason ?? "Running"
             )
         case .warning:
             return (
                 symbol: "exclamationmark.triangle.fill",
                 color: .yellow,
-                help: "Runtime status: warning"
+                help: reason ?? "Warning"
             )
         case .error:
             return (
                 symbol: "xmark.circle.fill",
                 color: .red,
-                help: "Runtime status: error"
+                help: reason ?? "Error"
             )
+        }
+    }
+}
+
+private struct StatusBadgeButton: View {
+    var badge: (symbol: String, color: Color, help: String)
+    @State private var showPopover = false
+
+    var body: some View {
+        Button {
+            showPopover = true
+        } label: {
+            Image(systemName: badge.symbol)
+                .frame(width: 20, height: 20)
+                .contentShape(Rectangle())
+                .foregroundStyle(badge.color)
+        }
+        .buttonStyle(.plain)
+        .popover(isPresented: $showPopover, arrowEdge: .trailing) {
+            Text(badge.help)
+                .font(.callout)
+                .padding(8)
+                .frame(minWidth: 160, maxWidth: 280)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 }

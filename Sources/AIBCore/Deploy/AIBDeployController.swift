@@ -13,6 +13,7 @@ public final class AIBDeployController {
     private var eventContinuations: [UUID: AsyncStream<AIBDeployEvent>.Continuation] = [:]
     private var currentTask: Task<Void, Never>?
     private var approvalGate: ApprovalGate?
+    private var secretsGate: SecretsGate?
     private var cachedPreflightReport: PreflightReport?
 
     public private(set) var phase: AIBDeployPhase = .idle
@@ -21,6 +22,10 @@ public final class AIBDeployController {
     /// Created at the start of the apply phase; nil otherwise.
     /// Observe this from SwiftUI via `ProgressView(progress)`.
     public private(set) var deployProgress: Progress?
+
+    /// Secrets provided by the user during the secretsInput phase.
+    /// Passed to the provider's deploy commands.
+    public private(set) var providedSecrets: [String: String] = [:]
 
     public init(
         planGenerator: DeployPlanGenerator = DefaultDeployPlanGenerator(),
@@ -50,6 +55,8 @@ public final class AIBDeployController {
         currentTask = nil
         approvalGate?.deny()
         approvalGate = nil
+        secretsGate?.cancel()
+        secretsGate = nil
         finishEventStreams()
     }
 
@@ -111,6 +118,38 @@ public final class AIBDeployController {
                     return
                 }
 
+                // Phase 3.5: Secrets Input — check remote for already-configured secrets,
+                // then prompt only for missing ones.
+                var secretValues: [String: String] = [:]
+                if plan.hasRequiredSecrets {
+                    // Query each service's existing env vars on the remote
+                    var alreadyConfigured: Set<String> = []
+                    for service in plan.services where !service.requiredSecrets.isEmpty {
+                        let existing = await provider.existingEnvVarNames(
+                            serviceName: service.deployedServiceName,
+                            targetConfig: enrichedConfig
+                        )
+                        alreadyConfigured.formUnion(existing)
+                    }
+
+                    let missingSecrets = plan.allRequiredSecrets.filter { !alreadyConfigured.contains($0) }
+
+                    if !missingSecrets.isEmpty {
+                        self.transitionTo(.secretsInput(plan, requiredSecrets: missingSecrets))
+
+                        let sGate = SecretsGate()
+                        self.secretsGate = sGate
+                        let result = await sGate.wait()
+
+                        guard let secrets = result else {
+                            self.transitionTo(.cancelled)
+                            return
+                        }
+                        secretValues = secrets
+                    }
+                }
+                self.providedSecrets = secretValues
+
                 // Phase 4: Apply
                 let progress = Progress(totalUnitCount: Int64(plan.services.count))
                 self.deployProgress = progress
@@ -123,6 +162,7 @@ public final class AIBDeployController {
                     provider: provider,
                     workspaceRoot: workspaceRoot,
                     overallProgress: progress,
+                    secrets: secretValues,
                     logHandler: { [weak self] logEntry in
                         Task { @MainActor in
                             self?.emit(.log(logEntry))
@@ -145,10 +185,17 @@ public final class AIBDeployController {
         approvalGate?.approve()
     }
 
+    /// Provide secrets and proceed to deployment.
+    public func provideSecrets(_ secrets: [String: String]) {
+        secretsGate?.provide(secrets: secrets)
+    }
+
     /// Cancel the current deployment pipeline.
     public func cancel() {
         approvalGate?.deny()
         approvalGate = nil
+        secretsGate?.cancel()
+        secretsGate = nil
         currentTask?.cancel()
         currentTask = nil
     }
@@ -159,7 +206,10 @@ public final class AIBDeployController {
         currentTask = nil
         approvalGate?.deny()
         approvalGate = nil
+        secretsGate?.cancel()
+        secretsGate = nil
         deployProgress = nil
+        providedSecrets = [:]
         phase = .idle
         emit(.phaseChanged(.idle))
     }

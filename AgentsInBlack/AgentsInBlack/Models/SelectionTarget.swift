@@ -5,4 +5,5 @@ enum SelectionTarget: Hashable {
     case repo(String)
     case service(String)
     case file(String)
+    case issue(UUID)
 }

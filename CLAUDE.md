@@ -11,6 +11,27 @@ Three deliverables exist in this repo:
 - **`aib-dev` runtime** — Gateway (reverse proxy) + Supervisor (process orchestration)
 - **AgentsInBlack macOS App** — SwiftUI UI that consumes `AIBCore`
 
+## Concepts & Terminology
+
+| Term | Definition |
+|---|---|
+| **Directory** (`AIBRepoModel`) | Git repository or local directory registered in the workspace. Contains source code and may host one or more Services. Not a primary sidebar item — serves as parent context for Services. |
+| **Service** (`AIBServiceModel`) | The fundamental execution unit. A language-agnostic HTTP process managed by AIB. Identified by `namespacedID` (e.g. `agent-swift/main`). Primary sidebar item. |
+| **Service Kind** | Classification of a Service: `agent` (A2A protocol required), `mcp` (MCP tool server), `unknown` (generic HTTP). Determines sidebar group and topology role. |
+| **Workspace** | Root directory containing `.aib/workspace.yaml`. Aggregates multiple Directories and their Services. |
+| **Actor Topology** | Directed connection graph between Services (agent→MCP, agent→agent). Persisted in `workspace.yaml`, visualized on the Flow Canvas. |
+
+### Service-Centric UI Principle
+- **Service is the fundamental UI unit** — all views (Canvas, Sidebar, Inspector) operate at the service level, not repo/directory level
+- **Display name = package manifest name** — `AIBServiceModel.packageName` is derived from the package manifest (`package.json` "name", `Package.swift` `.executableTarget` name, etc.) and used as the primary display name everywhere in the UI
+- **Display name priority**: `packageName` (from manifest) → `localID` (from workspace.yaml) → `namespacedID` (internal). Never show `namespacedID` as primary name.
+- **`namespacedID` is secondary context** — shown as subtitle/caption text, never as the primary label
+- **Unconfigured services**: use `AIBRepoModel.detectedPackageNames[runtime]` for display name (runtime → package name mapping populated during discovery)
+- **Destructive actions (removal dialogs)**: always show `displayName` (packageName), not the internal `namespacedServiceID`
+- **Sidebar grouping**: by `AIBServiceKind` (Agents / MCP / Other / Unconfigured)
+- **Sidebar status**: per-Service, not per-directory
+- **"Directory" vs "Repo"**: In UI and user-facing strings, prefer "Directory". `AIBRepoModel` remains for backward compatibility but represents a directory.
+
 ## Build & Test Commands
 
 ### SwiftPM (CLI + libraries)
@@ -60,7 +81,7 @@ cd demo
 |---|---|---|
 | `AIBRuntimeCore` | Shared foundation types (IDs, errors, routes, traces, duration parsing) | `ServiceID`, `RoutePrefix`, `DurationParser` |
 | `AIBConfig` | Config types + validation | `AIBConfig`, `AIBConfigValidator`, `LoadedConfig` |
-| `AIBWorkspace` | Repo discovery, workspace sync, config resolution (workspace.yaml → AIBConfig) | `WorkspaceDiscovery`, `WorkspaceSyncer`, `AIBWorkspaceManager` |
+| `AIBWorkspace` | Directory discovery, workspace sync, config resolution (workspace.yaml → AIBConfig) | `WorkspaceDiscovery`, `WorkspaceSyncer`, `AIBWorkspaceManager` |
 | `AIBGateway` | NIOAsyncChannel-based reverse proxy (routing, timeout, header rewrite, concurrency) | `DevGateway`, `HTTPConnectionHandler`, `GatewayControl` |
 | `AIBSupervisor` | Process lifecycle, health/readiness probes, restart, log mux | `DevSupervisor` (actor), `ConfigProvider`, `DefaultProcessController`, `LogMux` |
 | `AIBCore` | App/CLI shared API — emulator control, workspace/service models, events | `AIBEmulatorController`, `AIBWorkspaceSnapshot`, `AIBServiceModel` |
@@ -84,6 +105,27 @@ App ──→ AIBCore (only)
 - `aib workspace list|scan|sync` — workspace management
 - `aib emulator start|validate|status|stop` — local runtime control
 - `aib deploy plan|apply` — deployment (apply not yet implemented)
+
+### Agent Communication — A2A Protocol Required
+
+Agent services (`kind: agent`) must implement the [A2A (Agent-to-Agent) Protocol](https://a2a-protocol.org/latest/specification/). This is not optional.
+
+#### Why A2A
+- The Claude Agent SDK does not define a standard HTTP API — each developer wraps the SDK in a custom endpoint
+- Without a standard protocol, AIB cannot auto-discover agent capabilities, chat endpoints, or streaming format
+- Manual `ui.chat` configuration per agent is wrong — protocol-based discovery replaces it
+
+#### Requirements for Agent Services
+- **Agent Card**: must serve `/.well-known/agent.json` describing capabilities, endpoints, and supported methods
+- **Transport**: JSON-RPC 2.0 over HTTPS with SSE for streaming
+- **Discovery**: AIB reads the Agent Card at startup to determine how to communicate with the agent
+- **Health**: `/health` endpoint (AIB readiness probe falls back to `/health` if `/health/ready` returns 404)
+
+#### What This Means for AIB
+- **No `ui.chat` config** — agent endpoint and message format are discovered from the Agent Card, not configured in workspace.yaml
+- **InputBar availability** is determined by Agent Card presence, not by manual config
+- **App UI** uses A2A protocol to send messages and receive streaming responses
+- **Templates** (`ProjectScaffolder`) for agent-kind services must include A2A Agent Card boilerplate
 
 ### Actor Topology — Define → Persist → Generate → Run/Deploy
 
@@ -164,15 +206,48 @@ Each Agent implementation reads MCP server connections from its own config forma
 - API keys or secrets (managed externally via Secret Manager)
 - VPC Connector config (infrastructure-level, out of scope for v1)
 
-#### Deploy Pipeline (target state)
+#### Service Identity — Package Manifest as Source of Truth
+
+Service name is derived from the package manifest of each project, NOT from AIB internal naming. This name is used consistently across the entire system: UI display name (`AIBServiceModel.packageName`), Cloud Run service name, and Artifact Registry repository name.
+
+| Runtime | Manifest | Service Unit | Name Source |
+|---|---|---|---|
+| Node | `package.json` | package (1:1) | `"name"` field |
+| Swift | `Package.swift` | `.executableTarget` (1:N) | target name |
+| Python | `pyproject.toml` | project (1:1) | `[project].name` |
+| Deno | `deno.json` | module (1:1) | `"name"` field |
+
+- Swift is the only runtime where 1 package can produce multiple services (one per executable target)
+- If the manifest name cannot be determined, fall back to the directory name
+- `RuntimeDetectionResult.serviceNames` stores extracted names
+
+#### Artifact Registry — Provider Internal Detail
+
+Artifact Registry repository naming is a GCP implementation detail. Users never configure it.
+
+- **1 service = 1 Artifact Registry repository** (repository name = service name)
+- Image tag format: `{region}-docker.pkg.dev/{gcpProject}/{serviceName}/service:latest`
+- `artifactRegistryRepo` does not exist in user-facing target config
+- Repository creation is automated per-service in the deploy pipeline (idempotent)
+
+#### Deploy Pipeline
+
 ```
 workspace.yaml  ──→  aib deploy plan   ──→  Show: services, connections, env vars, IAM
-                ──→  aib deploy apply  ──→  Per service:
-                                              1. Build container (docker build or Cloud Build)
-                                              2. Push to Artifact Registry
-                                              3. gcloud run deploy (env vars, IAM, concurrency)
-                                              4. Bind IAM invoker roles for connection edges
+                ──→  aib deploy apply  ──→
+                        1. Docker auth setup (once)
+                           gcloud auth configure-docker {region}-docker.pkg.dev
+                        2. Per service:
+                           a. Ensure Artifact Registry repo (idempotent create)
+                           b. docker build
+                           c. docker push
+                           d. gcloud run deploy
+                        3. Bind IAM invoker roles for connection edges
 ```
+
+- Infrastructure setup (Docker auth) runs once before all services
+- Artifact Registry repo creation is per-service (repo = service)
+- `ArtifactRegistryChecker` is unnecessary — replaced by auto-setup in deploy
 
 #### Key Constraint
 - `service_ref` resolution differs by environment:
@@ -199,6 +274,9 @@ workspace.yaml  ──→  aib deploy plan   ──→  Show: services, connecti
 ### When modifying App UI
 - System/runtime errors and request-level errors must have separate display paths
 - Inspector shows selection details only — never use it as the primary log/error surface
+- **All user-visible errors and warnings must also be emitted to the emulator log stream** — UI-only errors (alerts, badges, toasts) that don't appear in `aib logs` make debugging impossible
+- **Warning/error badges must include actionable context** — generic messages like "Runtime status: warning" are forbidden. Always include the specific reason (e.g., "No services configured", "Build failed: missing dependency")
+- `lastErrorMessage` must be logged via the emulator logger before being displayed — never set it silently
 
 ### When modifying Deploy or Provider
 - **Provider-specific check IDs, service names, CLI commands をハードコードしない** — すべて `DeploymentProvider` protocol 経由で取得する
@@ -206,6 +284,9 @@ workspace.yaml  ──→  aib deploy plan   ──→  Show: services, connecti
 - Docker は全 Provider 共通の依存なので `PreflightCheckID.dockerInstalled` / `.dockerDaemonRunning` の直接参照は許容する
 - UI が Provider 情報を表示する場合は `provider.displayName` を使う — "GCP" 等の文字列リテラルを埋め込まない
 - 新しい Provider を追加する際は `DeploymentProvider` を実装し `DeploymentProviderRegistry` に登録するだけで、App / CLI 側のコード変更は不要であるべき
+- **サービス名はパッケージマニフェストから取得する** — AIB が独自に名前を生成しない。`RuntimeDetectionResult.serviceNames` が正規の名前源
+- **Artifact Registry リポジトリ名 = サービス名** — ユーザーが設定する項目ではない。Provider 内部で自動処理する
+- **インフラ準備（Docker認証、リポジトリ作成）はデプロイフロー内で自動実行する** — 手動設定を前提としない
 
 ## Specifications
 - Runtime spec: `docs/cloud-run-aligned-local-runtime-spec.md`

@@ -1,11 +1,34 @@
 import AppKit
 import AIBCore
 import AIBRuntimeCore
+import AIBWorkspace
 import Darwin
 import Foundation
 import Logging
 import Observation
+import os
 import SwiftUI
+
+private let dropLogger = os.Logger(subsystem: "com.aib.app", category: "RepoDrop")
+
+struct ServiceRemovalTarget {
+    let namespacedServiceID: String
+    let displayName: String
+}
+
+enum CreateServiceError: LocalizedError {
+    case noWorkspace
+    case directoryExists(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .noWorkspace:
+            "Open a workspace first."
+        case .directoryExists(let name):
+            "Directory '\(name)' already exists."
+        }
+    }
+}
 
 @MainActor
 @Observable
@@ -22,6 +45,7 @@ final class AgentsInBlackAppModel {
     var selectedFlowNodeID: String?
 
     // MARK: - Chat Sessions
+    let agentCardCache = A2AAgentCardCache()
     let pipManager = PiPManager(layout: PiPLayout(
         expandedSize: PiPChatPanel.panelSize,
         minimizedSize: PiPGeometry.defaultBubbleSize,
@@ -42,13 +66,15 @@ final class AgentsInBlackAppModel {
     var showInspector: Bool = false
     var selectedChatMessage: ChatMessageItem?
     var lastErrorMessage: String?
+    var serviceRemovalTarget: ServiceRemovalTarget?
+    var showServiceRemovalDialog = false
     let runtimeAnnouncementCenter = RuntimeAnnouncementCenter()
     var gatewayPort: Int = 8080
     var showUtilityPanel: Bool = true
     var utilityPanelMode: UtilityPanelMode = .aibRuntime
     var utilityPanelFilterText: String = ""
     var utilityServiceLogTarget: UtilityServiceLogTarget = .selection
-    var sidebarRepoStatusByRepoID: [String: SidebarRepoStatus] = [:]
+    var sidebarServiceStatusByServiceID: [String: SidebarServiceStatusInfo] = [:]
     var workbenchModeByServiceID: [String: AIBWorkbenchMode] = [:]
     var rawDraftByServiceID: [String: RawRequestDraft] = [:]
     var serviceLogsExpandedByServiceID: [String: Bool] = [:]
@@ -73,6 +99,16 @@ final class AgentsInBlackAppModel {
     var detectedProvider: (any DeploymentProvider)?
     var isCheckingEnvironment: Bool = false
     private var environmentCheckTask: Task<Void, Never>?
+
+    // MARK: - Clone Repository
+    var showCloneSheet: Bool = false
+    var cloneURL: String = ""
+    var cloneInProgress: Bool = false
+    var cloneOutput: String = ""
+    var cloneError: String?
+
+    // MARK: - Create New Service
+    var showCreateServiceSheet: Bool = false
 
     // MARK: - Docker Runtime
     var installedDockerRuntimes: [DockerRuntime] = []
@@ -142,7 +178,7 @@ final class AgentsInBlackAppModel {
             await loadWorkspace(at: url)
             lastErrorMessage = nil
         } catch {
-            lastErrorMessage = "Failed to create workspace: \(error.localizedDescription)"
+            setError("Failed to create workspace: \(error.localizedDescription)")
         }
     }
 
@@ -150,18 +186,27 @@ final class AgentsInBlackAppModel {
         let standardized = url.standardizedFileURL
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: standardized.path, isDirectory: &isDirectory), isDirectory.boolValue else {
-            lastErrorMessage = "Only directories can be opened as a workspace."
+            setError("Only directories can be opened as a workspace.")
             return
         }
         Task { await loadWorkspace(at: standardized) }
     }
 
     func openIncomingURLs(_ urls: [URL]) {
-        guard let directory = urls.first(where: { url in
+        let directories = urls.compactMap { url -> URL? in
             var isDirectory: ObjCBool = false
-            return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) && isDirectory.boolValue
-        }) else { return }
-        openIncomingDirectory(directory)
+            guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+                return nil
+            }
+            return url
+        }
+        guard let first = directories.first else { return }
+
+        if workspace != nil {
+            Task { await addDroppedRepositories(directories) }
+        } else {
+            openIncomingDirectory(first)
+        }
     }
 
     func loadWorkspace(at url: URL) async {
@@ -189,11 +234,12 @@ final class AgentsInBlackAppModel {
             pipManager.closeAll()
             chatSessionsByService.removeAll()
             activeSessionIDByService.removeAll()
-            rebuildSidebarRepoStatuses()
+            agentCardCache.clearAll()
+            rebuildAllSidebarStatuses()
             lastErrorMessage = nil
             refreshEnvironmentStatus()
         } catch {
-            lastErrorMessage = "Failed to load workspace: \(error.localizedDescription)"
+            setError("Failed to load workspace: \(error.localizedDescription)")
         }
     }
 
@@ -202,9 +248,9 @@ final class AgentsInBlackAppModel {
         await loadWorkspace(at: workspace.rootURL)
     }
 
-    func addRepositoryPicker() {
-        guard let workspace else {
-            lastErrorMessage = "Open a workspace first."
+    func addDirectoryPicker() {
+        guard workspace != nil else {
+            setError("Open a workspace first.")
             return
         }
 
@@ -213,41 +259,123 @@ final class AgentsInBlackAppModel {
         panel.canChooseDirectories = true
         panel.canCreateDirectories = false
         panel.allowsMultipleSelection = false
-        panel.directoryURL = workspace.rootURL
-        panel.prompt = "Add Repository"
-        panel.message = "Select a repository directory inside this workspace. The workspace will be rescanned."
+        panel.prompt = "Add Directory"
+        panel.message = "Select a directory to add as a repository reference."
         let response = panel.runModal()
         guard response == .OK, let url = panel.url else { return }
 
-        let selected = url.standardizedFileURL
-        let workspaceRoot = workspace.rootURL.standardizedFileURL
-        guard selected.path == workspaceRoot.path || selected.path.hasPrefix(workspaceRoot.path + "/") else {
-            lastErrorMessage = "Repository must be inside the current workspace directory."
-            return
-        }
-
-        Task { await addRepository(at: selected) }
+        Task { await addRepoReference(at: url.standardizedFileURL) }
     }
 
-    func addRepository(at url: URL) async {
+    func addRepoReference(at url: URL) async {
+        dropLogger.info("[REF] addRepoReference called: \(url.path)")
         guard let workspace else {
-            lastErrorMessage = "Open a workspace first."
+            dropLogger.error("[REF] No workspace open")
+            setError("Open a workspace first.")
             return
         }
 
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue else {
-            lastErrorMessage = "Selected path is not a directory."
+            dropLogger.error("[REF] Not a directory: \(url.path)")
+            setError("Selected path is not a directory.")
             return
         }
 
+        dropLogger.info("[REF] Calling AIBWorkspaceCore.addRepo, workspaceRoot=\(workspace.rootURL.path), repoURL=\(url.path)")
         do {
-            _ = try AIBWorkspaceCore.rescanWorkspace(workspaceRoot: workspace.rootURL.path)
+            _ = try AIBWorkspaceCore.addRepo(workspaceRoot: workspace.rootURL.path, repoURL: url)
+            dropLogger.info("[REF] Success, reloading workspace")
             await loadWorkspace(at: workspace.rootURL)
             lastErrorMessage = nil
         } catch {
-            lastErrorMessage = "Failed to add repository: \(error.localizedDescription)"
+            dropLogger.error("[REF] Failed: \(error.localizedDescription)")
+            setError("Failed to add repository: \(error.localizedDescription)")
         }
+    }
+
+    func createNewService(template: any ProjectTemplate, serviceName: String) async throws {
+        guard let workspace else {
+            throw CreateServiceError.noWorkspace
+        }
+
+        let serviceDir = workspace.rootURL.appendingPathComponent(serviceName)
+
+        guard !FileManager.default.fileExists(atPath: serviceDir.path) else {
+            throw CreateServiceError.directoryExists(serviceName)
+        }
+
+        try template.scaffold(at: serviceDir, serviceName: serviceName)
+        _ = try AIBWorkspaceCore.addRepo(workspaceRoot: workspace.rootURL.path, repoURL: serviceDir)
+        await loadWorkspace(at: workspace.rootURL)
+        lastErrorMessage = nil
+    }
+
+    func addDroppedRepositories(_ urls: [URL]) async {
+        dropLogger.info("[DROP] addDroppedRepositories called: \(urls.map(\.path))")
+        guard workspace != nil else {
+            dropLogger.error("[DROP] No workspace open")
+            setError("Open a workspace first.")
+            return
+        }
+
+        for url in urls {
+            await addRepoReference(at: url.standardizedFileURL)
+        }
+    }
+
+    // MARK: - Clone Repository
+
+    func cloneRepository() {
+        guard let workspace else {
+            cloneError = "Open a workspace first."
+            return
+        }
+
+        let trimmed = cloneURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            cloneError = "Repository URL is empty."
+            return
+        }
+
+        cloneInProgress = true
+        cloneError = nil
+        cloneOutput = ""
+
+        let workspaceRoot = workspace.rootURL.path
+        dropLogger.info("[CLONE] Starting clone: \(trimmed) into \(workspaceRoot)")
+
+        Task {
+            do {
+                let escapedRoot = "'" + workspaceRoot.replacingOccurrences(of: "'", with: "'\\''") + "'"
+                let escapedURL = "'" + trimmed.replacingOccurrences(of: "'", with: "'\\''") + "'"
+                let command = "cd \(escapedRoot) && git clone \(escapedURL)"
+                let result = try await ShellProbe.run(command: command, timeout: .seconds(300))
+
+                if result.exitCode == 0 {
+                    dropLogger.info("[CLONE] Success, rescanning workspace")
+                    _ = try AIBWorkspaceCore.rescanWorkspace(workspaceRoot: workspaceRoot)
+                    await loadWorkspace(at: workspace.rootURL)
+                    cloneInProgress = false
+                    showCloneSheet = false
+                } else {
+                    dropLogger.error("[CLONE] Failed with exit code \(result.exitCode): \(result.stderr)")
+                    cloneError = result.stderr.isEmpty ? "Clone failed (exit code \(result.exitCode))" : result.stderr
+                    cloneInProgress = false
+                }
+            } catch {
+                dropLogger.error("[CLONE] Error: \(error.localizedDescription)")
+                cloneError = error.localizedDescription
+                cloneInProgress = false
+            }
+        }
+    }
+
+    func cleanupCloneState() {
+        cloneURL = ""
+        cloneInProgress = false
+        cloneOutput = ""
+        cloneError = nil
     }
 
     func ensureTerminalTab(for repo: AIBRepoModel) {
@@ -298,6 +426,8 @@ final class AgentsInBlackAppModel {
                     detailSurfaceMode = .workbench
                 }
             }
+        case .issue:
+            break
         }
     }
 
@@ -332,7 +462,7 @@ final class AgentsInBlackAppModel {
 
     private func startEmulator() async {
         guard let workspace else {
-            lastErrorMessage = "Open a workspace first."
+            setError("Open a workspace first.")
             return
         }
         let workspaceYAMLPath = workspace.rootURL
@@ -340,7 +470,7 @@ final class AgentsInBlackAppModel {
             .standardizedFileURL
             .path
         guard FileManager.default.fileExists(atPath: workspaceYAMLPath) else {
-            lastErrorMessage = "Workspace is not initialized for emulator (.aib/workspace.yaml not found). Open the correct folder or run aib init."
+            setError("Workspace is not initialized for emulator (.aib/workspace.yaml not found). Open the correct folder or run aib init.")
             appendAIBSystemLogLine("Missing workspace config: \(workspaceYAMLPath)")
             registerIssue(
                 severity: .error,
@@ -362,22 +492,24 @@ final class AgentsInBlackAppModel {
         serviceLogOutputByServiceID = [:]
         serviceSnapshotsByID = [:]
         runtimeIssues = []
-        rebuildSidebarRepoStatuses()
+        rebuildAllSidebarStatuses()
         if effectiveGatewayPort != requestedGatewayPort {
             appendAIBSystemLogLine("Gateway port \(requestedGatewayPort) is busy. Falling back to \(effectiveGatewayPort).")
             utilityPanelMode = .aibRuntime
             showUtilityPanel = true
         }
         do {
+            let additionalEnv = (UserDefaults.standard.dictionary(forKey: AppSettingsKey.userEnvironmentVariables) as? [String: String]) ?? [:]
             let result = try await emulatorController.start(
                 workspaceURL: workspace.rootURL,
-                gatewayPort: effectiveGatewayPort
+                gatewayPort: effectiveGatewayPort,
+                additionalEnvironment: additionalEnv
             )
             emulatorState = .running(pid: result.pid, port: effectiveGatewayPort)
             lastErrorMessage = nil
         } catch {
             emulatorState = .error(error.localizedDescription)
-            lastErrorMessage = "Failed to start emulator on port \(effectiveGatewayPort): \(error.localizedDescription)"
+            setError("Failed to start emulator on port \(effectiveGatewayPort): \(error.localizedDescription)")
             registerIssue(
                 severity: .error,
                 sourceTitle: "AIB Runtime",
@@ -397,7 +529,7 @@ final class AgentsInBlackAppModel {
             emulatorState = .stopped
         } catch {
             emulatorState = .error(error.localizedDescription)
-            lastErrorMessage = "Failed to stop emulator: \(error.localizedDescription)"
+            setError("Failed to stop emulator: \(error.localizedDescription)")
             registerIssue(
                 severity: .error,
                 sourceTitle: "AIB Runtime",
@@ -411,6 +543,11 @@ final class AgentsInBlackAppModel {
     func openInEditor() {
         if let fileURL = selectedFileURL() {
             editorService.open(url: fileURL)
+            return
+        }
+        if let service = selectedService(),
+           let parentRepo = repo(by: service.repoID) {
+            editorService.open(url: parentRepo.rootURL)
             return
         }
         if let repo = selectedRepo() {
@@ -488,6 +625,8 @@ final class AgentsInBlackAppModel {
             return nil
         case .file(let path):
             return repoContaining(filePath: path)
+        case .issue:
+            return nil
         case nil:
             return nil
         }
@@ -518,7 +657,9 @@ final class AgentsInBlackAppModel {
     func activeSession(for service: AIBServiceModel) -> ChatSession {
         if let sessionID = activeSessionIDByService[service.id],
            let session = chatSessionsByService[service.id]?.first(where: { $0.id == sessionID }) {
-            session.updateEndpoint(makeChatEndpoint(for: service))
+            if let card = agentCardCache.card(for: service.id) {
+                session.updateAgentCard(card)
+            }
             return session
         }
         return createSession(for: service, activate: true)
@@ -526,8 +667,15 @@ final class AgentsInBlackAppModel {
 
     @discardableResult
     func createSession(for service: AIBServiceModel, activate: Bool) -> ChatSession {
-        let endpoint = makeChatEndpoint(for: service)
-        let session = ChatSession(serviceID: service.id, endpoint: endpoint)
+        let baseURL = a2aBaseURL(for: service)
+        let rpcPath = service.a2aProfile?.rpcPath ?? "/"
+        let card = agentCardCache.card(for: service.id)
+        let session = ChatSession(
+            serviceID: service.id,
+            baseURL: baseURL,
+            rpcPath: rpcPath,
+            agentCard: card
+        )
         var sessions = chatSessionsByService[service.id] ?? []
         sessions.insert(session, at: 0)
         chatSessionsByService[service.id] = sessions
@@ -559,22 +707,24 @@ final class AgentsInBlackAppModel {
     }
 
     func canOpenChat(for service: AIBServiceModel) -> Bool {
-        service.serviceKind == .agent && service.uiProfile?.chatProfile != nil
+        service.serviceKind == .agent
     }
 
-    private func makeChatEndpoint(for service: AIBServiceModel) -> ChatEndpoint {
+    private func a2aBaseURL(for service: AIBServiceModel) -> URL {
         let port = gatewayPort
-        let baseURLString = "http://127.0.0.1:\(port)\(service.mountPath)"
-        let profile = service.uiProfile?.chatProfile
-        return ChatEndpoint(
-            baseURL: URL(string: baseURLString) ?? URL(string: "http://127.0.0.1:\(port)")!,
-            method: profile?.method ?? "POST",
-            path: profile?.path ?? "/",
-            requestContentType: profile?.requestContentType ?? "application/json",
-            requestMessageJSONPath: profile?.requestMessageJSONPath ?? "message",
-            requestContextJSONPath: profile?.requestContextJSONPath,
-            responseMessageJSONPath: profile?.responseMessageJSONPath ?? "message"
-        )
+        let urlString = "http://127.0.0.1:\(port)\(service.mountPath)"
+        return URL(string: urlString) ?? URL(string: "http://127.0.0.1:\(port)")!
+    }
+
+    private func fetchAgentCardsForReadyServices(snapshots: [AIBServiceRuntimeSnapshot]) {
+        guard let workspace else { return }
+        for snapshot in snapshots where snapshot.lifecycleState == .ready {
+            guard let service = workspace.services.first(where: { $0.namespacedID == snapshot.serviceID }),
+                  service.serviceKind == .agent else { continue }
+            let baseURL = a2aBaseURL(for: service)
+            let cardPath = service.a2aProfile?.cardPath ?? "/.well-known/agent.json"
+            agentCardCache.fetchCard(serviceID: service.id, baseURL: baseURL, cardPath: cardPath)
+        }
     }
 
     func primaryWorkbenchService() -> AIBServiceModel? {
@@ -596,8 +746,12 @@ final class AgentsInBlackAppModel {
         workspace?.repos.first(where: { $0.id == id })
     }
 
-    func sidebarStatus(for repo: AIBRepoModel) -> SidebarRepoStatus? {
-        sidebarRepoStatusByRepoID[repo.id]
+    func sidebarServiceStatus(for service: AIBServiceModel) -> SidebarServiceStatus? {
+        sidebarServiceStatusByServiceID[service.id]?.status
+    }
+
+    func sidebarServiceStatusReason(for service: AIBServiceModel) -> String? {
+        sidebarServiceStatusByServiceID[service.id]?.reason
     }
 
     func service(by id: String) -> AIBServiceModel? {
@@ -692,7 +846,7 @@ final class AgentsInBlackAppModel {
               let target = workspace.services.first(where: { $0.id == targetServiceID })
         else { return }
         guard workspace.services[sourceIndex].serviceKind == .agent else {
-            lastErrorMessage = "Only Agent services can create connections."
+            setError("Only Agent services can create connections.")
             return
         }
 
@@ -708,13 +862,13 @@ final class AgentsInBlackAppModel {
             }
             workspace.services[sourceIndex].connections.a2aAgents.append(.init(serviceRef: targetRef, url: nil))
         } else {
-            lastErrorMessage = "Connections can target Agent or MCP services only."
+            setError("Connections can target Agent or MCP services only.")
             return
         }
 
         self.workspace = workspace
-        hasUnsavedFlowChanges = true
         lastErrorMessage = nil
+        Task { await saveFlowConnections() }
     }
 
     func removeFlowConnection(_ connection: FlowConnectionModel) {
@@ -731,8 +885,8 @@ final class AgentsInBlackAppModel {
         }
 
         self.workspace = workspace
-        hasUnsavedFlowChanges = true
         lastErrorMessage = nil
+        Task { await saveFlowConnections() }
     }
 
     func saveFlowConnections() async {
@@ -753,7 +907,75 @@ final class AgentsInBlackAppModel {
             hasUnsavedFlowChanges = false
             lastErrorMessage = nil
         } catch {
-            lastErrorMessage = "Failed to save Flow connections: \(error.localizedDescription)"
+            setError("Failed to save Flow connections: \(error.localizedDescription)")
+        }
+    }
+
+    func switchRepoRuntime(repoID: String, runtime: String) async {
+        guard let workspace else { return }
+        guard let repo = workspace.repos.first(where: { $0.id == repoID }) else { return }
+        do {
+            let repoPath = WorkspaceDiscovery.relativePath(
+                from: workspace.rootURL,
+                to: repo.rootURL
+            )
+            _ = try AIBWorkspaceCore.updateRepoRuntime(
+                workspaceRoot: workspace.rootURL.path,
+                repoPath: repoPath,
+                runtime: runtime
+            )
+            _ = try AIBWorkspaceCore.syncWorkspace(workspaceRoot: workspace.rootURL.path)
+            await loadWorkspace(at: workspace.rootURL)
+            lastErrorMessage = nil
+        } catch {
+            setError("Failed to switch runtime: \(error.localizedDescription)")
+        }
+    }
+
+    func configureServices(repoID: String, runtimes: [String]) async {
+        guard let workspace else { return }
+        guard let repo = workspace.repos.first(where: { $0.id == repoID }) else { return }
+        do {
+            let repoPath = WorkspaceDiscovery.relativePath(
+                from: workspace.rootURL,
+                to: repo.rootURL
+            )
+            _ = try AIBWorkspaceCore.configureServices(
+                workspaceRoot: workspace.rootURL.path,
+                path: repoPath,
+                runtimes: runtimes
+            )
+            _ = try AIBWorkspaceCore.syncWorkspace(workspaceRoot: workspace.rootURL.path)
+            await loadWorkspace(at: workspace.rootURL)
+            lastErrorMessage = nil
+        } catch {
+            setError("Failed to configure services: \(error.localizedDescription)")
+        }
+    }
+
+    func requestRemoveService(namespacedServiceID: String, displayName: String) {
+        serviceRemovalTarget = ServiceRemovalTarget(
+            namespacedServiceID: namespacedServiceID,
+            displayName: displayName
+        )
+        showServiceRemovalDialog = true
+    }
+
+    func confirmRemoveService() async {
+        guard let workspace, let target = serviceRemovalTarget else { return }
+        let namespacedServiceID = target.namespacedServiceID
+        serviceRemovalTarget = nil
+        showServiceRemovalDialog = false
+        do {
+            _ = try AIBWorkspaceCore.removeService(
+                workspaceRoot: workspace.rootURL.path,
+                namespacedServiceID: namespacedServiceID
+            )
+            _ = try AIBWorkspaceCore.syncWorkspace(workspaceRoot: workspace.rootURL.path)
+            await loadWorkspace(at: workspace.rootURL)
+            lastErrorMessage = nil
+        } catch {
+            setError("Failed to remove service: \(error.localizedDescription)")
         }
     }
 
@@ -769,14 +991,35 @@ final class AgentsInBlackAppModel {
             await loadWorkspace(at: workspace.rootURL)
             lastErrorMessage = nil
         } catch {
-            lastErrorMessage = "Failed to update MCP profile: \(error.localizedDescription)"
+            setError("Failed to update MCP profile: \(error.localizedDescription)")
+        }
+    }
+
+    func updateServiceKind(namespacedServiceID: String, kind: AIBServiceKind) async {
+        guard let workspace else { return }
+        let kindString: String = switch kind {
+        case .agent: "agent"
+        case .mcp: "mcp"
+        case .unknown: "unknown"
+        }
+        do {
+            try AIBWorkspaceCore.updateServiceKind(
+                workspaceRoot: workspace.rootURL.path,
+                namespacedServiceID: namespacedServiceID,
+                kind: kindString
+            )
+            _ = try AIBWorkspaceCore.syncWorkspace(workspaceRoot: workspace.rootURL.path)
+            await loadWorkspace(at: workspace.rootURL)
+            lastErrorMessage = nil
+        } catch {
+            setError("Failed to update service kind: \(error.localizedDescription)")
         }
     }
 
     func startDeploy() {
         guard let workspace else { return }
         if hasUnsavedFlowChanges {
-            lastErrorMessage = "Save topology changes before deploying."
+            setError("Save topology changes before deploying.")
             return
         }
 
@@ -991,6 +1234,8 @@ final class AgentsInBlackAppModel {
             appendDeployLogLine(level: .info, message: "Generating deploy plan...")
         case .reviewing:
             appendDeployLogLine(level: .info, message: "Deploy plan ready for review")
+        case .secretsInput(_, let requiredSecrets):
+            appendDeployLogLine(level: .info, message: "Secrets required: \(requiredSecrets.joined(separator: ", "))")
         case .applying:
             appendDeployLogLine(level: .info, message: "Applying deploy plan...")
         case .completed(let result):
@@ -1007,6 +1252,7 @@ final class AgentsInBlackAppModel {
             FlowNodeModel(
                 id: service.id,
                 namespacedID: service.namespacedID,
+                displayName: service.packageName,
                 serviceKind: service.serviceKind,
                 position: CGPoint(x: x, y: CGFloat(60 + index * 80))
             )
@@ -1182,14 +1428,11 @@ final class AgentsInBlackAppModel {
 
     func chatUnavailableReason(for service: AIBServiceModel) -> String? {
         guard effectiveWorkbenchMode(for: service) == .chat else { return nil }
-        guard let uiProfile = service.uiProfile, let chatProfile = uiProfile.chatProfile else {
-            return "This service does not define ui.chat in its service manifest."
+        guard service.serviceKind == .agent else {
+            return "Chat is only available for agent services."
         }
-        if chatProfile.streaming {
-            return "Streaming chat is not supported yet in this build. Use Raw mode."
-        }
-        if chatProfile.responseMessageJSONPath.isEmpty {
-            return "ui.chat.response_message_json_path is required."
+        if let error = agentCardCache.errorsByServiceID[service.id] {
+            return "Agent Card fetch failed: \(error)"
         }
         return nil
     }
@@ -1321,7 +1564,15 @@ final class AgentsInBlackAppModel {
         }
     }
 
-    private func appendDeployLogLine(level: Logger.Level, message: String) {
+    private func setError(_ message: String) {
+        lastErrorMessage = message
+        emulatorOutput.append("[aib][app][error] \(message)\n")
+        if emulatorOutput.count > 200_000 {
+            emulatorOutput.removeFirst(emulatorOutput.count - 200_000)
+        }
+    }
+
+    private func appendDeployLogLine(level: Logging.Logger.Level, message: String) {
         emulatorOutput.append("[aib][deploy][\(level)] \(message)\n")
         if emulatorOutput.count > 200_000 {
             emulatorOutput.removeFirst(emulatorOutput.count - 200_000)
@@ -1487,7 +1738,7 @@ final class AgentsInBlackAppModel {
         if runtimeIssues.count > 300 {
             runtimeIssues.removeFirst(runtimeIssues.count - 300)
         }
-        rebuildSidebarRepoStatuses()
+        rebuildAllSidebarStatuses()
     }
 
     private func registerIssue(from entry: AIBEmulatorLogEntry) {
@@ -1512,10 +1763,17 @@ final class AgentsInBlackAppModel {
             sourceTitle = entry.loggerLabel
         }
 
+        let displayMessage: String
+        if entry.metadata.isEmpty {
+            displayMessage = entry.message
+        } else {
+            let metadataStr = entry.metadata.map { "\($0.key)=\($0.value)" }.joined(separator: ", ")
+            displayMessage = "\(entry.message) (\(metadataStr))"
+        }
         registerIssue(
             severity: severity,
             sourceTitle: sourceTitle,
-            message: entry.message,
+            message: displayMessage,
             serviceSelectionID: serviceSelectionID,
             repoID: repoID
         )
@@ -1551,21 +1809,21 @@ final class AgentsInBlackAppModel {
                 emulatorState = .stopped
                 serviceSnapshotsByID = [:]
                 activeServiceIDs = []
-                rebuildSidebarRepoStatuses()
+                rebuildAllSidebarStatuses()
             case .starting:
                 emulatorState = .starting
-                rebuildSidebarRepoStatuses()
+                rebuildAllSidebarStatuses()
             case .running(let pid, let port):
                 emulatorState = .running(pid: pid, port: port)
-                rebuildSidebarRepoStatuses()
+                rebuildAllSidebarStatuses()
             case .stopping:
                 emulatorState = .stopping
-                rebuildSidebarRepoStatuses()
+                rebuildAllSidebarStatuses()
             case .failed(let message):
                 emulatorState = .error(message)
                 serviceSnapshotsByID = [:]
                 activeServiceIDs = []
-                lastErrorMessage = "Failed to start emulator: \(message)"
+                setError("Failed to start emulator: \(message)")
                 registerIssue(
                     severity: .error,
                     sourceTitle: "AIB Runtime",
@@ -1575,11 +1833,12 @@ final class AgentsInBlackAppModel {
                 )
                 utilityPanelMode = .aibRuntime
                 showUtilityPanel = true
-                rebuildSidebarRepoStatuses()
+                rebuildAllSidebarStatuses()
             }
         case .serviceSnapshotsChanged(let snapshots):
             serviceSnapshotsByID = Dictionary(uniqueKeysWithValues: snapshots.map { ($0.serviceID, $0) })
-            rebuildSidebarRepoStatuses()
+            fetchAgentCardsForReadyServices(snapshots: snapshots)
+            rebuildAllSidebarStatuses()
         case .activeServicesChanged(let serviceIDs):
             activeServiceIDs = serviceIDs
         }
@@ -1605,59 +1864,67 @@ final class AgentsInBlackAppModel {
         }
     }
 
-    private func rebuildSidebarRepoStatuses() {
+    private func rebuildAllSidebarStatuses() {
+        rebuildSidebarServiceStatuses()
+        reportUnconfiguredRepos()
+    }
+
+    private func reportUnconfiguredRepos() {
+        guard let workspace else { return }
+        let repoIDsWithServices = Set(workspace.services.map(\.repoID))
+        let unconfiguredRepos = workspace.repos.filter { !repoIDsWithServices.contains($0.id) }
+        for repo in unconfiguredRepos {
+            registerIssue(
+                severity: .warning,
+                sourceTitle: repo.name,
+                message: "No services configured. Add services in workspace.yaml.",
+                serviceSelectionID: nil,
+                repoID: repo.id
+            )
+        }
+    }
+
+    private func rebuildSidebarServiceStatuses() {
         guard let workspace else {
-            sidebarRepoStatusByRepoID = [:]
+            sidebarServiceStatusByServiceID = [:]
             return
         }
-        var statuses: [String: SidebarRepoStatus] = [:]
-        for repo in workspace.repos {
-            statuses[repo.id] = sidebarStatusForRepo(repo, workspace: workspace)
+        var statuses: [String: SidebarServiceStatusInfo] = [:]
+        for service in workspace.services {
+            statuses[service.id] = sidebarStatusForService(service)
         }
-        sidebarRepoStatusByRepoID = statuses
+        sidebarServiceStatusByServiceID = statuses
     }
 
-    private func sidebarStatusForRepo(_ repo: AIBRepoModel, workspace: AIBWorkspaceSnapshot) -> SidebarRepoStatus {
-        let repoServices = workspace.services.filter { $0.repoID == repo.id }
-        guard !repoServices.isEmpty else {
-            return .warning
+    private func sidebarStatusForService(_ service: AIBServiceModel) -> SidebarServiceStatusInfo {
+        if let errorIssue = firstIssueForService(serviceID: service.id, severity: .error) {
+            return SidebarServiceStatusInfo(status: .error, reason: errorIssue.message)
         }
-
-        if hasIssue(forRepoID: repo.id, severity: .error) {
-            return .error
+        if let warningIssue = firstIssueForService(serviceID: service.id, severity: .warning) {
+            return SidebarServiceStatusInfo(status: .warning, reason: warningIssue.message)
         }
-        if hasIssue(forRepoID: repo.id, severity: .warning) {
-            return .warning
+        if let snapshot = serviceSnapshotsByID[service.namespacedID] {
+            let state = snapshot.lifecycleState.rawValue
+            if state == "unhealthy" || state == "backoff" {
+                return SidebarServiceStatusInfo(status: .error, reason: "Service is unhealthy or in backoff")
+            }
+            if state == "ready" {
+                return SidebarServiceStatusInfo(status: .running)
+            }
+            if state == "starting" || state == "stopping" || state == "draining" {
+                return SidebarServiceStatusInfo(status: .starting)
+            }
         }
-
-        let states = Set(repoServices.compactMap { serviceSnapshotsByID[$0.namespacedID]?.lifecycleState.rawValue })
-        if states.contains("unhealthy") || states.contains("backoff") {
-            return .error
-        }
-        if states.contains("ready") {
-            return .running
-        }
-        if states.contains("starting") || states.contains("stopping") || states.contains("draining") {
-            return .starting
-        }
-
-        return !repoServices.isEmpty ? .configured : .warning
+        return SidebarServiceStatusInfo(status: .configured)
     }
 
-    private func hasIssue(forRepoID repoID: String, severity: RuntimeIssueSeverity) -> Bool {
-        runtimeIssues.contains { issue in
+    private func firstIssueForService(serviceID: String, severity: RuntimeIssueSeverity) -> RuntimeIssue? {
+        runtimeIssues.first { issue in
             guard issue.severity == severity else { return false }
-            if issue.repoID == repoID {
-                return true
-            }
-            if let serviceSelectionID = issue.serviceSelectionID,
-               let service = service(by: serviceSelectionID),
-               service.repoID == repoID {
-                return true
-            }
-            return false
+            return issue.serviceSelectionID == serviceID
         }
     }
+
 }
 
 enum SidebarSection: String, CaseIterable, Identifiable {

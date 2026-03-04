@@ -67,9 +67,9 @@ struct SelectionInspectorView: View {
             }
         } else {
             if let repo = model.selectedRepo(), model.selectedService() == nil, model.selectedFileURL() == nil {
-                RepoInspectorSection(repo: repo, services: repoServices(for: repo.id))
+                RepoInspectorSection(model: model, repo: repo, services: repoServices(for: repo.id))
             } else if let service = model.selectedService() {
-                ServiceInspectorSection(service: service, runtime: model.serviceSnapshot(for: service))
+                ServiceInspectorSection(model: model, service: service, runtime: model.serviceSnapshot(for: service))
             } else if let fileURL = model.selectedFileURL() {
                 FileInspectorSection(fileURL: fileURL, onOpen: { model.openInEditor() })
             }
@@ -98,10 +98,14 @@ private struct FlowNodeInspectorSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text(service.namespacedID)
+            Text(service.packageName ?? service.localID)
                 .font(.title3).bold()
 
-            kindBadge
+            Text(service.namespacedID)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            kindPicker
             InspectorKV(label: "Mount", value: service.mountPath)
 
             if service.serviceKind == .mcp {
@@ -116,18 +120,32 @@ private struct FlowNodeInspectorSection: View {
         }
     }
 
-    private var kindBadge: some View {
-        let (label, color): (String, Color) = switch service.serviceKind {
-        case .agent: ("Agent", .mint)
-        case .mcp: ("MCP", .cyan)
-        case .unknown: ("Other", .secondary)
+    private var kindPicker: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Kind")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Picker("", selection: kindBinding) {
+                Text("Agent").tag(AIBServiceKind.agent)
+                Text("MCP").tag(AIBServiceKind.mcp)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
         }
-        return Text(label)
-            .font(.caption.weight(.semibold))
-            .foregroundStyle(color)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(color.opacity(0.12), in: Capsule())
+    }
+
+    private var kindBinding: Binding<AIBServiceKind> {
+        Binding(
+            get: { service.serviceKind },
+            set: { newKind in
+                Task {
+                    await model.updateServiceKind(
+                        namespacedServiceID: service.namespacedID,
+                        kind: newKind
+                    )
+                }
+            }
+        )
     }
 
     // MARK: - Agent Connections
@@ -278,6 +296,7 @@ private struct MCPConfigSection: View {
 // MARK: - Repo Inspector
 
 private struct RepoInspectorSection: View {
+    @Bindable var model: AgentsInBlackAppModel
     var repo: AIBRepoModel
     var services: [AIBServiceModel]
 
@@ -287,7 +306,24 @@ private struct RepoInspectorSection: View {
                 .font(.title3).bold()
             InspectorKV(label: "Path", value: repo.rootURL.path)
             InspectorKV(label: "Status", value: repo.status)
-            InspectorKV(label: "Runtime", value: "\(repo.runtime) / \(repo.framework)")
+
+            if repo.detectedRuntimes.count > 1 {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Runtime")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Picker("", selection: runtimeBinding) {
+                        ForEach(repo.detectedRuntimes, id: \.self) { rt in
+                            Text(rt).tag(rt)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                }
+            } else {
+                InspectorKV(label: "Runtime", value: "\(repo.runtime) / \(repo.framework)")
+            }
+
             InspectorKV(label: "Services", value: "\(services.count)")
             InspectorKV(label: "Namespace", value: repo.namespace)
             InspectorKV(label: "Command", value: repo.selectedCommand.isEmpty ? "(none)" : repo.selectedCommand.joined(separator: " "))
@@ -296,23 +332,54 @@ private struct RepoInspectorSection: View {
             Text("Services")
                 .font(.headline)
             if services.isEmpty {
-                Text("No services detected")
+                Text("No services configured")
                     .foregroundStyle(.secondary)
-            } else {
-                ForEach(services, id: \.id) { service in
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(service.namespacedID)
-                        Text(service.mountPath)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+            }
+            ForEach(services, id: \.id) { service in
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(service.namespacedID)
+                    Text(service.mountPath)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            let configuredIDs = Set(services.map(\.localID))
+            let uncoveredRuntimes = repo.detectedRuntimes.filter { !configuredIDs.contains($0) }
+            if !uncoveredRuntimes.isEmpty {
+                ForEach(uncoveredRuntimes, id: \.self) { rt in
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("\(repo.namespace)/\(rt)")
+                                .foregroundStyle(.secondary)
+                            Text("Not configured")
+                                .font(.caption)
+                                .foregroundStyle(.tertiary)
+                        }
+                        Spacer()
+                        Button {
+                            Task { await model.configureServices(repoID: repo.id, runtimes: [rt]) }
+                        } label: {
+                            Image(systemName: "plus.circle")
+                        }
+                        .buttonStyle(.plain)
                     }
                 }
             }
         }
     }
+
+    private var runtimeBinding: Binding<String> {
+        Binding(
+            get: { repo.runtime },
+            set: { newRuntime in
+                Task { await model.switchRepoRuntime(repoID: repo.id, runtime: newRuntime) }
+            }
+        )
+    }
 }
 
 private struct ServiceInspectorSection: View {
+    @Bindable var model: AgentsInBlackAppModel
     var service: AIBServiceModel
     var runtime: AIBServiceRuntimeSnapshot?
 
@@ -320,6 +387,19 @@ private struct ServiceInspectorSection: View {
         Group {
             Text(service.namespacedID)
                 .font(.title3).bold()
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Kind")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Picker("", selection: serviceKindBinding) {
+                    Text("Agent").tag(AIBServiceKind.agent)
+                    Text("MCP").tag(AIBServiceKind.mcp)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+            }
+
             InspectorKV(label: "Repo", value: service.repoName)
             InspectorKV(label: "Mount", value: service.mountPath)
             InspectorKV(label: "Watch", value: service.watchMode ?? "(unspecified)")
@@ -332,7 +412,28 @@ private struct ServiceInspectorSection: View {
             InspectorKV(label: "Backend Port", value: runtime?.backendPort.map(String.init) ?? "(none)")
             InspectorKV(label: "Probe Failures", value: runtime.map { String($0.consecutiveProbeFailures) } ?? "0")
             InspectorKV(label: "Last Exit", value: runtime?.lastExitStatus.map(String.init) ?? "(none)")
+            Divider()
+            Button("Remove Service", role: .destructive) {
+                model.requestRemoveService(
+                    namespacedServiceID: service.namespacedID,
+                    displayName: service.packageName ?? service.localID
+                )
+            }
         }
+    }
+
+    private var serviceKindBinding: Binding<AIBServiceKind> {
+        Binding(
+            get: { service.serviceKind },
+            set: { newKind in
+                Task {
+                    await model.updateServiceKind(
+                        namespacedServiceID: service.namespacedID,
+                        kind: newKind
+                    )
+                }
+            }
+        )
     }
 }
 

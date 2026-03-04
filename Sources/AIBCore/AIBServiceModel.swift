@@ -15,6 +15,9 @@ public struct AIBServiceModel: Identifiable, Hashable, Sendable {
     public var mcpProfile: AIBMCPProfile?
     public var a2aProfile: AIBA2AProfile?
     public var uiProfile: AIBServiceUIProfile?
+    /// Display name derived from the package manifest (e.g., package.json "name", Package.swift executableTarget name).
+    /// Falls back to `localID` when not available.
+    public var packageName: String?
 
     public init(
         repoID: String,
@@ -29,7 +32,8 @@ public struct AIBServiceModel: Identifiable, Hashable, Sendable {
         connections: AIBServiceConnections = .init(),
         mcpProfile: AIBMCPProfile? = nil,
         a2aProfile: AIBA2AProfile? = nil,
-        uiProfile: AIBServiceUIProfile? = nil
+        uiProfile: AIBServiceUIProfile? = nil,
+        packageName: String? = nil
     ) {
         self.repoID = repoID
         self.repoName = repoName
@@ -45,5 +49,6 @@ public struct AIBServiceModel: Identifiable, Hashable, Sendable {
         self.mcpProfile = mcpProfile
         self.a2aProfile = a2aProfile
         self.uiProfile = uiProfile
+        self.packageName = packageName
     }
 }

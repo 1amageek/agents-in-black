@@ -22,8 +22,40 @@ public struct DefaultDeployExecutor: DeployExecuting {
         provider: any DeploymentProvider,
         workspaceRoot: String,
         overallProgress: Progress,
+        secrets: [String: String] = [:],
         logHandler: @escaping @Sendable (AIBDeployLogEntry) -> Void
     ) async throws -> AIBDeployResult {
+        // One-time: configure Docker registry authentication
+        let authCommands = provider.registryAuthCommands(targetConfig: plan.targetConfig)
+        for command in authCommands {
+            logHandler(AIBDeployLogEntry(
+                level: .info,
+                step: .dockerAuth,
+                message: command.label
+            ))
+            do {
+                let result = try await runCommand(
+                    command,
+                    logHandler: logHandler,
+                    serviceID: nil,
+                    step: .dockerAuth
+                )
+                if result.exitCode != 0 {
+                    throw AIBDeployError(
+                        phase: "setup",
+                        message: "Docker registry authentication failed (exit \(result.exitCode))"
+                    )
+                }
+            } catch let error as AIBDeployError {
+                throw error
+            } catch {
+                throw AIBDeployError(
+                    phase: "setup",
+                    message: "Docker registry authentication error: \(error.localizedDescription)"
+                )
+            }
+        }
+
         var serviceResults: [AIBDeployServiceResult] = []
 
         for service in plan.services {
@@ -38,12 +70,71 @@ public struct DefaultDeployExecutor: DeployExecuting {
             let imageTag = provider.registryImageTag(service: service, targetConfig: plan.targetConfig)
 
             let dockerfilePath = URL(fileURLWithPath: workspaceRoot)
-                .appendingPathComponent(service.repoPath)
-                .appendingPathComponent("Dockerfile")
+                .appendingPathComponent(service.artifacts.dockerfile.relativePath)
                 .path
             let buildContext = URL(fileURLWithPath: workspaceRoot)
                 .appendingPathComponent(service.repoPath)
                 .path
+
+            // Ensure Artifact Registry repository exists (idempotent)
+            let repoCommands = provider.ensureRegistryRepoCommands(
+                service: service,
+                targetConfig: plan.targetConfig
+            )
+            var serviceFailed = false
+            for command in repoCommands {
+                logHandler(AIBDeployLogEntry(
+                    level: .info,
+                    serviceID: service.id,
+                    step: .registrySetup,
+                    message: command.label
+                ))
+                do {
+                    let result = try await runCommand(
+                        command,
+                        logHandler: logHandler,
+                        serviceID: service.id,
+                        step: .registrySetup
+                    )
+                    // Exit code != 0 is OK if repo already exists (ALREADY_EXISTS)
+                    if result.exitCode != 0, !result.stderr.contains("ALREADY_EXISTS") {
+                        let errorMsg = "\(command.label) failed (exit \(result.exitCode))"
+                        logHandler(AIBDeployLogEntry(
+                            level: .error,
+                            serviceID: service.id,
+                            step: .registrySetup,
+                            message: errorMsg
+                        ))
+                        serviceResults.append(AIBDeployServiceResult(
+                            id: service.id,
+                            success: false,
+                            errorMessage: errorMsg
+                        ))
+                        serviceProgress.completedUnitCount = serviceProgress.totalUnitCount
+                        serviceFailed = true
+                        break
+                    }
+                    serviceProgress.completedUnitCount += 1
+                } catch {
+                    let errorMsg = "\(command.label) error: \(error.localizedDescription)"
+                    logHandler(AIBDeployLogEntry(
+                        level: .error,
+                        serviceID: service.id,
+                        step: .registrySetup,
+                        message: errorMsg
+                    ))
+                    serviceResults.append(AIBDeployServiceResult(
+                        id: service.id,
+                        success: false,
+                        errorMessage: errorMsg
+                    ))
+                    serviceProgress.completedUnitCount = serviceProgress.totalUnitCount
+                    serviceFailed = true
+                    break
+                }
+            }
+
+            if serviceFailed { continue }
 
             // Build & Push
             let buildPushCommands = provider.buildAndPushCommands(
@@ -52,7 +143,6 @@ public struct DefaultDeployExecutor: DeployExecuting {
                 buildContext: buildContext
             )
 
-            var serviceFailed = false
             for command in buildPushCommands {
                 let step = AIBDeployStep(rawValue: command.stepID) ?? .dockerBuild
                 logHandler(AIBDeployLogEntry(
@@ -109,11 +199,13 @@ public struct DefaultDeployExecutor: DeployExecuting {
 
             if serviceFailed { continue }
 
-            // Deploy service
+            // Deploy service — filter secrets to only those required by this service
+            let serviceSecrets = secrets.filter { service.requiredSecrets.contains($0.key) }
             let deployCommands = provider.deployCommands(
                 service: service,
                 imageTag: imageTag,
-                targetConfig: plan.targetConfig
+                targetConfig: plan.targetConfig,
+                secrets: serviceSecrets
             )
 
             for command in deployCommands {

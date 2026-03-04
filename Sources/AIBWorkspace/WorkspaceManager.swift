@@ -66,6 +66,185 @@ public enum AIBWorkspaceManager {
         return WorkspaceInitResult(workspaceConfig: merged, generatedServices: syncResult.serviceCount, warnings: syncResult.warnings)
     }
 
+    public static func addRepo(workspaceRoot: String, repoURL: URL) throws -> WorkspaceInitResult {
+        let rootURL = URL(fileURLWithPath: workspaceRoot).standardizedFileURL
+        let repoStandardized = repoURL.standardizedFileURL
+
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: repoStandardized.path, isDirectory: &isDir), isDir.boolValue else {
+            throw ConfigError("Path is not a directory", metadata: ["path": repoStandardized.path])
+        }
+
+        // Auto-initialize workspace if workspace.yaml does not exist yet
+        let configPath = URL(fileURLWithPath: workspaceConfigRelativePath, relativeTo: rootURL).standardizedFileURL.path
+        if !FileManager.default.fileExists(atPath: configPath) {
+            _ = try initWorkspace(options: WorkspaceInitOptions(workspaceRoot: rootURL.path, scanPath: rootURL.path, force: false, scanEnabled: true))
+        }
+
+        var workspace = try loadWorkspace(workspaceRoot: workspaceRoot)
+
+        let relPath = WorkspaceDiscovery.relativePath(from: rootURL, to: repoStandardized)
+        guard !workspace.repos.contains(where: { $0.path == relPath }) else {
+            throw ConfigError("Repository already exists in workspace", metadata: ["path": relPath])
+        }
+
+        let inspected = WorkspaceDiscovery.inspectSingleRepo(at: repoStandardized, workspaceRoot: rootURL)
+        workspace.repos.append(inspected)
+
+        try saveWorkspace(workspace, workspaceRoot: workspaceRoot)
+        let syncResult = try WorkspaceSyncer.sync(workspaceRoot: workspaceRoot, workspace: workspace)
+        return WorkspaceInitResult(workspaceConfig: workspace, generatedServices: syncResult.serviceCount, warnings: syncResult.warnings)
+    }
+
+    public static func updateRepoRuntime(
+        workspaceRoot: String,
+        repoPath: String,
+        runtime: RuntimeKind
+    ) throws -> WorkspaceInitResult {
+        var workspace = try loadWorkspace(workspaceRoot: workspaceRoot)
+        let rootURL = URL(fileURLWithPath: workspaceRoot).standardizedFileURL
+
+        guard let repoIndex = workspace.repos.firstIndex(where: { $0.path == repoPath }) else {
+            throw ConfigError("Repository not found in workspace", metadata: ["path": repoPath])
+        }
+
+        // Resolve the repo URL and run detection for the requested runtime
+        let resolvedURL = URL(fileURLWithPath: workspace.repos[repoIndex].path, relativeTo: rootURL).standardizedFileURL
+        let targetAdapter = RuntimeAdapterRegistry.adapters.first { $0.runtimeKind == runtime }
+        guard let adapter = targetAdapter, adapter.canHandle(repoURL: resolvedURL) else {
+            throw ConfigError("Runtime '\(runtime.rawValue)' is not available for this repository", metadata: ["path": repoPath])
+        }
+
+        let detection = adapter.detect(repoURL: resolvedURL)
+        workspace.repos[repoIndex].runtime = detection.runtime
+        workspace.repos[repoIndex].framework = detection.framework
+        workspace.repos[repoIndex].packageManager = detection.packageManager
+        workspace.repos[repoIndex].detectionConfidence = detection.confidence
+        workspace.repos[repoIndex].commandCandidates = detection.candidates
+        workspace.repos[repoIndex].selectedCommand = detection.candidates.first?.argv
+
+        try saveWorkspace(workspace, workspaceRoot: workspaceRoot)
+        let syncResult = try WorkspaceSyncer.sync(workspaceRoot: workspaceRoot, workspace: workspace)
+        return WorkspaceInitResult(workspaceConfig: workspace, generatedServices: syncResult.serviceCount, warnings: syncResult.warnings)
+    }
+
+    public static func configureServices(
+        workspaceRoot: String,
+        path: String,
+        runtimes: [RuntimeKind]
+    ) throws -> WorkspaceInitResult {
+        var workspace = try loadWorkspace(workspaceRoot: workspaceRoot)
+        let rootURL = URL(fileURLWithPath: workspaceRoot).standardizedFileURL
+
+        guard let index = workspace.repos.firstIndex(where: { $0.path == path }) else {
+            throw ConfigError("Repository not found in workspace", metadata: ["path": path])
+        }
+
+        let resolvedURL = URL(fileURLWithPath: workspace.repos[index].path, relativeTo: rootURL).standardizedFileURL
+        let namespace = workspace.repos[index].namespace
+        let allDetections = RuntimeAdapterRegistry.detectAll(repoURL: resolvedURL)
+        let hasMultipleRuntimes = allDetections.count > 1
+
+        // Merge into existing services
+        var services = workspace.repos[index].services ?? []
+        let existingIDs = Set(services.map(\.id))
+
+        for runtime in runtimes {
+            let localID = hasMultipleRuntimes ? runtime.rawValue : "main"
+            guard !existingIDs.contains(localID) else { continue }
+
+            guard let adapter = RuntimeAdapterRegistry.adapters.first(where: { $0.runtimeKind == runtime }),
+                  adapter.canHandle(repoURL: resolvedURL) else { continue }
+            let detection = adapter.detect(repoURL: resolvedURL)
+            guard let command = detection.candidates.first?.argv, !command.isEmpty else { continue }
+            let defaults = adapter.defaults(packageManager: detection.packageManager)
+            let mountPath = hasMultipleRuntimes ? "/\(namespace)/\(runtime.rawValue)" : "/\(namespace)"
+
+            // Use detection-based kind (from dependency analysis) with fallback to runtime defaults
+            let resolvedKind: ServiceKind = detection.suggestedServiceKind != .unknown
+                ? detection.suggestedServiceKind
+                : defaults.serviceKind
+            let kind: String = switch resolvedKind {
+            case .agent: "agent"
+            case .mcp: "mcp"
+            default: "agent"
+            }
+            services.append(WorkspaceRepoServiceConfig(
+                id: localID,
+                kind: kind,
+                mountPath: mountPath,
+                run: command,
+                build: defaults.buildCommand,
+                install: defaults.installCommand,
+                watchMode: defaults.watchMode.rawValue,
+                watchPaths: defaults.watchPaths
+            ))
+        }
+
+        workspace.repos[index].services = services
+        workspace.repos[index].status = .discoverable
+
+        try saveWorkspace(workspace, workspaceRoot: workspaceRoot)
+        let syncResult = try WorkspaceSyncer.sync(workspaceRoot: workspaceRoot, workspace: workspace)
+        return WorkspaceInitResult(workspaceConfig: workspace, generatedServices: syncResult.serviceCount, warnings: syncResult.warnings)
+    }
+
+    public static func removeService(
+        workspaceRoot: String,
+        namespacedServiceID: String
+    ) throws -> WorkspaceInitResult {
+        var workspace = try loadWorkspace(workspaceRoot: workspaceRoot)
+        let rootURL = URL(fileURLWithPath: workspaceRoot).standardizedFileURL
+        let parts = namespacedServiceID.split(separator: "/", maxSplits: 1).map(String.init)
+        guard parts.count == 2 else {
+            throw ConfigError("Invalid namespaced service ID", metadata: ["id": namespacedServiceID])
+        }
+        let namespace = parts[0]
+        let localID = parts[1]
+
+        guard let index = workspace.repos.firstIndex(where: { $0.namespace == namespace }) else {
+            throw ConfigError("Service not found", metadata: ["id": namespacedServiceID])
+        }
+
+        var services: [WorkspaceRepoServiceConfig]
+        if let existing = workspace.repos[index].services, !existing.isEmpty {
+            services = existing
+        } else {
+            // Materialize auto-generated services so we can selectively remove one
+            let resolvedURL = URL(fileURLWithPath: workspace.repos[index].path, relativeTo: rootURL).standardizedFileURL
+            let allDetections = RuntimeAdapterRegistry.detectAll(repoURL: resolvedURL)
+            services = allDetections.compactMap { detection -> WorkspaceRepoServiceConfig? in
+                guard let command = detection.candidates.first?.argv, !command.isEmpty else { return nil }
+                let defaults = RuntimeAdapterRegistry.defaults(for: detection.runtime, packageManager: detection.packageManager)
+                let id = allDetections.count > 1 ? detection.runtime.rawValue : "main"
+                let mountPath = allDetections.count > 1 ? "/\(namespace)/\(detection.runtime.rawValue)" : "/\(namespace)"
+                let kind: String = switch defaults.serviceKind {
+                case .agent: "agent"
+                case .mcp: "mcp"
+                default: "agent"
+                }
+                return WorkspaceRepoServiceConfig(
+                    id: id,
+                    kind: kind,
+                    mountPath: mountPath,
+                    run: command,
+                    build: defaults.buildCommand,
+                    install: defaults.installCommand,
+                    watchMode: defaults.watchMode.rawValue,
+                    watchPaths: defaults.watchPaths
+                )
+            }
+        }
+
+        services.removeAll { $0.id == localID }
+        // Keep empty array (not nil) to prevent auto-generation fallback
+        workspace.repos[index].services = services
+
+        try saveWorkspace(workspace, workspaceRoot: workspaceRoot)
+        let syncResult = try WorkspaceSyncer.sync(workspaceRoot: workspaceRoot, workspace: workspace)
+        return WorkspaceInitResult(workspaceConfig: workspace, generatedServices: syncResult.serviceCount, warnings: syncResult.warnings)
+    }
+
     public static func syncWorkspace(workspaceRoot: String) throws -> WorkspaceSyncResult {
         let workspace = try loadWorkspace(workspaceRoot: workspaceRoot)
         return try WorkspaceSyncer.sync(workspaceRoot: workspaceRoot, workspace: workspace)
@@ -96,6 +275,66 @@ public enum AIBWorkspaceManager {
             services[serviceIndex].mcp = WorkspaceRepoMCPConfig(transport: transport, path: path)
         } else {
             services[serviceIndex].mcp?.path = path
+        }
+        workspace.repos[repoIndex].services = services
+
+        try saveWorkspace(workspace, workspaceRoot: workspaceRoot)
+    }
+
+    /// Update the `kind` field of a service in workspace.yaml.
+    public static func updateServiceKind(
+        workspaceRoot: String,
+        namespacedServiceID: String,
+        kind: String
+    ) throws {
+        var workspace = try loadWorkspace(workspaceRoot: workspaceRoot)
+        let parts = namespacedServiceID.split(separator: "/", maxSplits: 1).map(String.init)
+        guard parts.count == 2 else {
+            throw ConfigError("Invalid namespaced service ID", metadata: ["id": namespacedServiceID])
+        }
+        let namespace = parts[0]
+        let localID = parts[1]
+
+        guard let repoIndex = workspace.repos.firstIndex(where: { $0.namespace == namespace }),
+              var services = workspace.repos[repoIndex].services,
+              let serviceIndex = services.firstIndex(where: { $0.id == localID })
+        else {
+            throw ConfigError("Service not found", metadata: ["id": namespacedServiceID])
+        }
+
+        services[serviceIndex].kind = kind
+        workspace.repos[repoIndex].services = services
+
+        try saveWorkspace(workspace, workspaceRoot: workspaceRoot)
+    }
+
+    public static func updateServiceChatConfig(
+        workspaceRoot: String,
+        namespacedServiceID: String,
+        chatConfig: WorkspaceRepoUIChatConfig?
+    ) throws {
+        var workspace = try loadWorkspace(workspaceRoot: workspaceRoot)
+        let parts = namespacedServiceID.split(separator: "/", maxSplits: 1).map(String.init)
+        guard parts.count == 2 else {
+            throw ConfigError("Invalid namespaced service ID", metadata: ["id": namespacedServiceID])
+        }
+        let namespace = parts[0]
+        let localID = parts[1]
+
+        guard let repoIndex = workspace.repos.firstIndex(where: { $0.namespace == namespace }),
+              var services = workspace.repos[repoIndex].services,
+              let serviceIndex = services.firstIndex(where: { $0.id == localID })
+        else {
+            throw ConfigError("Service not found", metadata: ["id": namespacedServiceID])
+        }
+
+        if let chatConfig {
+            if services[serviceIndex].ui == nil {
+                services[serviceIndex].ui = WorkspaceRepoUIConfig()
+            }
+            services[serviceIndex].ui?.chat = chatConfig
+        } else {
+            services[serviceIndex].ui?.chat = nil
         }
         workspace.repos[repoIndex].services = services
 

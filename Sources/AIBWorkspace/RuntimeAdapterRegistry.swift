@@ -19,6 +19,12 @@ public enum RuntimeAdapterRegistry {
         return .unknown
     }
 
+    public static func detectAll(repoURL: URL) -> [RuntimeDetectionResult] {
+        adapters.compactMap { adapter in
+            adapter.canHandle(repoURL: repoURL) ? adapter.detect(repoURL: repoURL) : nil
+        }
+    }
+
     public static func defaults(for runtime: RuntimeKind, packageManager: PackageManagerKind) -> RuntimeDefaults {
         for adapter in adapters where adapter.runtimeKind == runtime {
             return adapter.defaults(packageManager: packageManager)

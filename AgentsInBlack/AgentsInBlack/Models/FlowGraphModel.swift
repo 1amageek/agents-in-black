@@ -10,6 +10,8 @@ enum FlowConnectionKind: String, Hashable {
 struct FlowNodeModel: Identifiable, Hashable {
     let id: String
     let namespacedID: String
+    /// Display name from the package manifest (e.g., package.json "name", Package.swift target name).
+    let displayName: String?
     let serviceKind: AIBServiceKind
     let position: CGPoint
 }

@@ -101,6 +101,8 @@ public enum AIBDeployService {
     // MARK: - Plan Generation
 
     /// Generate a deploy plan from the workspace topology using the given provider.
+    /// Runtime detection is performed once by `WorkspaceSyncer.resolveConfig()` and
+    /// carried forward via `ResolvedConfig.serviceMetadata` — no duplicate detection.
     public static func generatePlan(
         workspaceRoot: String,
         targetConfig: AIBDeployTargetConfig,
@@ -110,18 +112,14 @@ public enum AIBDeployService {
         let workspace = try WorkspaceYAMLCodec.loadWorkspace(at: workspacePath)
         let resolved = try WorkspaceSyncer.resolveConfig(workspaceRoot: workspaceRoot, workspace: workspace)
 
-        // Build service name mapping using provider
+        // Build service name mapping from pre-resolved metadata
         var serviceNameMap: [String: String] = [:]
         for service in resolved.config.services {
-            let deployedName = provider.deployedServiceName(from: service.id.rawValue)
-            serviceNameMap[service.id.rawValue] = deployedName
-        }
-
-        // Build repo lookup for path info
-        var repoPathByNamespace: [String: String] = [:]
-        for repo in workspace.repos where repo.enabled {
-            let ns = repo.servicesNamespace ?? repo.name
-            repoPathByNamespace[ns] = repo.path
+            let meta = resolved.serviceMetadata[service.id.rawValue]
+            let packageName = meta?.packageName
+                ?? service.id.rawValue.split(separator: "/").last.map(String.init)
+                ?? service.id.rawValue
+            serviceNameMap[service.id.rawValue] = provider.deployedServiceName(from: packageName)
         }
 
         var servicePlans: [AIBDeployServicePlan] = []
@@ -131,40 +129,23 @@ public enum AIBDeployService {
 
         for service in resolved.config.services {
             let deployedName = serviceNameMap[service.id.rawValue] ?? service.id.rawValue
-            let namespace = service.id.rawValue.split(separator: "/").first.map(String.init) ?? ""
-            let repoPath = repoPathByNamespace[namespace] ?? namespace
+            let meta = resolved.serviceMetadata[service.id.rawValue]
+            let runtime = meta?.runtime ?? .unknown
+            let repoPath = meta?.repoPath ?? ""
 
-            // Detect runtime from repo
-            let repoURL = URL(fileURLWithPath: workspaceRoot).appendingPathComponent(repoPath)
-            let detection = RuntimeAdapterRegistry.detect(repoURL: repoURL)
-
-            // Generate or find Dockerfile
-            let dockerfilePath = repoURL.appendingPathComponent("Dockerfile").path
+            // Resolve Dockerfile using metadata
             let dockerfile: AIBDeployArtifact
-            if FileManager.default.fileExists(atPath: dockerfilePath) {
-                let content = try String(contentsOfFile: dockerfilePath, encoding: .utf8)
-                dockerfile = AIBDeployArtifact(
-                    relativePath: "\(repoPath)/Dockerfile",
-                    content: content,
-                    source: .custom
+            do {
+                dockerfile = try resolveDockerfile(
+                    meta: meta,
+                    runtime: runtime,
+                    repoPath: repoPath,
+                    service: service,
+                    workspaceRoot: workspaceRoot
                 )
-            } else if let generator = DockerfileGeneratorRegistry.generator(for: detection.runtime) {
-                let content = generator.generate(
-                    servicePath: repoURL,
-                    runCommand: service.run,
-                    buildCommand: nil,
-                    installCommand: nil,
-                    port: 8080
-                )
-                dockerfile = AIBDeployArtifact(
-                    relativePath: "\(repoPath)/Dockerfile",
-                    content: content,
-                    source: .generated
-                )
-            } else {
+            } catch {
                 fatalErrors.append(
-                    "Service '\(service.id.rawValue)': no Dockerfile found and no generator for runtime '\(detection.runtime.rawValue)'. "
-                    + "Add a Dockerfile to '\(repoPath)/' or use a supported runtime."
+                    "Service '\(service.id.rawValue)': \(error.localizedDescription)"
                 )
                 continue
             }
@@ -174,7 +155,6 @@ public enum AIBDeployService {
 
             for mcpTarget in service.connections.mcpServers {
                 if let url = mcpTarget.url, !url.isEmpty {
-                    // External URL target — pass through as-is, no auth binding needed
                     resolvedConnections.mcpServers.append(AIBDeployConnectionEntry(
                         serviceRef: url,
                         deployedServiceName: "",
@@ -200,7 +180,6 @@ public enum AIBDeployService {
                         resolvedURL: resolvedURL
                     ))
 
-                    // Auth binding: source agent → target MCP (internal services only)
                     let targetDeployedName = serviceNameMap[ref] ?? ref
                     authBindings.append(AIBDeployAuthBinding(
                         sourceServiceName: deployedName,
@@ -215,7 +194,6 @@ public enum AIBDeployService {
 
             for a2aTarget in service.connections.a2aAgents {
                 if let url = a2aTarget.url, !url.isEmpty {
-                    // External URL target — pass through as-is
                     resolvedConnections.a2aAgents.append(AIBDeployConnectionEntry(
                         serviceRef: url,
                         deployedServiceName: "",
@@ -243,11 +221,28 @@ public enum AIBDeployService {
                 }
             }
 
-            // Build env vars
-            var envVars: [String: String] = ["PORT": "8080"]
+            // Build env vars — merge workspace.yaml service.env first, then add generated vars
+            var envVars: [String: String] = service.env
             if !resolvedConnections.mcpServers.isEmpty {
                 let urls = resolvedConnections.mcpServers.map(\.resolvedURL).joined(separator: ",")
                 envVars["MCP_SERVER_URLS"] = urls
+            }
+
+            // Scan source for env var references to detect secrets and missing vars
+            let detectedVars = EnvVarScanner.scan(
+                repoPath: repoPath,
+                workspaceRoot: workspaceRoot,
+                runtime: runtime
+            )
+            let requiredSecrets = detectedVars
+                .filter { $0.kind == .secret }
+                .map(\.name)
+            let missingRegularVars = detectedVars
+                .filter { $0.kind == .regular }
+                .filter { !envVars.keys.contains($0.name) }
+                .map(\.name)
+            let envWarnings = missingRegularVars.map {
+                "Environment variable '\($0)' referenced in source but not configured in workspace.yaml env."
             }
 
             let resourceConfig = AIBDeployResourceConfig(
@@ -280,11 +275,10 @@ public enum AIBDeployService {
                 )
             }
 
-            // Build the service plan with a placeholder deploy config
             var servicePlan = AIBDeployServicePlan(
                 id: service.id.rawValue,
                 serviceKind: AIBServiceKind(from: service.kind),
-                runtime: detection.runtime.rawValue,
+                runtime: runtime.rawValue,
                 repoPath: repoPath,
                 deployedServiceName: deployedName,
                 region: targetConfig.region,
@@ -296,10 +290,11 @@ public enum AIBDeployService {
                 resourceConfig: resourceConfig,
                 envVars: envVars,
                 connections: resolvedConnections,
-                isPublic: isPublic
+                isPublic: isPublic,
+                requiredSecrets: requiredSecrets,
+                envWarnings: envWarnings
             )
 
-            // Generate provider-specific deploy config and update the plan in-place
             let deployConfigContent = provider.generateDeployConfig(service: servicePlan)
             servicePlan.artifacts.deployConfig = AIBDeployArtifact(
                 relativePath: "services/\(deployedName)/deploy.yaml",
@@ -310,7 +305,6 @@ public enum AIBDeployService {
             servicePlans.append(servicePlan)
         }
 
-        // Fail if any services lack a deployable Dockerfile
         if !fatalErrors.isEmpty {
             throw AIBDeployError(
                 phase: "plan",
@@ -333,6 +327,63 @@ public enum AIBDeployService {
         )
     }
 
+    // MARK: - Dockerfile Resolution
+
+    /// Resolve a Dockerfile for a service.
+    /// Priority: Dockerfile.{runtime} (custom) > Dockerfile (custom) > auto-generate
+    private static func resolveDockerfile(
+        meta: ServiceDeployMetadata?,
+        runtime: RuntimeKind,
+        repoPath: String,
+        service: ServiceConfig,
+        workspaceRoot: String
+    ) throws -> AIBDeployArtifact {
+        let repoURL = URL(fileURLWithPath: workspaceRoot).appendingPathComponent(repoPath)
+
+        // Priority 1: runtime-specific Dockerfile (e.g., Dockerfile.node, Dockerfile.swift)
+        let runtimeDockerfilePath = repoURL.appendingPathComponent("Dockerfile.\(runtime.rawValue)")
+        if FileManager.default.fileExists(atPath: runtimeDockerfilePath.path) {
+            let content = try String(contentsOfFile: runtimeDockerfilePath.path, encoding: .utf8)
+            return AIBDeployArtifact(
+                relativePath: "\(repoPath)/Dockerfile.\(runtime.rawValue)",
+                content: content,
+                source: .custom
+            )
+        }
+
+        // Priority 2: plain Dockerfile
+        let plainDockerfilePath = repoURL.appendingPathComponent("Dockerfile")
+        if FileManager.default.fileExists(atPath: plainDockerfilePath.path) {
+            let content = try String(contentsOfFile: plainDockerfilePath.path, encoding: .utf8)
+            return AIBDeployArtifact(
+                relativePath: "\(repoPath)/Dockerfile",
+                content: content,
+                source: .custom
+            )
+        }
+
+        // Priority 3: auto-generate using runtime-specific generator
+        guard let generator = DockerfileGeneratorRegistry.generator(for: runtime) else {
+            throw AIBDeployError(
+                phase: "plan",
+                message: "No Dockerfile found and no generator for runtime '\(runtime.rawValue)'. "
+                    + "Add a Dockerfile to '\(repoPath)/' or use a supported runtime."
+            )
+        }
+        let content = generator.generate(
+            servicePath: repoURL,
+            runCommand: service.run,
+            buildCommand: nil,
+            installCommand: nil,
+            port: 8080
+        )
+        return AIBDeployArtifact(
+            relativePath: "\(repoPath)/Dockerfile.\(runtime.rawValue)",
+            content: content,
+            source: .generated
+        )
+    }
+
     // MARK: - Write Artifacts
 
     /// Write generated artifacts to disk.
@@ -351,12 +402,10 @@ public enum AIBDeployService {
         try fm.createDirectory(at: deployDir, withIntermediateDirectories: true)
 
         for service in plan.services {
-            // Write Dockerfile to repo directory
-            let dockerfileDest = URL(fileURLWithPath: workspaceRoot)
-                .appendingPathComponent(service.repoPath)
-                .appendingPathComponent("Dockerfile")
-
+            // Write generated Dockerfile using artifact's relativePath
             if service.artifacts.dockerfile.source == .generated {
+                let dockerfileDest = URL(fileURLWithPath: workspaceRoot)
+                    .appendingPathComponent(service.artifacts.dockerfile.relativePath)
                 try service.artifacts.dockerfile.content.write(
                     to: dockerfileDest,
                     atomically: true,

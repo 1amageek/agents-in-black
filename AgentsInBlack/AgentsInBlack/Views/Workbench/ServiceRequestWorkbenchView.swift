@@ -1,4 +1,5 @@
 import AIBCore
+import AIBRuntimeCore
 import SwiftUI
 
 struct ServiceWorkbenchView: View {
@@ -52,7 +53,7 @@ private struct ServiceWorkbenchContentView: View {
             }
 
             if let snapshot = model.serviceSnapshot(for: service) {
-                Text("\(snapshot.lifecycleState)")
+                Text(snapshot.lifecycleState.rawValue)
                     .font(.caption)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)

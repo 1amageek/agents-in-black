@@ -1,8 +1,12 @@
 import Foundation
 
-public protocol AIBErrorPayload: Error {
+public protocol AIBErrorPayload: Error, LocalizedError {
     var message: String { get }
     var metadata: [String: String] { get }
+}
+
+extension AIBErrorPayload {
+    public var errorDescription: String? { message }
 }
 
 public struct ConfigError: AIBErrorPayload, Sendable {

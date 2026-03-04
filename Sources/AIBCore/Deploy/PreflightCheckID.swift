@@ -24,6 +24,5 @@ extension PreflightCheckID {
     public static let gcloudInstalled = PreflightCheckID(rawValue: "gcloudInstalled")
     public static let gcloudAuthenticated = PreflightCheckID(rawValue: "gcloudAuthenticated")
     public static let gcloudProjectConfigured = PreflightCheckID(rawValue: "gcloudProjectConfigured")
-    public static let artifactRegistryConfigured = PreflightCheckID(rawValue: "artifactRegistryConfigured")
     public static let cloudRunAPIEnabled = PreflightCheckID(rawValue: "cloudRunAPIEnabled")
 }

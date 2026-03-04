@@ -35,12 +35,25 @@ public struct DenoRuntimeAdapter: RuntimeAdapter, Sendable {
             candidates.append(.init(argv: ["deno", "task", "dev"], reason: "deno task dev"))
         }
 
+        var serviceNames: [String] = []
+        if let data = text.data(using: .utf8),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let name = json["name"] as? String {
+            serviceNames = [name]
+        }
+
+        // Infer service kind from MCP SDK dependency
+        let mcpIndicators = ["@modelcontextprotocol/sdk", "mcp-framework"]
+        let serviceKind: ServiceKind = mcpIndicators.contains(where: { text.contains($0) }) ? .mcp : .agent
+
         return RuntimeDetectionResult(
             runtime: .deno,
             framework: framework,
             packageManager: .deno,
             confidence: candidates.isEmpty ? .low : .medium,
-            candidates: candidates
+            candidates: candidates,
+            serviceNames: serviceNames,
+            suggestedServiceKind: serviceKind
         )
     }
 

@@ -20,6 +20,8 @@ struct DeploySheet: View {
             DeployProgressView(phase: model.deployPhase)
         case .reviewing(let plan):
             DeployReviewView(plan: plan, model: model)
+        case .secretsInput(let plan, let requiredSecrets):
+            DeploySecretsInputView(plan: plan, requiredSecrets: requiredSecrets, model: model)
         case .applying(let plan):
             if let progress = model.deployController.deployProgress {
                 DeployApplyingView(plan: plan, progress: progress)

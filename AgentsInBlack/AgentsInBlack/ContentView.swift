@@ -61,7 +61,7 @@ struct ContentView: View {
                     Label("Deploy", systemImage: "icloud.and.arrow.up.fill")
                 }
                 .help("Deploy to Cloud Run")
-                .disabled(model.detailSurfaceMode != .topology || model.workspace == nil)
+                .disabled(model.workspace == nil)
             }
 
             ToolbarItem(placement: .primaryAction) {
@@ -87,6 +87,14 @@ struct ContentView: View {
         }) {
             DeploySheet(model: model)
         }
+        .sheet(isPresented: $model.showCloneSheet, onDismiss: {
+            model.cleanupCloneState()
+        }) {
+            CloneRepositorySheet(model: model)
+        }
+        .sheet(isPresented: $model.showCreateServiceSheet) {
+            CreateServiceSheet(model: model)
+        }
         .sheet(isPresented: $model.showCloudSettings, onDismiss: {
             model.onCloudSettingsDismissed()
         }) {
@@ -96,6 +104,17 @@ struct ContentView: View {
                     onDismiss: { model.showCloudSettings = false }
                 )
             }
+        }
+        .confirmationDialog(
+            "Remove Service",
+            isPresented: $model.showServiceRemovalDialog,
+            presenting: model.serviceRemovalTarget
+        ) { target in
+            Button("Remove \"\(target.displayName)\"", role: .destructive) {
+                Task { await model.confirmRemoveService() }
+            }
+        } message: { target in
+            Text("This will not delete any files.")
         }
         .overlay {
             RuntimeAnnouncementOverlay(center: model.runtimeAnnouncementCenter)

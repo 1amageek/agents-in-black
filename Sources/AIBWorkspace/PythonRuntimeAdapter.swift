@@ -52,12 +52,22 @@ public struct PythonRuntimeAdapter: RuntimeAdapter, Sendable {
         }
 
         let confidence: DetectionConfidence = candidates.isEmpty ? .low : .medium
+        let serviceNames = Self.parseProjectName(from: text).map { [$0] } ?? []
+
+        // Infer service kind from MCP SDK dependency
+        let reqText = readTextFileOrEmpty(url: repoURL.appendingPathComponent("requirements.txt"))
+        let allContent = text + "\n" + reqText
+        let mcpIndicators = ["mcp[", "mcp>=", "mcp==", "\"mcp\"", "'mcp'", "modelcontextprotocol"]
+        let serviceKind: ServiceKind = mcpIndicators.contains(where: { allContent.contains($0) }) ? .mcp : .agent
+
         return RuntimeDetectionResult(
             runtime: .python,
             framework: framework,
             packageManager: packageManager,
             confidence: confidence,
-            candidates: candidates
+            candidates: candidates,
+            serviceNames: serviceNames,
+            suggestedServiceKind: serviceKind
         )
     }
 
@@ -76,6 +86,29 @@ public struct PythonRuntimeAdapter: RuntimeAdapter, Sendable {
             watchPaths: ["pyproject.toml", "requirements.txt", "uv.lock", "poetry.lock"],
             serviceKind: .agent
         )
+    }
+
+    /// Extract `name` from `[project]` section of pyproject.toml.
+    static func parseProjectName(from tomlContent: String) -> String? {
+        // Match name = "xxx" or name = 'xxx' after [project] header
+        let lines = tomlContent.components(separatedBy: .newlines)
+        var inProjectSection = false
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("[") {
+                inProjectSection = trimmed == "[project]"
+                continue
+            }
+            if inProjectSection {
+                let pattern = #"^name\s*=\s*["']([^"']+)["']"#
+                if let regex = try? NSRegularExpression(pattern: pattern),
+                   let match = regex.firstMatch(in: trimmed, range: NSRange(trimmed.startIndex..., in: trimmed)),
+                   let nameRange = Range(match.range(at: 1), in: trimmed) {
+                    return String(trimmed[nameRange])
+                }
+            }
+        }
+        return nil
     }
 
     private func detectPackageManager(repoURL: URL) -> PackageManagerKind {

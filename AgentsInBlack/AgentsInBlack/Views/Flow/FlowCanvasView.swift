@@ -445,7 +445,8 @@ struct FlowCanvasView: View {
                     FlowNodeVisual(
                         kind: node.serviceKind,
                         outgoingCount: outgoingCounts[node.id, default: 0],
-                        activityState: activityState
+                        activityState: activityState,
+                        displayName: node.displayName
                     )
                 )
             }
@@ -487,9 +488,9 @@ private struct FlowServiceNodeContent: View {
     static let handleInset: CGFloat = 5
 
     var body: some View {
-        let visual = visualsByID[node.id] ?? FlowNodeVisual(kind: .unknown, outgoingCount: 0, activityState: .stopped)
+        let visual = visualsByID[node.id] ?? FlowNodeVisual(kind: .unknown, outgoingCount: 0, activityState: .stopped, displayName: nil)
         let tint = AIBFlowPalette.tint(for: visual.kind)
-        let parts = splitNamespacedID(node.data)
+        let parts = displayParts(namespacedID: node.data, displayName: visual.displayName)
         let inset = Self.handleInset
 
         ZStack {
@@ -617,12 +618,21 @@ private struct FlowServiceNodeContent: View {
 
     // MARK: - Helpers
 
-    private func splitNamespacedID(_ value: String) -> (primary: String, secondary: String?) {
-        let parts = value.split(separator: "/", maxSplits: 1).map(String.init)
-        if parts.count == 2 {
-            return (primary: parts[1], secondary: parts[0])
+    /// Resolve the display name for a canvas node.
+    /// When a package manifest name is available, show it as primary with namespace as secondary.
+    /// Falls back to splitting the namespacedID.
+    private func displayParts(namespacedID: String, displayName: String?) -> (primary: String, secondary: String?) {
+        let nsParts = namespacedID.split(separator: "/", maxSplits: 1).map(String.init)
+        let namespace = nsParts.count == 2 ? nsParts[0] : nil
+
+        if let displayName {
+            return (primary: displayName, secondary: namespace)
         }
-        return (primary: value, secondary: nil)
+
+        if nsParts.count == 2 {
+            return (primary: nsParts[1], secondary: nsParts[0])
+        }
+        return (primary: namespacedID, secondary: nil)
     }
 
     private func handleAlignment(_ position: HandlePosition) -> Alignment {
@@ -696,6 +706,8 @@ private struct FlowNodeVisual: Equatable {
     let kind: AIBServiceKind
     let outgoingCount: Int
     let activityState: ActivityState
+    /// Package manifest name for display (e.g., package.json "name", executableTarget name).
+    let displayName: String?
 
     enum ActivityState: Equatable {
         case stopped

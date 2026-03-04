@@ -25,6 +25,7 @@ public actor DevSupervisor {
     private let watchFilePath: String
     private let gatewayPort: Int
     private let reloadEnabled: Bool
+    private let additionalEnvironment: [String: String]
 
     /// Thread-safe PID registry for synchronous emergency cleanup.
     /// Accessible from any isolation domain via `nonisolated` methods.
@@ -43,6 +44,7 @@ public actor DevSupervisor {
         watchFilePath: String,
         gatewayPort: Int,
         reloadEnabled: Bool = true,
+        additionalEnvironment: [String: String] = [:],
         processController: ProcessController = DefaultProcessController(),
         healthClient: HealthProbeClient = DefaultHealthProbeClient(),
         logger: Logger
@@ -52,6 +54,7 @@ public actor DevSupervisor {
         self.watchFilePath = watchFilePath
         self.gatewayPort = gatewayPort
         self.reloadEnabled = reloadEnabled
+        self.additionalEnvironment = additionalEnvironment
         self.processController = processController
         self.healthClient = healthClient
         self.logger = logger
@@ -216,9 +219,14 @@ public actor DevSupervisor {
         runtime.consecutiveProbeFailures = 0
         runtimes[id] = runtime
 
-        let resolvedPort = try allocatePort(preferred: runtime.service.port)
+        var service = runtime.service
+        for (key, value) in additionalEnvironment where service.env[key] == nil {
+            service.env[key] = value
+        }
+
+        let resolvedPort = try allocatePort(preferred: service.port)
         let handle = try await processController.spawn(
-            service: runtime.service,
+            service: service,
             resolvedPort: resolvedPort,
             gatewayPort: gatewayPort,
             configBaseDirectory: configBaseDirectory

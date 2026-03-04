@@ -27,6 +27,21 @@ public struct AIBDeployPlan: Sendable, Identifiable {
         self.authBindings = authBindings
         self.warnings = warnings
     }
+
+    /// All unique secret names required across all services.
+    public var allRequiredSecrets: [String] {
+        Array(Set(services.flatMap(\.requiredSecrets))).sorted()
+    }
+
+    /// Whether any service requires secrets to be provided before deployment.
+    public var hasRequiredSecrets: Bool {
+        services.contains { !$0.requiredSecrets.isEmpty }
+    }
+
+    /// All env warnings across all services.
+    public var allEnvWarnings: [String] {
+        services.flatMap(\.envWarnings)
+    }
 }
 
 /// Per-service deployment plan.
@@ -43,6 +58,13 @@ public struct AIBDeployServicePlan: Sendable, Identifiable {
     public var connections: AIBDeployResolvedConnections
     public var isPublic: Bool
 
+    /// Secret environment variable names detected from source code.
+    /// These must be provided by the user before deployment.
+    public var requiredSecrets: [String]
+
+    /// Warnings about missing non-secret environment variables.
+    public var envWarnings: [String]
+
     public init(
         id: String,
         serviceKind: AIBServiceKind,
@@ -54,7 +76,9 @@ public struct AIBDeployServicePlan: Sendable, Identifiable {
         resourceConfig: AIBDeployResourceConfig = .init(),
         envVars: [String: String] = [:],
         connections: AIBDeployResolvedConnections = .init(),
-        isPublic: Bool = false
+        isPublic: Bool = false,
+        requiredSecrets: [String] = [],
+        envWarnings: [String] = []
     ) {
         self.id = id
         self.serviceKind = serviceKind
@@ -67,5 +91,7 @@ public struct AIBDeployServicePlan: Sendable, Identifiable {
         self.envVars = envVars
         self.connections = connections
         self.isPublic = isPublic
+        self.requiredSecrets = requiredSecrets
+        self.envWarnings = envWarnings
     }
 }

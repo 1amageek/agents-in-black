@@ -6,10 +6,14 @@ import Yams
 public struct ResolvedConfig: Sendable {
     public var config: AIBConfig
     public var warnings: [String]
+    /// Per-service deploy metadata keyed by namespaced service ID (e.g., "agent/node").
+    /// Populated during config resolution from runtime detection results.
+    public var serviceMetadata: [String: ServiceDeployMetadata]
 
-    public init(config: AIBConfig, warnings: [String]) {
+    public init(config: AIBConfig, warnings: [String], serviceMetadata: [String: ServiceDeployMetadata] = [:]) {
         self.config = config
         self.warnings = warnings
+        self.serviceMetadata = serviceMetadata
     }
 }
 
@@ -19,19 +23,66 @@ public enum WorkspaceSyncer {
     public static func resolveConfig(workspaceRoot: String, workspace: AIBWorkspaceConfig) throws -> ResolvedConfig {
         var services: [ServiceConfig] = []
         var warnings: [String] = []
+        var serviceMetadata: [String: ServiceDeployMetadata] = [:]
 
         for repo in workspace.repos where repo.enabled {
             let repoRoot = URL(fileURLWithPath: repo.path, relativeTo: URL(fileURLWithPath: workspaceRoot)).standardizedFileURL.path
-            if let inlineServices = repo.services, !inlineServices.isEmpty {
-                let converted = try inlineServices.map { try convertInlineService($0, repo: repo, repoRoot: repoRoot) }
-                services.append(contentsOf: namespacedServices(from: converted, repo: repo, repoRoot: repoRoot))
+            let repoURL = URL(fileURLWithPath: repoRoot)
+            let allDetections = RuntimeAdapterRegistry.detectAll(repoURL: repoURL)
+            let detectionsByRuntime = Dictionary(uniqueKeysWithValues: allDetections.map { ($0.runtime, $0) })
+
+            if let inlineServices = repo.services {
+                // Explicit services list (may be empty if all were removed)
+                if !inlineServices.isEmpty {
+                    let converted = try inlineServices.map { try convertInlineService($0, repo: repo, repoRoot: repoRoot) }
+                    let namespaced = namespacedServices(from: converted, repo: repo, repoRoot: repoRoot)
+                    services.append(contentsOf: namespaced)
+
+                    // Build metadata for each inline service
+                    for (idx, inline) in inlineServices.enumerated() {
+                        let namespacedID = namespaced[idx].id.rawValue
+                        let meta = resolveServiceMetadata(
+                            inline: inline,
+                            repo: repo,
+                            workspaceRoot: workspaceRoot,
+                            detectionsByRuntime: detectionsByRuntime
+                        )
+                        serviceMetadata[namespacedID] = meta
+                    }
+                }
             } else {
                 switch repo.status {
                 case .discoverable:
-                    if let generated = generateDiscoverableService(repo: repo, repoRoot: repoRoot) {
-                        services.append(generated)
-                    } else {
+                    let generated = generateDiscoverableServices(repo: repo, repoRoot: repoRoot)
+                    if generated.isEmpty {
                         warnings.append("repo \(repo.name): discoverable but no selected command")
+                    } else {
+                        services.append(contentsOf: generated)
+
+                        // Build metadata for discoverable services
+                        for service in generated {
+                            let serviceID = service.id.rawValue
+                            let runtime = RuntimeKind.fromCommand(service.run.first ?? "")
+                            let detection = detectionsByRuntime[runtime] ?? allDetections.first
+                            let packageName = resolvePackageName(
+                                runtime: runtime,
+                                detection: detection,
+                                runCommand: service.run,
+                                fallback: serviceID.split(separator: "/").last.map(String.init) ?? serviceID
+                            )
+                            let dockerfilePath = findDockerfilePath(
+                                repoPath: repo.path,
+                                runtime: runtime,
+                                workspaceRoot: workspaceRoot
+                            )
+                            serviceMetadata[serviceID] = ServiceDeployMetadata(
+                                runtime: detection?.runtime ?? runtime,
+                                packageManager: detection?.packageManager ?? .unknown,
+                                packageName: packageName,
+                                repoPath: repo.path,
+                                dockerfilePath: dockerfilePath
+                            )
+                        }
                     }
                 case .unresolved:
                     warnings.append("repo \(repo.name): unresolved (skipped)")
@@ -49,7 +100,7 @@ public enum WorkspaceSyncer {
         }
         warnings.append(contentsOf: validation.warnings)
 
-        return ResolvedConfig(config: config, warnings: warnings)
+        return ResolvedConfig(config: config, warnings: warnings, serviceMetadata: serviceMetadata)
     }
 
     /// Sync workspace: resolve config and write runtime connection artifacts.
@@ -87,20 +138,23 @@ public enum WorkspaceSyncer {
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
 
         for service in config.services where service.kind == .agent {
+            let mcpTargets = resolveConnectionTargets(
+                service.connections.mcpServers,
+                servicesByID: servicesByID,
+                gatewayPort: gatewayPort,
+                defaultPathProvider: { target in target.mcp?.path ?? "/mcp" }
+            )
+            let a2aTargets = resolveConnectionTargets(
+                service.connections.a2aAgents,
+                servicesByID: servicesByID,
+                gatewayPort: gatewayPort,
+                defaultPathProvider: { target in target.a2a?.rpcPath ?? "/a2a" }
+            )
+
             let artifact = RuntimeConnectionArtifact(
                 serviceID: service.id.rawValue,
-                mcpServers: resolveConnectionTargets(
-                    service.connections.mcpServers,
-                    servicesByID: servicesByID,
-                    gatewayPort: gatewayPort,
-                    defaultPathProvider: { target in target.mcp?.path ?? "/mcp" }
-                ),
-                a2aAgents: resolveConnectionTargets(
-                    service.connections.a2aAgents,
-                    servicesByID: servicesByID,
-                    gatewayPort: gatewayPort,
-                    defaultPathProvider: { target in target.a2a?.rpcPath ?? "/a2a" }
-                )
+                mcpServers: mcpTargets,
+                a2aAgents: a2aTargets
             )
 
             let filename = sanitizedServiceFilename(service.id.rawValue) + ".json"
@@ -114,7 +168,71 @@ public enum WorkspaceSyncer {
                     metadata: ["path": outputURL.path, "underlying_error": "\(error)"]
                 )
             }
+
+            // Generate native .mcp.json for Claude Code / Claude Agent SDK
+            try writeMCPProjectConfig(
+                serviceID: service.id.rawValue,
+                mcpTargets: mcpTargets,
+                workspaceRoot: workspaceRoot
+            )
         }
+    }
+
+    /// Generate a `.mcp.json` file in Claude Code's native format for an agent service.
+    /// Placed at `.aib/generated/runtime/mcp/{sanitized_id}/.mcp.json`.
+    /// The process controller copies this to the agent's cwd at spawn time.
+    private static func writeMCPProjectConfig(
+        serviceID: String,
+        mcpTargets: [ResolvedConnectionTarget],
+        workspaceRoot: String
+    ) throws {
+        let sanitized = sanitizedServiceFilename(serviceID)
+        let mcpDir = URL(fileURLWithPath: ".aib/generated/runtime/mcp/\(sanitized)", relativeTo: URL(fileURLWithPath: workspaceRoot))
+            .standardizedFileURL
+
+        do {
+            try FileManager.default.createDirectory(at: mcpDir, withIntermediateDirectories: true)
+        } catch {
+            throw ConfigError(
+                "Failed to create MCP config output directory",
+                metadata: ["path": mcpDir.path, "underlying_error": "\(error)"]
+            )
+        }
+
+        var servers: [String: MCPProjectServerEntry] = [:]
+        for target in mcpTargets {
+            let name = mcpServerName(from: target)
+            servers[name] = MCPProjectServerEntry(type: "http", url: target.resolvedURL)
+        }
+
+        let config = MCPProjectConfig(mcpServers: servers)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let outputURL = mcpDir.appendingPathComponent(".mcp.json")
+        do {
+            let data = try encoder.encode(config)
+            try data.write(to: outputURL, options: .atomic)
+        } catch {
+            throw ConfigError(
+                "Failed to write MCP project config",
+                metadata: ["path": outputURL.path, "underlying_error": "\(error)"]
+            )
+        }
+    }
+
+    /// Derive a human-readable MCP server name from a resolved connection target.
+    private static func mcpServerName(from target: ResolvedConnectionTarget) -> String {
+        if let ref = target.serviceRef, !ref.isEmpty {
+            return ref.replacingOccurrences(of: "/", with: "-")
+        }
+        // Fallback: extract host+path from URL
+        if let url = URL(string: target.resolvedURL) {
+            let host = url.host ?? "unknown"
+            let path = url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+                .replacingOccurrences(of: "/", with: "-")
+            return path.isEmpty ? host : "\(host)-\(path)"
+        }
+        return "mcp-server"
     }
 
     private static func namespacedServices(from repoServices: [ServiceConfig], repo: WorkspaceRepo, repoRoot: String) -> [ServiceConfig] {
@@ -149,29 +267,64 @@ public enum WorkspaceSyncer {
         return ServiceConnectionTarget(serviceRef: "\(repoNamespace)/\(serviceRef)", url: target.url)
     }
 
-    private static func generateDiscoverableService(repo: WorkspaceRepo, repoRoot: String) -> ServiceConfig? {
-        guard let selected = repo.selectedCommand, !selected.isEmpty else { return nil }
-        let defaults = RuntimeAdapterRegistry.defaults(for: repo.runtime, packageManager: repo.packageManager)
-        return ServiceConfig(
-            id: ServiceID("\(repo.namespace)/main"),
-            kind: defaults.serviceKind,
-            mountPath: "/\(repo.namespace)",
-            port: 0,
-            cwd: repoRoot,
-            run: selected,
-            build: defaults.buildCommand,
-            install: defaults.installCommand,
-            watchMode: defaults.watchMode,
-            watchPaths: defaults.watchPaths,
-            restartAffects: [],
-            pathRewrite: .stripPrefix,
-            cookiePathRewrite: true,
-            env: [:],
-            health: .init(),
-            restart: .init(),
-            concurrency: .init(),
-            auth: .init()
-        )
+    private static func generateDiscoverableServices(repo: WorkspaceRepo, repoRoot: String) -> [ServiceConfig] {
+        let repoURL = URL(fileURLWithPath: repoRoot)
+        let allDetections = RuntimeAdapterRegistry.detectAll(repoURL: repoURL)
+
+        if allDetections.count <= 1 {
+            // Single runtime: use selectedCommand with "main" ID (original behavior)
+            guard let selected = repo.selectedCommand, !selected.isEmpty else { return [] }
+            let defaults = RuntimeAdapterRegistry.defaults(for: repo.runtime, packageManager: repo.packageManager)
+            return [ServiceConfig(
+                id: ServiceID("\(repo.namespace)/main"),
+                kind: defaults.serviceKind,
+                mountPath: "/\(repo.namespace)",
+                port: 0,
+                cwd: repoRoot,
+                run: selected,
+                build: defaults.buildCommand,
+                install: defaults.installCommand,
+                watchMode: defaults.watchMode,
+                watchPaths: defaults.watchPaths,
+                restartAffects: [],
+                pathRewrite: .stripPrefix,
+                cookiePathRewrite: true,
+                env: [:],
+                health: .init(),
+                restart: .init(),
+                concurrency: .init(),
+                auth: .init()
+            )]
+        }
+
+        // Multiple runtimes: generate a service per runtime
+        var services: [ServiceConfig] = []
+        for detection in allDetections {
+            guard let command = detection.candidates.first?.argv, !command.isEmpty else { continue }
+            let defaults = RuntimeAdapterRegistry.defaults(for: detection.runtime, packageManager: detection.packageManager)
+            let localID = detection.runtime.rawValue
+            services.append(ServiceConfig(
+                id: ServiceID("\(repo.namespace)/\(localID)"),
+                kind: defaults.serviceKind,
+                mountPath: "/\(repo.namespace)/\(localID)",
+                port: 0,
+                cwd: repoRoot,
+                run: command,
+                build: defaults.buildCommand,
+                install: defaults.installCommand,
+                watchMode: defaults.watchMode,
+                watchPaths: defaults.watchPaths,
+                restartAffects: [],
+                pathRewrite: .stripPrefix,
+                cookiePathRewrite: true,
+                env: [:],
+                health: .init(),
+                restart: .init(),
+                concurrency: .init(),
+                auth: .init()
+            ))
+        }
+        return services
     }
 
     private static func convertInlineService(_ inline: WorkspaceRepoServiceConfig, repo: WorkspaceRepo, repoRoot: String) throws -> ServiceConfig {
@@ -287,6 +440,86 @@ public enum WorkspaceSyncer {
     private static func sanitizedServiceFilename(_ value: String) -> String {
         value.replacingOccurrences(of: "/", with: "__")
     }
+
+    // MARK: - Service Deploy Metadata Resolution
+
+    /// Build metadata for an inline service by matching its run command to a detection result.
+    private static func resolveServiceMetadata(
+        inline: WorkspaceRepoServiceConfig,
+        repo: WorkspaceRepo,
+        workspaceRoot: String,
+        detectionsByRuntime: [RuntimeKind: RuntimeDetectionResult]
+    ) -> ServiceDeployMetadata {
+        let runtime = RuntimeKind.fromCommand(inline.run.first ?? "")
+        let detection = detectionsByRuntime[runtime]
+        let packageName = resolvePackageName(
+            runtime: runtime,
+            detection: detection,
+            runCommand: inline.run,
+            fallback: inline.id
+        )
+        let dockerfilePath = findDockerfilePath(
+            repoPath: repo.path,
+            runtime: runtime,
+            workspaceRoot: workspaceRoot
+        )
+        return ServiceDeployMetadata(
+            runtime: detection?.runtime ?? runtime,
+            packageManager: detection?.packageManager ?? .unknown,
+            packageName: packageName,
+            repoPath: repo.path,
+            dockerfilePath: dockerfilePath
+        )
+    }
+
+    /// Resolve a human-readable package name from detection results.
+    /// - 1:1 runtime (Node/Python/Deno): uses the single serviceNames entry
+    /// - 1:N runtime (Swift): matches run command target to serviceNames
+    /// - Fallback: uses the provided fallback string
+    static func resolvePackageName(
+        runtime: RuntimeKind,
+        detection: RuntimeDetectionResult?,
+        runCommand: [String],
+        fallback: String
+    ) -> String {
+        guard let names = detection?.serviceNames, !names.isEmpty else {
+            return fallback
+        }
+        if names.count == 1 {
+            return names[0]
+        }
+        // Multiple names (Swift targets) — match via run command
+        if runtime == .swift, runCommand.count >= 3, runCommand[1] == "run" {
+            let target = runCommand[2]
+            if names.contains(target) {
+                return target
+            }
+        }
+        // Try matching fallback (local ID) against known names
+        if names.contains(fallback) {
+            return fallback
+        }
+        return names[0]
+    }
+
+    /// Find a custom Dockerfile for this service's runtime.
+    /// Priority: Dockerfile.{runtime} > Dockerfile > nil
+    private static func findDockerfilePath(
+        repoPath: String,
+        runtime: RuntimeKind,
+        workspaceRoot: String
+    ) -> String? {
+        let repoURL = URL(fileURLWithPath: workspaceRoot).appendingPathComponent(repoPath)
+        let runtimeDockerfile = repoURL.appendingPathComponent("Dockerfile.\(runtime.rawValue)")
+        if FileManager.default.fileExists(atPath: runtimeDockerfile.path) {
+            return "\(repoPath)/Dockerfile.\(runtime.rawValue)"
+        }
+        let plainDockerfile = repoURL.appendingPathComponent("Dockerfile")
+        if FileManager.default.fileExists(atPath: plainDockerfile.path) {
+            return "\(repoPath)/Dockerfile"
+        }
+        return nil
+    }
 }
 
 private struct RuntimeConnectionArtifact: Codable {
@@ -311,4 +544,15 @@ private struct ResolvedConnectionTarget: Codable {
         case resolvedURL = "resolved_url"
         case source
     }
+}
+
+// MARK: - Native MCP Project Config (.mcp.json)
+
+private struct MCPProjectConfig: Codable {
+    var mcpServers: [String: MCPProjectServerEntry]
+}
+
+private struct MCPProjectServerEntry: Codable {
+    var type: String
+    var url: String
 }

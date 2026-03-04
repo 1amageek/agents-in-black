@@ -5,6 +5,12 @@ import Foundation
 /// config generation, and deployment commands.
 public struct GCPCloudRunProvider: DeploymentProvider, Sendable {
 
+    /// Environment variable names reserved by Cloud Run (auto-set by the system).
+    private static let reservedCloudRunEnvKeys: Set<String> = [
+        "PORT", "K_SERVICE", "K_REVISION", "K_CONFIGURATION",
+    ]
+    private var reservedCloudRunEnvKeys: Set<String> { Self.reservedCloudRunEnvKeys }
+
     public var providerID: String { "gcp-cloudrun" }
     public var displayName: String { "Google Cloud Run" }
 
@@ -19,7 +25,6 @@ public struct GCPCloudRunProvider: DeploymentProvider, Sendable {
             GCloudProjectChecker(),
             DockerInstalledChecker(),
             DockerDaemonChecker(),
-            ArtifactRegistryChecker(),
             CloudRunAPIChecker(),
         ]
     }
@@ -27,7 +32,7 @@ public struct GCPCloudRunProvider: DeploymentProvider, Sendable {
     public func preflightDependencies() -> [PreflightCheckID: [PreflightCheckID]] {
         [
             .gcloudInstalled: [.gcloudAuthenticated, .gcloudProjectConfigured, .cloudRunAPIEnabled],
-            .dockerInstalled: [.dockerDaemonRunning, .artifactRegistryConfigured],
+            .dockerInstalled: [.dockerDaemonRunning],
         ]
     }
 
@@ -52,9 +57,9 @@ public struct GCPCloudRunProvider: DeploymentProvider, Sendable {
 
     // MARK: - Service Naming
 
-    /// Sanitize a namespaced service ID into a valid Cloud Run service name.
+    /// Sanitize a package-derived service name into a valid Cloud Run service name.
     /// Cloud Run names: lowercase letters, hyphens, max 63 chars.
-    /// Example: "mcp-node/web" -> "mcp-node-web"
+    /// Example: "MyService" -> "myservice"
     public func deployedServiceName(from namespacedID: String) -> String {
         let sanitized = namespacedID
             .replacingOccurrences(of: "/", with: "-")
@@ -104,9 +109,10 @@ public struct GCPCloudRunProvider: DeploymentProvider, Sendable {
         lines.append("timeout: \(service.resourceConfig.timeout)")
         lines.append("auth: \(service.isPublic ? "public" : "private")")
 
-        if !service.envVars.isEmpty {
+        let planEnvVars = service.envVars.filter { !reservedCloudRunEnvKeys.contains($0.key) }
+        if !planEnvVars.isEmpty {
             lines.append("env:")
-            for (key, value) in service.envVars.sorted(by: { $0.key < $1.key }) {
+            for (key, value) in planEnvVars.sorted(by: { $0.key < $1.key }) {
                 lines.append("  \(key): \"\(value)\"")
             }
         }
@@ -123,9 +129,40 @@ public struct GCPCloudRunProvider: DeploymentProvider, Sendable {
         let gcpProject = requiredGCPProject(from: targetConfig)
         let host = targetConfig.providerConfig["artifactRegistryHost"]
             ?? "\(targetConfig.region)-docker.pkg.dev"
-        let repo = targetConfig.providerConfig["artifactRegistryRepo"]
-            ?? "\(gcpProject)/aib-services"
-        return "\(host)/\(repo)/\(service.deployedServiceName):latest"
+        return "\(host)/\(gcpProject)/\(service.deployedServiceName)/service:latest"
+    }
+
+    public func registryAuthCommands(targetConfig: AIBDeployTargetConfig) -> [DeployCommand] {
+        let host = targetConfig.providerConfig["artifactRegistryHost"]
+            ?? "\(targetConfig.region)-docker.pkg.dev"
+        return [
+            DeployCommand(
+                label: "Configuring Docker authentication for Artifact Registry",
+                arguments: ["gcloud", "auth", "configure-docker", host, "--quiet"],
+                stepID: AIBDeployStep.dockerAuth.rawValue
+            ),
+        ]
+    }
+
+    public func ensureRegistryRepoCommands(
+        service: AIBDeployServicePlan,
+        targetConfig: AIBDeployTargetConfig
+    ) -> [DeployCommand] {
+        let gcpProject = requiredGCPProject(from: targetConfig)
+        return [
+            DeployCommand(
+                label: "Ensuring Artifact Registry repository for \(service.deployedServiceName)",
+                arguments: [
+                    "gcloud", "artifacts", "repositories", "create",
+                    service.deployedServiceName,
+                    "--repository-format=docker",
+                    "--location=\(targetConfig.region)",
+                    "--project=\(gcpProject)",
+                    "--quiet",
+                ],
+                stepID: AIBDeployStep.registrySetup.rawValue
+            ),
+        ]
     }
 
     // MARK: - Build & Push Commands
@@ -138,7 +175,13 @@ public struct GCPCloudRunProvider: DeploymentProvider, Sendable {
         [
             DeployCommand(
                 label: "Building container image",
-                arguments: ["docker", "build", "-t", imageTag, "-f", dockerfilePath, buildContext],
+                arguments: [
+                    "docker", "build",
+                    "--platform", "linux/amd64",
+                    "-t", imageTag,
+                    "-f", dockerfilePath,
+                    buildContext,
+                ],
                 stepID: AIBDeployStep.dockerBuild.rawValue
             ),
             DeployCommand(
@@ -154,7 +197,8 @@ public struct GCPCloudRunProvider: DeploymentProvider, Sendable {
     public func deployCommands(
         service: AIBDeployServicePlan,
         imageTag: String,
-        targetConfig: AIBDeployTargetConfig
+        targetConfig: AIBDeployTargetConfig,
+        secrets: [String: String] = [:]
     ) -> [DeployCommand] {
         let gcpProject = requiredGCPProject(from: targetConfig)
 
@@ -178,11 +222,21 @@ public struct GCPCloudRunProvider: DeploymentProvider, Sendable {
             args.append("--no-allow-unauthenticated")
         }
 
-        if !service.envVars.isEmpty {
-            let envString = service.envVars
+        // Merge regular env vars + secrets into a single --set-env-vars.
+        // Use gcloud's ^||^ custom delimiter to avoid values containing commas
+        // or other special characters from breaking the parser.
+        var allEnvVars = service.envVars.filter { !reservedCloudRunEnvKeys.contains($0.key) }
+        for (key, value) in secrets {
+            allEnvVars[key] = value
+        }
+
+        if !allEnvVars.isEmpty {
+            let delimiter = "||"
+            let envString = "^" + delimiter + "^"
+                + allEnvVars
                 .sorted(by: { $0.key < $1.key })
                 .map { "\($0.key)=\($0.value)" }
-                .joined(separator: ",")
+                .joined(separator: delimiter)
             args.append(contentsOf: ["--set-env-vars", envString])
         }
 
@@ -218,6 +272,58 @@ public struct GCPCloudRunProvider: DeploymentProvider, Sendable {
                 stepID: AIBDeployStep.authBind.rawValue
             ),
         ]
+    }
+
+    // MARK: - Existing Env Vars
+
+    public func existingEnvVarNames(
+        serviceName: String,
+        targetConfig: AIBDeployTargetConfig
+    ) async -> Set<String> {
+        let gcpProject = targetConfig.providerConfig["gcpProject"] ?? ""
+        guard !gcpProject.isEmpty else { return [] }
+
+        // Use JSON output for reliable parsing
+        let command = "gcloud run services describe \(serviceName)"
+            + " --region=\(targetConfig.region)"
+            + " --project=\(gcpProject)"
+            + " --format='json(spec.template.spec.containers[0].env)'"
+
+        do {
+            let result = try await ShellProbe.run(command: command, timeout: .seconds(15))
+            guard result.exitCode == 0, !result.stdout.isEmpty else { return [] }
+
+            // JSON output: {"spec":{"template":{"spec":{"containers":[{"env":[{"name":"KEY","value":"..."}]}]}}}}
+            guard let data = result.stdout.data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else { return [] }
+
+            // Navigate the nested structure
+            var names: Set<String> = []
+            let envArray: [[String: Any]]? = {
+                if let spec = json["spec"] as? [String: Any],
+                   let template = spec["template"] as? [String: Any],
+                   let templateSpec = template["spec"] as? [String: Any],
+                   let containers = templateSpec["containers"] as? [[String: Any]],
+                   let first = containers.first,
+                   let env = first["env"] as? [[String: Any]]
+                {
+                    return env
+                }
+                return nil
+            }()
+
+            if let envArray {
+                for entry in envArray {
+                    if let name = entry["name"] as? String {
+                        names.insert(name)
+                    }
+                }
+            }
+            return names
+        } catch {
+            return []
+        }
     }
 
     // MARK: - Parse Output

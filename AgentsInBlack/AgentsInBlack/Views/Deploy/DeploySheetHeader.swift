@@ -27,9 +27,9 @@ struct DeploySheetHeader: View {
         switch phase {
         case .idle, .preflight: return 0
         case .planning: return 1
-        case .reviewing: return 2
+        case .reviewing, .secretsInput: return 2
         case .applying: return 3
-        case .completed: return 4
+        case .completed: return 5
         case .failed, .cancelled: return -1
         }
     }

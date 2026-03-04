@@ -1,3 +1,4 @@
+import AIBConfig
 import AIBWorkspace
 import Foundation
 import Yams
@@ -27,7 +28,36 @@ public final class WorkspaceDiscoveryService {
         }
 
         let workspaceConfig = try loadWorkspaceConfig(at: rootURL)
-        let repos = try discoverRepos(in: rootURL)
+
+        // Build lookup from workspace.yaml so configured runtime takes priority
+        let configuredReposByPath: [String: WorkspaceRepo]
+        if let workspaceConfig {
+            var lookup: [String: WorkspaceRepo] = [:]
+            for repo in workspaceConfig.repos {
+                let resolvedURL = URL(fileURLWithPath: repo.path, relativeTo: rootURL).standardizedFileURL
+                lookup[resolvedURL.path] = repo
+            }
+            configuredReposByPath = lookup
+        } else {
+            configuredReposByPath = [:]
+        }
+
+        var repos = try discoverRepos(in: rootURL, configuredReposByPath: configuredReposByPath)
+
+        // Include repos from workspace.yaml that were not found by filesystem scan
+        // (e.g. external references with ../ paths)
+        if let workspaceConfig {
+            let discoveredPaths = Set(repos.map { $0.rootURL.standardizedFileURL.path })
+            for wsRepo in workspaceConfig.repos where wsRepo.enabled {
+                let resolvedURL = URL(fileURLWithPath: wsRepo.path, relativeTo: rootURL).standardizedFileURL
+                guard !discoveredPaths.contains(resolvedURL.path),
+                      FileManager.default.fileExists(atPath: resolvedURL.path) else {
+                    continue
+                }
+                repos.append(detectRepo(at: resolvedURL, configuredRepo: wsRepo))
+            }
+        }
+
         let fileTreesByRepoID = try Dictionary(uniqueKeysWithValues: repos.map { repo in
             (repo.id, try buildFileTree(for: repo))
         })
@@ -48,7 +78,7 @@ public final class WorkspaceDiscoveryService {
         return try WorkspaceYAMLCodec.loadWorkspace(at: configPath)
     }
 
-    private func discoverRepos(in rootURL: URL) throws -> [AIBRepoModel] {
+    private func discoverRepos(in rootURL: URL, configuredReposByPath: [String: WorkspaceRepo]) throws -> [AIBRepoModel] {
         let fm = FileManager.default
         guard let enumerator = fm.enumerator(
             at: rootURL,
@@ -67,71 +97,208 @@ public final class WorkspaceDiscoveryService {
             }
             let gitPath = item.appendingPathComponent(".git").path
             if fm.fileExists(atPath: gitPath) {
-                repos.append(detectRepo(at: item))
+                let configured = configuredReposByPath[item.standardizedFileURL.path]
+                repos.append(detectRepo(at: item, configuredRepo: configured))
                 enumerator.skipDescendants()
             }
         }
         return uniquedRepoNames(repos)
     }
 
-    private func detectRepo(at repoURL: URL) -> AIBRepoModel {
-        let detection = RuntimeAdapterRegistry.detect(repoURL: repoURL)
-        let status = detection.candidates.isEmpty ? "unresolved" : "discoverable"
+    private func detectRepo(at repoURL: URL, configuredRepo: WorkspaceRepo? = nil) -> AIBRepoModel {
+        let allDetections = RuntimeAdapterRegistry.detectAll(repoURL: repoURL)
+        let detectedRuntimes = allDetections.map { $0.runtime.rawValue }
+
+        // When workspace.yaml specifies a runtime, use that runtime's detection result
+        let activeDetection: RuntimeDetectionResult
+        if let configuredRuntime = configuredRepo?.runtime,
+           let matching = allDetections.first(where: { $0.runtime == configuredRuntime }) {
+            activeDetection = matching
+        } else {
+            activeDetection = allDetections.first ?? .unknown
+        }
+
+        let status = activeDetection.candidates.isEmpty ? "unresolved" : "discoverable"
+        let selectedCommand = configuredRepo?.selectedCommand ?? activeDetection.candidates.first?.argv ?? []
+
+        // Build runtime → package name mapping from all detection results
+        var detectedPackageNames: [String: String] = [:]
+        for detection in allDetections {
+            if let firstName = detection.serviceNames.first, detection.serviceNames.count == 1 {
+                detectedPackageNames[detection.runtime.rawValue] = firstName
+            } else if detection.serviceNames.count > 1 {
+                // Multi-target (e.g., Swift with multiple executables): use the first as representative
+                detectedPackageNames[detection.runtime.rawValue] = detection.serviceNames.first
+            }
+        }
 
         return AIBRepoModel(
             name: repoURL.lastPathComponent,
             rootURL: repoURL,
             status: status,
-            runtime: detection.runtime.rawValue,
-            framework: detection.framework.rawValue,
-            selectedCommand: detection.candidates.first?.argv ?? [],
-            namespace: repoURL.lastPathComponent
+            runtime: activeDetection.runtime.rawValue,
+            framework: activeDetection.framework.rawValue,
+            selectedCommand: selectedCommand,
+            namespace: repoURL.lastPathComponent,
+            detectedRuntimes: detectedRuntimes,
+            detectedPackageNames: detectedPackageNames
         )
     }
 
     private func parseAllServices(repos: [AIBRepoModel], workspaceConfig: AIBWorkspaceConfig?) -> [AIBServiceModel] {
         guard let workspaceConfig else { return [] }
         var result: [AIBServiceModel] = []
-        for wsRepo in workspaceConfig.repos {
-            guard let inlineServices = wsRepo.services, !inlineServices.isEmpty else { continue }
+        for wsRepo in workspaceConfig.repos where wsRepo.enabled {
             let matchingRepo = repos.first(where: { $0.name == wsRepo.name })
             let repoID = matchingRepo?.id ?? wsRepo.name
             let repoName = matchingRepo?.name ?? wsRepo.name
             let namespace = wsRepo.servicesNamespace ?? wsRepo.name
-            for service in inlineServices {
-                let kind = inferServiceKind(kind: service.kind, mountPath: service.mountPath)
-                let connections = parseConnections(service.connections, namespace: namespace)
-                let mcpProfile = service.mcp.map {
-                    AIBMCPProfile(
-                        transport: $0.transport ?? "streamable_http",
-                        path: $0.path ?? "/mcp"
-                    )
+
+            if let inlineServices = wsRepo.services {
+                // Detect package names per runtime from the repo's manifest
+                let detectionsByRuntime: [RuntimeKind: RuntimeDetectionResult]
+                if let repo = matchingRepo {
+                    let detections = RuntimeAdapterRegistry.detectAll(repoURL: repo.rootURL)
+                    detectionsByRuntime = Dictionary(uniqueKeysWithValues: detections.map { ($0.runtime, $0) })
+                } else {
+                    detectionsByRuntime = [:]
                 }
-                let a2aProfile = service.a2a.map {
-                    AIBA2AProfile(
-                        cardPath: $0.cardPath ?? "/.well-known/agent.json",
-                        rpcPath: $0.rpcPath ?? "/a2a"
+
+                // Explicit services list (may be empty if all were removed)
+                for service in inlineServices {
+                    let kind = inferServiceKind(kind: service.kind, mountPath: service.mountPath)
+                    let connections = parseConnections(service.connections, namespace: namespace)
+                    let mcpProfile = service.mcp.map {
+                        AIBMCPProfile(
+                            transport: $0.transport ?? "streamable_http",
+                            path: $0.path ?? "/mcp"
+                        )
+                    }
+                    let a2aProfile = service.a2a.map {
+                        AIBA2AProfile(
+                            cardPath: $0.cardPath ?? "/.well-known/agent.json",
+                            rpcPath: $0.rpcPath ?? "/a2a"
+                        )
+                    }
+                    let uiProfile = normalizeUIProfile(service.ui)
+
+                    // Resolve package name from the runtime matching this service's run command
+                    let packageName = resolvePackageName(
+                        runCommand: service.run,
+                        serviceID: service.id,
+                        detectionsByRuntime: detectionsByRuntime
                     )
+
+                    result.append(AIBServiceModel(
+                        repoID: repoID,
+                        repoName: repoName,
+                        localID: service.id,
+                        namespace: namespace,
+                        mountPath: service.mountPath,
+                        runCommand: service.run,
+                        watchMode: service.watchMode,
+                        cwd: service.cwd,
+                        serviceKind: kind,
+                        connections: connections,
+                        mcpProfile: mcpProfile,
+                        a2aProfile: a2aProfile,
+                        uiProfile: uiProfile,
+                        packageName: packageName
+                    ))
                 }
-                let uiProfile = normalizeUIProfile(service.ui)
-                result.append(AIBServiceModel(
+            } else {
+                // No services field (nil) — auto-generate from detected runtimes
+                let generated = generateAutoServices(
+                    wsRepo: wsRepo,
+                    matchingRepo: matchingRepo,
                     repoID: repoID,
                     repoName: repoName,
-                    localID: service.id,
-                    namespace: namespace,
-                    mountPath: service.mountPath,
-                    runCommand: service.run,
-                    watchMode: service.watchMode,
-                    cwd: service.cwd,
-                    serviceKind: kind,
-                    connections: connections,
-                    mcpProfile: mcpProfile,
-                    a2aProfile: a2aProfile,
-                    uiProfile: uiProfile
-                ))
+                    namespace: namespace
+                )
+                result.append(contentsOf: generated)
             }
         }
         return result
+    }
+
+    private func generateAutoServices(
+        wsRepo: WorkspaceRepo,
+        matchingRepo: AIBRepoModel?,
+        repoID: String,
+        repoName: String,
+        namespace: String
+    ) -> [AIBServiceModel] {
+        guard wsRepo.status == .discoverable else { return [] }
+
+        // Check if repo has multiple detected runtimes
+        let detectedRuntimes = matchingRepo?.detectedRuntimes ?? []
+        if detectedRuntimes.count > 1, let repoURL = matchingRepo?.rootURL {
+            let allDetections = RuntimeAdapterRegistry.detectAll(repoURL: repoURL)
+            var services: [AIBServiceModel] = []
+            for detection in allDetections {
+                guard let command = detection.candidates.first?.argv, !command.isEmpty else { continue }
+                let localID = detection.runtime.rawValue
+                let defaults = RuntimeAdapterRegistry.defaults(for: detection.runtime, packageManager: detection.packageManager)
+                let resolvedKind = detection.suggestedServiceKind != .unknown
+                    ? detection.suggestedServiceKind
+                    : defaults.serviceKind
+                let kind: AIBServiceKind = switch resolvedKind {
+                case .agent: .agent
+                case .mcp: .mcp
+                default: .unknown
+                }
+                let packageName = detection.serviceNames.count == 1 ? detection.serviceNames.first : nil
+                services.append(AIBServiceModel(
+                    repoID: repoID,
+                    repoName: repoName,
+                    localID: localID,
+                    namespace: namespace,
+                    mountPath: "/\(namespace)/\(localID)",
+                    runCommand: command,
+                    watchMode: defaults.watchMode.rawValue,
+                    cwd: repoURL.path,
+                    serviceKind: kind,
+                    packageName: packageName
+                ))
+            }
+            return services
+        }
+
+        // Single runtime: generate one service with "main" ID
+        let command = wsRepo.selectedCommand ?? []
+        guard !command.isEmpty else { return [] }
+        let defaults = RuntimeAdapterRegistry.defaults(for: wsRepo.runtime, packageManager: wsRepo.packageManager)
+
+        // Detect package name and service kind from the repo manifest
+        let autoPackageName: String?
+        let detectedServiceKind: ServiceKind
+        if let repoURL = matchingRepo?.rootURL {
+            let detection = RuntimeAdapterRegistry.detectAll(repoURL: repoURL).first
+            autoPackageName = detection?.serviceNames.first
+            detectedServiceKind = detection?.suggestedServiceKind ?? .unknown
+        } else {
+            autoPackageName = nil
+            detectedServiceKind = .unknown
+        }
+
+        let resolvedKind = detectedServiceKind != .unknown ? detectedServiceKind : defaults.serviceKind
+        let kind: AIBServiceKind = switch resolvedKind {
+        case .agent: .agent
+        case .mcp: .mcp
+        default: .unknown
+        }
+        return [AIBServiceModel(
+            repoID: repoID,
+            repoName: repoName,
+            localID: "main",
+            namespace: namespace,
+            mountPath: "/\(namespace)",
+            runCommand: command,
+            watchMode: defaults.watchMode.rawValue,
+            cwd: matchingRepo?.rootURL.path,
+            serviceKind: kind,
+            packageName: autoPackageName
+        )]
     }
 
     private func normalizeUIProfile(_ ui: WorkspaceRepoUIConfig?) -> AIBServiceUIProfile? {
@@ -238,5 +405,52 @@ public final class WorkspaceDiscoveryService {
             ref = nil
         }
         return AIBConnectionTarget(serviceRef: ref, url: target.url)
+    }
+
+    // MARK: - Package Name Resolution
+
+    /// Resolve the package manifest name for a service by matching its run command to a detected runtime.
+    ///
+    /// Strategy:
+    /// 1. Infer which runtime the service belongs to from its run command (e.g., "swift run X" → Swift)
+    /// 2. For Swift `swift run <target>`, extract the target name directly from the command
+    /// 3. For 1:1 runtimes (Node, Python, Deno), use the single detected service name
+    /// 4. For 1:N runtimes (Swift), match by service ID against detected executable target names
+    private func resolvePackageName(
+        runCommand: [String],
+        serviceID: String,
+        detectionsByRuntime: [RuntimeKind: RuntimeDetectionResult]
+    ) -> String? {
+        guard let firstArg = runCommand.first else { return nil }
+
+        let runtime = inferRuntimeFromCommand(firstArg)
+        guard let detection = detectionsByRuntime[runtime] else { return nil }
+
+        let names = detection.serviceNames
+        if names.isEmpty { return nil }
+
+        // Swift `swift run <target>`: extract target name from command
+        if runtime == .swift, runCommand.count >= 3, runCommand[1] == "run" {
+            let target = runCommand[2]
+            if names.contains(target) {
+                return target
+            }
+        }
+
+        // 1:1 runtime (single service name)
+        if names.count == 1 {
+            return names[0]
+        }
+
+        // 1:N runtime: match by service ID
+        if names.contains(serviceID) {
+            return serviceID
+        }
+
+        return nil
+    }
+
+    private func inferRuntimeFromCommand(_ command: String) -> RuntimeKind {
+        RuntimeKind.fromCommand(command)
     }
 }

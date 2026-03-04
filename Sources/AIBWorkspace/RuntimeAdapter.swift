@@ -20,18 +20,34 @@ public struct RuntimeDetectionResult: Sendable, Equatable {
     public var confidence: DetectionConfidence
     public var candidates: [CommandCandidate]
 
+    /// Deployable service names extracted from the package manifest.
+    /// - Node: `package.json` `"name"` (single element)
+    /// - Swift: `.executableTarget` names from `Package.swift` (may be multiple)
+    /// - Python: `pyproject.toml` `[project].name` (single element)
+    /// - Deno: `deno.json` `"name"` (single element)
+    /// Empty if the name could not be determined (caller falls back to directory name).
+    public var serviceNames: [String]
+
+    /// Suggested service kind inferred from package dependencies.
+    /// MCP SDK presence → `.mcp`, otherwise falls back to runtime default.
+    public var suggestedServiceKind: ServiceKind
+
     public init(
         runtime: RuntimeKind,
         framework: FrameworkKind,
         packageManager: PackageManagerKind,
         confidence: DetectionConfidence,
-        candidates: [CommandCandidate]
+        candidates: [CommandCandidate],
+        serviceNames: [String] = [],
+        suggestedServiceKind: ServiceKind = .unknown
     ) {
         self.runtime = runtime
         self.framework = framework
         self.packageManager = packageManager
         self.confidence = confidence
         self.candidates = candidates
+        self.serviceNames = serviceNames
+        self.suggestedServiceKind = suggestedServiceKind
     }
 
     public static let unknown = RuntimeDetectionResult(

@@ -82,7 +82,13 @@ public enum WorkspaceDiscovery {
         return result
     }
 
-    private static func relativePath(from root: URL, to target: URL) -> String {
+    /// Inspect a single directory as a potential repo, detecting runtime and computing relative path.
+    public static func inspectSingleRepo(at repoURL: URL, workspaceRoot: URL) -> WorkspaceRepo {
+        inspectRepo(at: repoURL.standardizedFileURL, workspaceRoot: workspaceRoot.standardizedFileURL).repo
+    }
+
+    /// Compute relative path from root to target, supporting upward traversal via `../`.
+    public static func relativePath(from root: URL, to target: URL) -> String {
         let rootComps = root.standardizedFileURL.pathComponents
         let targetComps = target.standardizedFileURL.pathComponents
         var i = 0

@@ -11,6 +11,7 @@ public protocol DeployExecuting: Sendable {
     ///   - workspaceRoot: Absolute path to the workspace root directory.
     ///   - overallProgress: Foundation `Progress` tree root. The executor creates
     ///     child `Progress` per service and updates `completedUnitCount` as steps finish.
+    ///   - secrets: User-provided secret values (name → value) to pass to deploy commands.
     ///   - logHandler: Called for each log line as it becomes available.
     /// - Returns: The aggregated result after all services are processed.
     func execute(
@@ -18,6 +19,7 @@ public protocol DeployExecuting: Sendable {
         provider: any DeploymentProvider,
         workspaceRoot: String,
         overallProgress: Progress,
+        secrets: [String: String],
         logHandler: @escaping @Sendable (AIBDeployLogEntry) -> Void
     ) async throws -> AIBDeployResult
 }

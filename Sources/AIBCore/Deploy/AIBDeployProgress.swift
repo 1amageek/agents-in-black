@@ -2,13 +2,15 @@ import Foundation
 
 /// A single step within the per-service deploy process.
 public enum AIBDeployStep: String, Sendable {
+    case dockerAuth
+    case registrySetup
     case dockerBuild
     case dockerPush
     case serviceDeploy
     case authBind
 
     /// Ordered pipeline steps that each service goes through.
-    public static let servicePipeline: [AIBDeployStep] = [.dockerBuild, .dockerPush, .serviceDeploy]
+    public static let servicePipeline: [AIBDeployStep] = [.registrySetup, .dockerBuild, .dockerPush, .serviceDeploy]
 
     /// Number of steps per service.
     public static let servicePipelineCount: Int64 = Int64(servicePipeline.count)

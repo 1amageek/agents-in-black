@@ -15,9 +15,11 @@ public struct NodeRuntimeAdapter: RuntimeAdapter, Sendable {
         let packagePath = repoURL.appendingPathComponent("package.json")
         var scripts: [String: String] = [:]
         var deps = Set<String>()
+        var packageName: String?
         do {
             let data = try Data(contentsOf: packagePath)
             if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                packageName = json["name"] as? String
                 if let scriptsJSON = json["scripts"] as? [String: String] {
                     scripts = scriptsJSON
                 }
@@ -50,12 +52,20 @@ public struct NodeRuntimeAdapter: RuntimeAdapter, Sendable {
         let packageManager = detectPackageManager(repoURL: repoURL)
         let candidates = nodeCandidates(packageManager: packageManager, scripts: scripts)
         let confidence: DetectionConfidence = candidates.isEmpty ? .low : .medium
+        let serviceNames = packageName.map { [$0] } ?? []
+
+        // Infer service kind from MCP SDK dependency
+        let mcpPackages = ["@modelcontextprotocol/sdk", "mcp-framework", "@anthropic-ai/sdk"]
+        let serviceKind: ServiceKind = deps.contains(where: { mcpPackages.contains($0) }) ? .mcp : .agent
+
         return RuntimeDetectionResult(
             runtime: .node,
             framework: framework,
             packageManager: packageManager,
             confidence: confidence,
-            candidates: candidates
+            candidates: candidates,
+            serviceNames: serviceNames,
+            suggestedServiceKind: serviceKind
         )
     }
 

@@ -10,10 +10,12 @@ struct DeployReviewView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
                     servicesSection
+                    secretsInfoSection
                     connectionsSection
                     authBindingsSection
                     artifactsSection
                     warningsSection
+                    envWarningsSection
                 }
                 .padding(20)
             }
@@ -254,6 +256,67 @@ struct DeployReviewView: View {
                                 Image(systemName: "exclamationmark.triangle.fill")
                                     .font(.caption)
                                     .foregroundStyle(.yellow)
+                                Text(warning)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: - Secrets Info
+
+    private var secretsInfoSection: some View {
+        Group {
+            if plan.hasRequiredSecrets {
+                VStack(alignment: .leading, spacing: 8) {
+                    sectionHeader("Secrets Required", count: plan.allRequiredSecrets.count)
+
+                    cardBackground {
+                        ForEach(Array(plan.allRequiredSecrets.enumerated()), id: \.element) { index, name in
+                            if index > 0 {
+                                Divider().padding(.leading, 12)
+                            }
+                            HStack(spacing: 8) {
+                                Image(systemName: "key.fill")
+                                    .font(.caption)
+                                    .foregroundStyle(.orange)
+                                Text(name)
+                                    .font(.system(.caption, design: .monospaced))
+                                Spacer()
+                            }
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                        }
+                    }
+
+                    Text("You will be prompted to enter secret values before deployment.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    // MARK: - Env Warnings
+
+    private var envWarningsSection: some View {
+        Group {
+            if !plan.allEnvWarnings.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    sectionHeader("Environment Warnings")
+
+                    cardBackground {
+                        ForEach(plan.allEnvWarnings, id: \.self) { warning in
+                            HStack(alignment: .top, spacing: 8) {
+                                Image(systemName: "info.circle.fill")
+                                    .font(.caption)
+                                    .foregroundStyle(.blue)
                                 Text(warning)
                                     .font(.caption)
                                     .foregroundStyle(.secondary)

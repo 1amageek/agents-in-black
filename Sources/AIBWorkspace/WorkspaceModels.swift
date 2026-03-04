@@ -14,6 +14,34 @@ public enum RuntimeKind: String, Codable, Sendable {
     case deno
     case python
     case unknown
+
+    /// Infer the runtime kind from the first argument of a run command.
+    public static func fromCommand(_ command: String) -> RuntimeKind {
+        switch command {
+        case "swift":
+            return .swift
+        case _ where command.hasSuffix("/swift"):
+            return .swift
+        case "node":
+            return .node
+        case _ where command.hasSuffix("/node"):
+            return .node
+        case "npm", "npx", "pnpm", "bun", "yarn":
+            return .node
+        case "python", "python3":
+            return .python
+        case _ where command.hasSuffix("/python3"):
+            return .python
+        case "deno":
+            return .deno
+        case _ where command.hasSuffix("/deno"):
+            return .deno
+        case _ where command.contains(".build/"):
+            return .swift
+        default:
+            return .unknown
+        }
+    }
 }
 
 public enum FrameworkKind: String, Codable, Sendable {
@@ -376,5 +404,35 @@ public struct WorkspaceSyncResult: Sendable {
     public init(serviceCount: Int, warnings: [String] = []) {
         self.serviceCount = serviceCount
         self.warnings = warnings
+    }
+}
+
+/// Per-service metadata resolved during workspace config resolution.
+/// Carries runtime detection results from WorkspaceSyncer to the deploy pipeline,
+/// eliminating the need for duplicate detection.
+public struct ServiceDeployMetadata: Sendable, Equatable {
+    /// Detected runtime for this service.
+    public var runtime: RuntimeKind
+    /// Detected package manager for this service.
+    public var packageManager: PackageManagerKind
+    /// Package manifest name (e.g., "agent" from package.json, "MCPServer" from Package.swift target).
+    public var packageName: String
+    /// Relative path from workspace root to the repo directory.
+    public var repoPath: String
+    /// Relative path to a custom Dockerfile, if one exists (e.g., "agent/Dockerfile.node").
+    public var dockerfilePath: String?
+
+    public init(
+        runtime: RuntimeKind,
+        packageManager: PackageManagerKind,
+        packageName: String,
+        repoPath: String,
+        dockerfilePath: String? = nil
+    ) {
+        self.runtime = runtime
+        self.packageManager = packageManager
+        self.packageName = packageName
+        self.repoPath = repoPath
+        self.dockerfilePath = dockerfilePath
     }
 }
