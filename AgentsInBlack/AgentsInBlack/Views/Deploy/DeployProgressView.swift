@@ -3,6 +3,7 @@ import SwiftUI
 
 struct DeployProgressView: View {
     let phase: AIBDeployPhase
+    let onCancel: (() -> Void)?
 
     var body: some View {
         VStack(spacing: 16) {
@@ -12,6 +13,14 @@ struct DeployProgressView: View {
             Text(detailText)
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
+            if let onCancel {
+                Button("Cancel Deployment") {
+                    onCancel()
+                }
+                .keyboardShortcut(.cancelAction)
+                .buttonStyle(.bordered)
+                .padding(.top, 8)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -27,7 +36,7 @@ struct DeployProgressView: View {
 
     private var detailText: String {
         switch phase {
-        case .preflight: return "Verifying gcloud CLI, Docker, and GCP project configuration"
+        case .preflight: return "Verifying gcloud CLI, Cloud APIs, and project configuration"
         case .planning: return "Analyzing workspace topology and generating artifacts"
         default: return ""
         }

@@ -415,6 +415,7 @@ public enum AIBWorkspaceManager {
                 """
                 version: 1
                 target: gcp-cloudrun
+                buildBackend: auto
                 defaults:
                   region: us-central1
                   auth: private

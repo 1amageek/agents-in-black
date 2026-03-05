@@ -16,6 +16,7 @@ public struct PreflightCheckID: RawRepresentable, Sendable, Hashable, Identifiab
 extension PreflightCheckID {
     public static let dockerInstalled = PreflightCheckID(rawValue: "dockerInstalled")
     public static let dockerDaemonRunning = PreflightCheckID(rawValue: "dockerDaemonRunning")
+    public static let buildBackendAvailable = PreflightCheckID(rawValue: "buildBackendAvailable")
 }
 
 // MARK: - GCP-specific Check IDs
@@ -24,5 +25,6 @@ extension PreflightCheckID {
     public static let gcloudInstalled = PreflightCheckID(rawValue: "gcloudInstalled")
     public static let gcloudAuthenticated = PreflightCheckID(rawValue: "gcloudAuthenticated")
     public static let gcloudProjectConfigured = PreflightCheckID(rawValue: "gcloudProjectConfigured")
+    public static let cloudBuildAPIEnabled = PreflightCheckID(rawValue: "cloudBuildAPIEnabled")
     public static let cloudRunAPIEnabled = PreflightCheckID(rawValue: "cloudRunAPIEnabled")
 }

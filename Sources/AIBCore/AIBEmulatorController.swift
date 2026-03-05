@@ -141,6 +141,7 @@ public final class AIBEmulatorController {
         guard gateway == nil, supervisor == nil else {
             throw EmulatorControllerError.alreadyRunning
         }
+        try ContainerCLIPolicy.ensureInstalled()
         emit(.lifecycleChanged(.starting))
 
         let workspaceRoot = workspaceURL.standardizedFileURL.path
@@ -253,7 +254,7 @@ public final class AIBEmulatorController {
         }
     }
 
-    public func stop() async throws {
+    public func stop(graceful: Bool = false) async throws {
         guard let gateway, let supervisor else {
             throw EmulatorControllerError.notRunning
         }
@@ -268,7 +269,7 @@ public final class AIBEmulatorController {
 
         serviceSnapshotPollTask?.cancel()
         serviceSnapshotPollTask = nil
-        await supervisor.stopAll(graceful: true)
+        await supervisor.stopAll(graceful: graceful)
 
         var stopFailure: Error?
         do {

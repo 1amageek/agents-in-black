@@ -35,6 +35,7 @@ public enum AIBRuntimeCoreService {
         options: AIBRuntimeOptions,
         logger: Logger
     ) async throws {
+        try ContainerCLIPolicy.ensureInstalled()
         let initial = try resolveWorkspaceConfig(options: options)
 
         if options.dryRun {

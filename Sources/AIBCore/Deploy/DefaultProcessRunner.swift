@@ -32,6 +32,7 @@ public struct DefaultProcessRunner: ProcessRunner {
         let shellCommand = arguments.map { Self.shellEscape($0) }.joined(separator: " ")
 
         let process = Process()
+        let processPID = Mutex<pid_t?>(nil)
         process.executableURL = URL(fileURLWithPath: Self.userLoginShell)
         process.arguments = ["-l", "-c", shellCommand]
 
@@ -63,43 +64,58 @@ public struct DefaultProcessRunner: ProcessRunner {
         }
 
         // Launch and await termination via continuation (no waitUntilExit)
-        let exitCode: Int32 = try await withCheckedThrowingContinuation { continuation in
-            process.terminationHandler = { process in
-                // Detach readability handlers before reading residual data
-                stdoutPipe.fileHandleForReading.readabilityHandler = nil
-                stderrPipe.fileHandleForReading.readabilityHandler = nil
+        let exitCode: Int32 = try await withTaskCancellationHandler(
+            operation: {
+                try await withCheckedThrowingContinuation { continuation in
+                    process.terminationHandler = { process in
+                        processPID.withLock { $0 = nil }
+                        // Detach readability handlers before reading residual data
+                        stdoutPipe.fileHandleForReading.readabilityHandler = nil
+                        stderrPipe.fileHandleForReading.readabilityHandler = nil
 
-                // Read any residual data left in the pipe buffers
-                let residualStdout = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-                let residualStderr = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+                        // Read any residual data left in the pipe buffers
+                        let residualStdout = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+                        let residualStderr = stderrPipe.fileHandleForReading.readDataToEndOfFile()
 
-                if !residualStdout.isEmpty, let text = String(data: residualStdout, encoding: .utf8) {
-                    accumulator.appendStdout(text)
-                    for line in text.split(whereSeparator: \.isNewline) {
-                        outputHandler(ProcessOutputLine(stream: .stdout, text: String(line)))
+                        if !residualStdout.isEmpty, let text = String(data: residualStdout, encoding: .utf8) {
+                            accumulator.appendStdout(text)
+                            for line in text.split(whereSeparator: \.isNewline) {
+                                outputHandler(ProcessOutputLine(stream: .stdout, text: String(line)))
+                            }
+                        }
+                        if !residualStderr.isEmpty, let text = String(data: residualStderr, encoding: .utf8) {
+                            accumulator.appendStderr(text)
+                            for line in text.split(whereSeparator: \.isNewline) {
+                                outputHandler(ProcessOutputLine(stream: .stderr, text: String(line)))
+                            }
+                        }
+
+                        continuation.resume(returning: process.terminationStatus)
+                    }
+
+                    do {
+                        try process.run()
+                        processPID.withLock { $0 = process.processIdentifier }
+                    } catch {
+                        // Clean up handlers on launch failure
+                        stdoutPipe.fileHandleForReading.readabilityHandler = nil
+                        stderrPipe.fileHandleForReading.readabilityHandler = nil
+                        continuation.resume(throwing: AIBDeployError(
+                            phase: "execute",
+                            message: "Failed to run \(executable): \(error.localizedDescription)"
+                        ))
                     }
                 }
-                if !residualStderr.isEmpty, let text = String(data: residualStderr, encoding: .utf8) {
-                    accumulator.appendStderr(text)
-                    for line in text.split(whereSeparator: \.isNewline) {
-                        outputHandler(ProcessOutputLine(stream: .stderr, text: String(line)))
-                    }
+            },
+            onCancel: {
+                if let pid = processPID.withLock({ $0 }), pid > 0 {
+                    _ = Darwin.kill(pid, SIGTERM)
                 }
-
-                continuation.resume(returning: process.terminationStatus)
             }
+        )
 
-            do {
-                try process.run()
-            } catch {
-                // Clean up handlers on launch failure
-                stdoutPipe.fileHandleForReading.readabilityHandler = nil
-                stderrPipe.fileHandleForReading.readabilityHandler = nil
-                continuation.resume(throwing: AIBDeployError(
-                    phase: "execute",
-                    message: "Failed to run \(executable): \(error.localizedDescription)"
-                ))
-            }
+        if Task.isCancelled {
+            throw CancellationError()
         }
 
         let (stdout, stderr) = accumulator.collect()

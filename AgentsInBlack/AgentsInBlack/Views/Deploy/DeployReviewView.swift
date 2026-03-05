@@ -44,9 +44,10 @@ struct DeployReviewView: View {
     // MARK: - Card Background
 
     private func cardBackground<Content: View>(@ViewBuilder content: () -> Content) -> some View {
-        VStack(spacing: 0) {
+        VStack(alignment: .leading, spacing: 0) {
             content()
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
     }
 
@@ -259,7 +260,10 @@ struct DeployReviewView: View {
                                 Text(warning)
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
+                                    .multilineTextAlignment(.leading)
+                                Spacer(minLength: 0)
                             }
+                            .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(.horizontal, 12)
                             .padding(.vertical, 6)
                         }
@@ -320,7 +324,10 @@ struct DeployReviewView: View {
                                 Text(warning)
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
+                                    .multilineTextAlignment(.leading)
+                                Spacer(minLength: 0)
                             }
+                            .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(.horizontal, 12)
                             .padding(.vertical, 6)
                         }

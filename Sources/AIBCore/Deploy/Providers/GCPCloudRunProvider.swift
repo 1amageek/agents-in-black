@@ -20,11 +20,10 @@ public struct GCPCloudRunProvider: DeploymentProvider, Sendable {
 
     public func preflightCheckers() -> [any PreflightChecker] {
         [
+            BuildBackendAvailabilityChecker(),
             GCloudInstalledChecker(),
             GCloudAuthenticatedChecker(),
             GCloudProjectChecker(),
-            DockerInstalledChecker(),
-            DockerDaemonChecker(),
             CloudRunAPIChecker(),
         ]
     }
@@ -32,7 +31,6 @@ public struct GCPCloudRunProvider: DeploymentProvider, Sendable {
     public func preflightDependencies() -> [PreflightCheckID: [PreflightCheckID]] {
         [
             .gcloudInstalled: [.gcloudAuthenticated, .gcloudProjectConfigured, .cloudRunAPIEnabled],
-            .dockerInstalled: [.dockerDaemonRunning],
         ]
     }
 
@@ -135,11 +133,144 @@ public struct GCPCloudRunProvider: DeploymentProvider, Sendable {
     public func registryAuthCommands(targetConfig: AIBDeployTargetConfig) -> [DeployCommand] {
         let host = targetConfig.providerConfig["artifactRegistryHost"]
             ?? "\(targetConfig.region)-docker.pkg.dev"
+        let hostForShell = shellQuote(host)
+        let script = """
+        set -euo pipefail
+        if ! command -v container >/dev/null 2>&1; then
+          echo "apple/container CLI is not installed. Install it from https://github.com/apple/container/releases"
+          exit 127
+        fi
+        if ! command -v gcloud >/dev/null 2>&1; then
+          echo "gcloud CLI is not installed."
+          exit 127
+        fi
+        access_token="$(gcloud auth print-access-token)"
+        if [ -z "$access_token" ]; then
+          echo "Failed to get gcloud access token."
+          exit 1
+        fi
+        printf '%s' "$access_token" | container registry login --username oauth2accesstoken --password-stdin \(hostForShell)
+        echo "container registry login completed for \(host)"
+        """
         return [
             DeployCommand(
-                label: "Configuring Docker authentication for Artifact Registry",
-                arguments: ["gcloud", "auth", "configure-docker", host, "--quiet"],
+                label: "Configuring apple/container authentication for Artifact Registry",
+                arguments: ["bash", "-lc", script],
                 stepID: AIBDeployStep.dockerAuth.rawValue
+            ),
+        ]
+    }
+
+    public func buildBackendPreparationCommands(targetConfig: AIBDeployTargetConfig) -> [DeployCommand] {
+        let minFreeGiB = max(1, Int(targetConfig.providerConfig["appleContainerMinFreeGiB"] ?? "") ?? 8)
+        let minFreeKiB = minFreeGiB * 1024 * 1024
+        let script = """
+        set -euo pipefail
+        if ! command -v container >/dev/null 2>&1; then
+          echo "apple/container CLI is not installed. Install it from https://github.com/apple/container/releases"
+          exit 127
+        fi
+
+        disk_target="/System/Volumes/Data"
+        if [ ! -d "$disk_target" ]; then
+          disk_target="/"
+        fi
+
+        free_kb="$(df -Pk "$disk_target" | awk 'NR==2 {print $4}')"
+        case "$free_kb" in
+          ''|*[!0-9]*)
+            echo "Unable to determine free disk space for $disk_target; skipping cleanup."
+            exit 0
+            ;;
+        esac
+
+        threshold_kb=\(minFreeKiB)
+        threshold_gib=\(minFreeGiB)
+        free_gib="$((free_kb / 1024 / 1024))"
+        echo "Free disk before build prep: ${free_gib}GiB (threshold: ${threshold_gib}GiB)"
+
+        if [ "$free_kb" -ge "$threshold_kb" ]; then
+          echo "Disk space is sufficient. Skipping apple/container cleanup."
+          exit 0
+        fi
+
+        echo "Low disk space detected. Pruning stale apple/container images..."
+        set +e
+        prune_output="$(printf 'y\\n' | container image prune --all 2>&1)"
+        prune_status=$?
+        set -e
+        if [ -n "$prune_output" ]; then
+          echo "$prune_output"
+        fi
+        if [ "$prune_status" -ne 0 ]; then
+          echo "apple/container image prune failed while recovering disk space."
+          exit 1
+        fi
+
+        if container builder status >/dev/null 2>&1; then
+          echo "Resetting apple/container builder cache..."
+          set +e
+          container builder stop >/dev/null 2>&1
+          stop_status=$?
+          container builder rm >/dev/null 2>&1
+          remove_status=$?
+          set -e
+          if [ "$stop_status" -ne 0 ] || [ "$remove_status" -ne 0 ]; then
+            echo "Warning: builder cache reset reported a non-zero status (stop=$stop_status, rm=$remove_status)."
+          fi
+        fi
+
+        set +e
+        builder_start_output="$(container builder start 2>&1)"
+        builder_start_status=$?
+        set -e
+
+        if [ "$builder_start_status" -ne 0 ] && echo "$builder_start_output" | grep -qi "default kernel not configured"; then
+          echo "Default kernel not configured for this architecture. Installing recommended kernel..."
+          set +e
+          kernel_setup_output="$(container system kernel set --recommended 2>&1)"
+          kernel_setup_status=$?
+          set -e
+          if [ "$kernel_setup_status" -ne 0 ]; then
+            echo "$kernel_setup_output"
+            echo "Run: container system kernel set --recommended"
+            exit 1
+          fi
+          set +e
+          builder_start_output="$(container builder start 2>&1)"
+          builder_start_status=$?
+          set -e
+        fi
+
+        if [ "$builder_start_status" -ne 0 ]; then
+          echo "apple/container builder is not ready after cleanup."
+          if [ -n "$builder_start_output" ]; then
+            echo "$builder_start_output"
+          fi
+          echo "Run: container system start && container builder start"
+          exit 1
+        fi
+
+        free_kb_after="$(df -Pk "$disk_target" | awk 'NR==2 {print $4}')"
+        case "$free_kb_after" in
+          ''|*[!0-9]*)
+            echo "Cleanup completed, but failed to re-check free disk space."
+            exit 0
+            ;;
+        esac
+        free_gib_after="$((free_kb_after / 1024 / 1024))"
+        echo "Free disk after build prep: ${free_gib_after}GiB"
+
+        if [ "$free_kb_after" -lt "$threshold_kb" ]; then
+          echo "Disk space is still below ${threshold_gib}GiB after cleanup. Free more disk and retry."
+          exit 1
+        fi
+        """
+        return [
+            DeployCommand(
+                label: "Preparing apple/container build environment",
+                arguments: ["bash", "-lc", script],
+                stepID: AIBDeployStep.dockerBuild.rawValue
             ),
         ]
     }
@@ -149,17 +280,34 @@ public struct GCPCloudRunProvider: DeploymentProvider, Sendable {
         targetConfig: AIBDeployTargetConfig
     ) -> [DeployCommand] {
         let gcpProject = requiredGCPProject(from: targetConfig)
+        let repoName = service.deployedServiceName
+        let describeCommand = [
+            "gcloud", "artifacts", "repositories", "describe",
+            repoName,
+            "--location=\(targetConfig.region)",
+            "--project=\(gcpProject)",
+            "--format='value(name)'",
+        ].joined(separator: " ")
+        let createCommand = [
+            "gcloud", "artifacts", "repositories", "create",
+            repoName,
+            "--repository-format=docker",
+            "--location=\(targetConfig.region)",
+            "--project=\(gcpProject)",
+            "--quiet",
+        ].joined(separator: " ")
+        let script = """
+        set -euo pipefail
+        if \(describeCommand) >/dev/null 2>&1; then
+          echo "Repository [\(repoName)] already exists."
+        else
+          \(createCommand)
+        fi
+        """
         return [
             DeployCommand(
                 label: "Ensuring Artifact Registry repository for \(service.deployedServiceName)",
-                arguments: [
-                    "gcloud", "artifacts", "repositories", "create",
-                    service.deployedServiceName,
-                    "--repository-format=docker",
-                    "--location=\(targetConfig.region)",
-                    "--project=\(gcpProject)",
-                    "--quiet",
-                ],
+                arguments: ["bash", "-lc", script],
                 stepID: AIBDeployStep.registrySetup.rawValue
             ),
         ]
@@ -170,23 +318,132 @@ public struct GCPCloudRunProvider: DeploymentProvider, Sendable {
     public func buildAndPushCommands(
         imageTag: String,
         dockerfilePath: String,
-        buildContext: String
+        buildContext: String,
+        targetConfig: AIBDeployTargetConfig
     ) -> [DeployCommand] {
-        [
+        let dockerfileArgument: String
+        if dockerfilePath.hasPrefix(buildContext + "/") {
+            dockerfileArgument = String(dockerfilePath.dropFirst(buildContext.count + 1))
+        } else {
+            dockerfileArgument = dockerfilePath
+        }
+        let contextForShell = shellQuote(buildContext)
+        let dockerfileForShell = shellQuote(dockerfileArgument)
+        let imageForShell = shellQuote(imageTag)
+        let script = """
+        set -euo pipefail
+        if ! command -v container >/dev/null 2>&1; then
+          echo "apple/container CLI is not installed. Install it from https://github.com/apple/container/releases"
+          exit 127
+        fi
+        if ! container builder status >/dev/null 2>&1; then
+          set +e
+          builder_start_output="$(container builder start 2>&1)"
+          builder_start_status=$?
+          set -e
+
+          if [ "$builder_start_status" -ne 0 ] && echo "$builder_start_output" | grep -qi "default kernel not configured"; then
+            echo "Default kernel not configured for this architecture. Installing recommended kernel..."
+            set +e
+            kernel_setup_output="$(container system kernel set --recommended 2>&1)"
+            kernel_setup_status=$?
+            set -e
+            if [ "$kernel_setup_status" -ne 0 ]; then
+              echo "$kernel_setup_output"
+              echo "Run: container system kernel set --recommended"
+              exit 1
+            fi
+            set +e
+            builder_start_output="$(container builder start 2>&1)"
+            builder_start_status=$?
+            set -e
+          fi
+
+          if [ "$builder_start_status" -ne 0 ]; then
+            echo "apple/container builder is not ready."
+            if [ -n "$builder_start_output" ]; then
+              echo "$builder_start_output"
+            fi
+            echo "Run: container system start && container builder start"
+            exit 1
+          fi
+
+          if ! container builder status >/dev/null 2>&1; then
+            echo "apple/container builder did not reach running state."
+            exit 1
+          fi
+        fi
+        echo "Build backend: apple-container"
+        build_start="$(date +%s)"
+        cd \(contextForShell)
+        build_log="$(mktemp -t aib-container-build.XXXXXX)"
+        build_attempt=1
+        build_max_attempts=2
+        while true; do
+          set +e
+          container build --platform linux/amd64 --file \(dockerfileForShell) --tag \(imageForShell) . 2>&1 | tee "$build_log"
+          build_status=${PIPESTATUS[0]}
+          set -e
+          if [ "$build_status" -eq 0 ]; then
+            break
+          fi
+
+          if grep -Eqi "ECONNRESET|npm error network aborted|connection reset by peer|TLS handshake timeout|i/o timeout|temporary failure" "$build_log" \
+            && [ "$build_attempt" -lt "$build_max_attempts" ]; then
+            retry_delay=$((build_attempt * 5))
+            next_attempt=$((build_attempt + 1))
+            echo "Transient network failure detected during image build. Retrying in ${retry_delay}s (attempt ${next_attempt}/${build_max_attempts})..."
+            sleep "$retry_delay"
+            build_attempt="$next_attempt"
+            continue
+          fi
+
+          rm -f "$build_log"
+          exit "$build_status"
+        done
+        rm -f "$build_log"
+        build_end="$(date +%s)"
+        echo "apple/container build duration: $((build_end - build_start))s"
+        push_start="$(date +%s)"
+        push_log="$(mktemp -t aib-container-push.XXXXXX)"
+        push_attempt=1
+        push_max_attempts=2
+        while true; do
+          set +e
+          container image push --platform linux/amd64 \(imageForShell) 2>&1 | tee "$push_log"
+          push_status=${PIPESTATUS[0]}
+          set -e
+          if [ "$push_status" -eq 0 ]; then
+            break
+          fi
+
+          if grep -Eqi "connection reset by peer|TLS handshake timeout|i/o timeout|temporary failure|timeout" "$push_log" \
+            && [ "$push_attempt" -lt "$push_max_attempts" ]; then
+            retry_delay=$((push_attempt * 5))
+            next_attempt=$((push_attempt + 1))
+            echo "Transient network failure detected during image push. Retrying in ${retry_delay}s (attempt ${next_attempt}/${push_max_attempts})..."
+            sleep "$retry_delay"
+            push_attempt="$next_attempt"
+            continue
+          fi
+
+          rm -f "$push_log"
+          exit "$push_status"
+        done
+        rm -f "$push_log"
+        push_end="$(date +%s)"
+        echo "apple/container push duration: $((push_end - push_start))s"
+        """
+
+        return [
             DeployCommand(
-                label: "Building container image",
-                arguments: [
-                    "docker", "build",
-                    "--platform", "linux/amd64",
-                    "-t", imageTag,
-                    "-f", dockerfilePath,
-                    buildContext,
-                ],
+                label: "Building and pushing image",
+                arguments: ["bash", "-lc", script],
                 stepID: AIBDeployStep.dockerBuild.rawValue
             ),
             DeployCommand(
-                label: "Pushing to Artifact Registry",
-                arguments: ["docker", "push", imageTag],
+                label: "Image push completed",
+                arguments: ["bash", "-lc", "echo \"Image pushed \(imageTag)\""],
                 stepID: AIBDeployStep.dockerPush.rawValue
             ),
         ]
@@ -256,19 +513,53 @@ public struct GCPCloudRunProvider: DeploymentProvider, Sendable {
         targetConfig: AIBDeployTargetConfig
     ) -> [DeployCommand] {
         let gcpProject = requiredGCPProject(from: targetConfig)
+        let sourceForShell = shellQuote(binding.sourceServiceName)
+        let targetForShell = shellQuote(binding.targetServiceName)
+        let roleForShell = shellQuote(binding.role)
+        let regionForShell = shellQuote(targetConfig.region)
+        let projectForShell = shellQuote(gcpProject)
+        let script = """
+        set -euo pipefail
+        source_service=\(sourceForShell)
+        target_service=\(targetForShell)
+        role=\(roleForShell)
+        region=\(regionForShell)
+        project=\(projectForShell)
+
+        source_sa="$(gcloud run services describe "$source_service" --region "$region" --project "$project" --format='value(spec.template.spec.serviceAccountName)' 2>/dev/null | tr -d '[:space:]')"
+        if [ -z "$source_sa" ]; then
+          project_number="$(gcloud projects describe "$project" --format='value(projectNumber)' | tr -d '[:space:]')"
+          if [ -z "$project_number" ]; then
+            echo "Failed to resolve project number for $project."
+            exit 1
+          fi
+          source_sa="${project_number}-compute@developer.gserviceaccount.com"
+        fi
+
+        if [ "${source_sa#*@}" = "$source_sa" ]; then
+          source_sa="${source_sa}@${project}.iam.gserviceaccount.com"
+        fi
+
+        if ! gcloud iam service-accounts describe "$source_sa" --project "$project" >/dev/null 2>&1; then
+          echo "Service account $source_sa does not exist."
+          exit 1
+        fi
+
+        member="serviceAccount:${source_sa}"
+        echo "Using invoker principal: ${member}"
+
+        gcloud run services add-iam-policy-binding "$target_service" \
+          --member "$member" \
+          --role "$role" \
+          --region "$region" \
+          --project "$project" \
+          --quiet
+        """
 
         return [
             DeployCommand(
                 label: "Binding IAM: \(binding.sourceServiceName) → \(binding.targetServiceName)",
-                arguments: [
-                    "gcloud", "run", "services", "add-iam-policy-binding",
-                    binding.targetServiceName,
-                    "--member", binding.member,
-                    "--role", binding.role,
-                    "--region", targetConfig.region,
-                    "--project", gcpProject,
-                    "--quiet",
-                ],
+                arguments: ["bash", "-lc", script],
                 stepID: AIBDeployStep.authBind.rawValue
             ),
         ]
@@ -357,4 +648,9 @@ public struct GCPCloudRunProvider: DeploymentProvider, Sendable {
         }
         return project
     }
+
+    private func shellQuote(_ value: String) -> String {
+        "'\(value.replacingOccurrences(of: "'", with: "'\"'\"'"))'"
+    }
+
 }

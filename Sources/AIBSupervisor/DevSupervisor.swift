@@ -365,18 +365,22 @@ public actor DevSupervisor {
 
         runtime.lifecycleState = .stopping
         runtimes[id] = runtime
-        let grace: Duration
-        do {
-            grace = try runtime.service.restart.shutdownGracePeriod.parse()
-        } catch {
-            logger.warning("Invalid shutdown_grace_period, using 5s", metadata: [
-                "service_id": .string(id.rawValue),
-                "error": .string("\(error)"),
-            ])
-            grace = .seconds(5)
-        }
-        let result = await processController.terminateGroup(handle, grace: grace)
-        if !result.terminatedGracefully {
+        if draining {
+            let grace: Duration
+            do {
+                grace = try runtime.service.restart.shutdownGracePeriod.parse()
+            } catch {
+                logger.warning("Invalid shutdown_grace_period, using 5s", metadata: [
+                    "service_id": .string(id.rawValue),
+                    "error": .string("\(error)"),
+                ])
+                grace = .seconds(5)
+            }
+            let result = await processController.terminateGroup(handle, grace: grace)
+            if !result.terminatedGracefully {
+                await processController.killGroup(handle)
+            }
+        } else {
             await processController.killGroup(handle)
         }
         unregisterContainer(handle)

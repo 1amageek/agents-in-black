@@ -13,6 +13,9 @@ struct CloudSettingsView: View {
 
     @State private var environmentChecks: [PreflightCheckID: PreflightCheckResult] = [:]
     @State private var isCheckingEnvironment: Bool = false
+    @State private var isInstallingAppleContainer: Bool = false
+    @State private var appleContainerInstallMessage: String?
+    @State private var appleContainerInstallFailed: Bool = false
 
     // MARK: - Config State
 
@@ -128,6 +131,13 @@ struct CloudSettingsView: View {
             }
             .padding(12)
             .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
+
+            if let appleContainerInstallMessage {
+                Text(appleContainerInstallMessage)
+                    .font(.caption)
+                    .foregroundStyle(appleContainerInstallFailed ? .red : .secondary)
+                    .padding(.leading, 2)
+            }
         }
     }
 
@@ -205,6 +215,26 @@ struct CloudSettingsView: View {
                 }
                 .background(.background, in: RoundedRectangle(cornerRadius: 4))
                 .overlay(RoundedRectangle(cornerRadius: 4).stroke(.separator))
+                .padding(.leading, 24)
+            }
+
+            if result.id == .buildBackendAvailable {
+                Button {
+                    Task { await installLatestAppleContainer() }
+                } label: {
+                    if isInstallingAppleContainer {
+                        HStack(spacing: 6) {
+                            ProgressView()
+                                .controlSize(.small)
+                            Text("Installing latest apple/container...")
+                                .font(.caption)
+                        }
+                    } else {
+                        Text("Install Latest apple/container")
+                            .font(.caption)
+                    }
+                }
+                .disabled(isInstallingAppleContainer)
                 .padding(.leading, 24)
             }
 
@@ -452,5 +482,26 @@ struct CloudSettingsView: View {
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+
+    @MainActor
+    private func installLatestAppleContainer() async {
+        guard !isInstallingAppleContainer else { return }
+        isInstallingAppleContainer = true
+        appleContainerInstallMessage = nil
+        appleContainerInstallFailed = false
+
+        do {
+            let version = try await Task.detached(priority: .userInitiated) {
+                try await AppleContainerInstaller.installLatest()
+            }.value
+            appleContainerInstallMessage = "apple/container \(version) was installed and builder startup was attempted. Click Recheck."
+            appleContainerInstallFailed = false
+        } catch {
+            appleContainerInstallMessage = "Install failed: \(error.localizedDescription)"
+            appleContainerInstallFailed = true
+        }
+
+        isInstallingAppleContainer = false
     }
 }

@@ -15,6 +15,8 @@ public final class AIBDeployController {
     private var approvalGate: ApprovalGate?
     private var secretsGate: SecretsGate?
     private var cachedPreflightReport: PreflightReport?
+    private var cancellationRequested = false
+    private var deployStartedAt: Date?
 
     public private(set) var phase: AIBDeployPhase = .idle
 
@@ -51,6 +53,8 @@ public final class AIBDeployController {
     }
 
     public func shutdown() {
+        cancellationRequested = true
+        deployStartedAt = nil
         currentTask?.cancel()
         currentTask = nil
         approvalGate?.deny()
@@ -69,6 +73,8 @@ public final class AIBDeployController {
         provider: any DeploymentProvider
     ) {
         guard case .idle = phase else { return }
+        cancellationRequested = false
+        deployStartedAt = Date()
 
         currentTask = Task { [weak self] in
             guard let self else { return }
@@ -165,13 +171,29 @@ public final class AIBDeployController {
                     secrets: secretValues,
                     logHandler: { [weak self] logEntry in
                         Task { @MainActor in
-                            self?.emit(.log(logEntry))
+                            guard let self else { return }
+                            var enriched = logEntry
+                            if let startedAt = self.deployStartedAt {
+                                let elapsed = logEntry.timestamp.timeIntervalSince(startedAt)
+                                enriched.elapsedSeconds = max(0, elapsed)
+                            }
+                            self.emit(.log(enriched))
                         }
                     }
                 )
 
+                if Task.isCancelled || self.cancellationRequested {
+                    self.transitionTo(.cancelled)
+                    return
+                }
                 self.transitionTo(.completed(result))
+            } catch is CancellationError {
+                self.transitionTo(.cancelled)
             } catch {
+                if Task.isCancelled || self.cancellationRequested {
+                    self.transitionTo(.cancelled)
+                    return
+                }
                 self.transitionTo(.failed(AIBDeployError(
                     phase: "deploy",
                     message: error.localizedDescription
@@ -192,16 +214,23 @@ public final class AIBDeployController {
 
     /// Cancel the current deployment pipeline.
     public func cancel() {
+        cancellationRequested = true
+        deployStartedAt = nil
         approvalGate?.deny()
         approvalGate = nil
         secretsGate?.cancel()
         secretsGate = nil
         currentTask?.cancel()
         currentTask = nil
+        if !phase.isTerminal {
+            transitionTo(.cancelled)
+        }
     }
 
     /// Reset to idle state after completion, failure, or cancellation.
     public func reset() {
+        cancellationRequested = false
+        deployStartedAt = nil
         currentTask?.cancel()
         currentTask = nil
         approvalGate?.deny()
@@ -242,5 +271,16 @@ public final class AIBDeployController {
             continuation.finish()
         }
         eventContinuations.removeAll()
+    }
+}
+
+private extension AIBDeployPhase {
+    var isTerminal: Bool {
+        switch self {
+        case .completed, .failed, .cancelled:
+            return true
+        default:
+            return false
+        }
     }
 }

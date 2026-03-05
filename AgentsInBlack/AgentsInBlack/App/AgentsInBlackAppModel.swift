@@ -1117,11 +1117,12 @@ final class AgentsInBlackAppModel {
                 return
             }
 
-            // Run prerequisite checks + Docker daemon check in parallel.
-            // prerequisiteCheckIDs only contains Phase 1 (dockerInstalled, gcloudInstalled),
-            // but toolbar needs dockerDaemonRunning too for accurate Docker status.
+            // Run prerequisite checks in parallel.
+            // Docker checks are optional and only included when the provider requires them.
+            let checkerIDs = Set(provider.preflightCheckers().map(\.checkID))
             let dockerRelated: Set<PreflightCheckID> = [.dockerInstalled, .dockerDaemonRunning]
-            let toolbarCheckIDs = provider.prerequisiteCheckIDs.union(dockerRelated)
+            let includesDockerChecks = !checkerIDs.intersection(dockerRelated).isEmpty
+            let toolbarCheckIDs = provider.prerequisiteCheckIDs.union(includesDockerChecks ? dockerRelated : [])
             let checkers = provider.preflightCheckers().filter { toolbarCheckIDs.contains($0.checkID) }
 
             let results = await withTaskGroup(
@@ -1144,6 +1145,13 @@ final class AgentsInBlackAppModel {
             let dockerInstalled = results.first(where: { $0.id == .dockerInstalled })
             let dockerDaemon = results.first(where: { $0.id == .dockerDaemonRunning })
             let dockerStatus: PreflightCheckResult? = {
+                guard includesDockerChecks else {
+                    return PreflightCheckResult(
+                        id: .dockerInstalled,
+                        title: "Docker",
+                        status: .passed(detail: "Not required for current deploy provider")
+                    )
+                }
                 guard let installed = dockerInstalled else { return nil }
                 if installed.isFailed { return installed }
                 if let daemon = dockerDaemon, daemon.isFailed { return daemon }
@@ -1224,7 +1232,12 @@ final class AgentsInBlackAppModel {
             }
         case .log(let entry):
             let servicePrefix = entry.serviceID.map { "[\($0)] " } ?? ""
-            appendDeployLogLine(level: entry.level, message: "\(servicePrefix)\(entry.message)")
+            appendDeployLogLine(
+                level: entry.level,
+                message: "\(servicePrefix)\(entry.message)",
+                timestamp: entry.timestamp,
+                elapsedSeconds: entry.elapsedSeconds
+            )
         }
     }
 
@@ -1562,7 +1575,7 @@ final class AgentsInBlackAppModel {
     }
 
     private func appendAIBSystemLogLine(_ message: String) {
-        emulatorOutput.append("[aib][app][info] \(message)\n")
+        emulatorOutput.append("\(isoTimestampString()) [aib][app][info] \(message)\n")
         if emulatorOutput.count > 200_000 {
             emulatorOutput.removeFirst(emulatorOutput.count - 200_000)
         }
@@ -1570,17 +1583,33 @@ final class AgentsInBlackAppModel {
 
     private func setError(_ message: String) {
         lastErrorMessage = message
-        emulatorOutput.append("[aib][app][error] \(message)\n")
+        emulatorOutput.append("\(isoTimestampString()) [aib][app][error] \(message)\n")
         if emulatorOutput.count > 200_000 {
             emulatorOutput.removeFirst(emulatorOutput.count - 200_000)
         }
     }
 
-    private func appendDeployLogLine(level: Logging.Logger.Level, message: String) {
-        emulatorOutput.append("[aib][deploy][\(level)] \(message)\n")
+    private func appendDeployLogLine(
+        level: Logging.Logger.Level,
+        message: String,
+        timestamp: Date = .now,
+        elapsedSeconds: TimeInterval? = nil
+    ) {
+        let elapsedLabel: String
+        if let elapsedSeconds {
+            elapsedLabel = String(format: " [t+%.1fs]", elapsedSeconds)
+        } else {
+            elapsedLabel = ""
+        }
+        emulatorOutput.append("\(isoTimestampString(from: timestamp)) [aib][deploy][\(level)]\(elapsedLabel) \(message)\n")
         if emulatorOutput.count > 200_000 {
             emulatorOutput.removeFirst(emulatorOutput.count - 200_000)
         }
+    }
+
+    private func isoTimestampString(from date: Date = .now) -> String {
+        let formatter = ISO8601DateFormatter()
+        return formatter.string(from: date)
     }
 
     private func chooseGatewayPort(preferred: Int) -> Int {

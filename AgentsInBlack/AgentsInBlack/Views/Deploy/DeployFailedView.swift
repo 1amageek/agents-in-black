@@ -5,6 +5,9 @@ struct DeployFailedView: View {
     let error: AIBDeployError
     let preflightReport: PreflightReport?
     let onDismiss: () -> Void
+    @State private var isInstallingAppleContainer: Bool = false
+    @State private var appleContainerInstallMessage: String?
+    @State private var appleContainerInstallFailed: Bool = false
 
     var body: some View {
         ScrollView {
@@ -42,6 +45,13 @@ struct DeployFailedView: View {
                 // Preflight check details
                 if error.phase == "preflight", let report = preflightReport {
                     preflightResultsSection(report: report)
+                }
+
+                if let appleContainerInstallMessage {
+                    Text(appleContainerInstallMessage)
+                        .font(.caption)
+                        .foregroundStyle(appleContainerInstallFailed ? .red : .secondary)
+                        .frame(maxWidth: 500, alignment: .leading)
                 }
 
                 Button("Close") {
@@ -163,6 +173,26 @@ struct DeployFailedView: View {
                 .padding(.leading, 24)
             }
 
+            if result.id == .buildBackendAvailable {
+                Button {
+                    Task { await installLatestAppleContainer() }
+                } label: {
+                    if isInstallingAppleContainer {
+                        HStack(spacing: 6) {
+                            ProgressView()
+                                .controlSize(.small)
+                            Text("Installing latest apple/container...")
+                                .font(.caption)
+                        }
+                    } else {
+                        Text("Install Latest apple/container")
+                            .font(.caption)
+                    }
+                }
+                .disabled(isInstallingAppleContainer)
+                .padding(.leading, 24)
+            }
+
             if let url = result.remediationURL {
                 Link(destination: url) {
                     HStack(spacing: 4) {
@@ -175,5 +205,26 @@ struct DeployFailedView: View {
                 .padding(.leading, 24)
             }
         }
+    }
+
+    @MainActor
+    private func installLatestAppleContainer() async {
+        guard !isInstallingAppleContainer else { return }
+        isInstallingAppleContainer = true
+        appleContainerInstallMessage = nil
+        appleContainerInstallFailed = false
+
+        do {
+            let version = try await Task.detached(priority: .userInitiated) {
+                try await AppleContainerInstaller.installLatest()
+            }.value
+            appleContainerInstallMessage = "apple/container \(version) was installed and builder startup was attempted. Run preflight again."
+            appleContainerInstallFailed = false
+        } catch {
+            appleContainerInstallMessage = "Install failed: \(error.localizedDescription)"
+            appleContainerInstallFailed = true
+        }
+
+        isInstallingAppleContainer = false
     }
 }

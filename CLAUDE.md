@@ -84,7 +84,7 @@ cd demo
 | `AIBWorkspace` | Directory discovery, workspace sync, config resolution (workspace.yaml → AIBConfig) | `WorkspaceDiscovery`, `WorkspaceSyncer`, `AIBWorkspaceManager` |
 | `AIBGateway` | NIOAsyncChannel-based reverse proxy (routing, timeout, header rewrite, concurrency) | `DevGateway`, `HTTPConnectionHandler`, `GatewayControl` |
 | `AIBSupervisor` | Process lifecycle, health/readiness probes, restart, log mux | `DevSupervisor` (actor), `ConfigProvider`, `DefaultProcessController`, `LogMux` |
-| `AIBCore` | App/CLI shared API — emulator control, workspace/service models, events | `AIBEmulatorController`, `AIBWorkspaceSnapshot`, `AIBServiceModel` |
+| `AIBCore` | App/CLI shared API — emulator control, deploy orchestration, workspace/service models, events | `AIBEmulatorController`, `AIBDeployController`, `AIBDeployService`, `AIBWorkspaceSnapshot`, `AIBServiceModel` |
 | `AIBCLI` | CLI entry point dispatching to `AIBCore` | `AIBDevMain` (`@main`) |
 | `AgentsInBlack App` | macOS SwiftUI UI, views, app state | `AgentsInBlackAppModel`, `ContentView` |
 
@@ -104,7 +104,7 @@ App ──→ AIBCore (only)
 - `aib init` — bootstrap workspace, discover repos, write `.aib/workspace.yaml`
 - `aib workspace list|scan|sync` — workspace management
 - `aib emulator start|validate|status|stop` — local runtime control
-- `aib deploy plan|apply` — deployment (apply not yet implemented)
+- `aib deploy plan|apply` — deployment (CLI `apply` not yet implemented; App UI provides full deploy flow via `AIBDeployController`)
 
 ### Agent Communication — A2A Protocol Required
 
@@ -162,7 +162,7 @@ Define (App UI)  →  Persist (.aib/workspace.yaml)  →  Resolve (in-memory AIB
 - Agent receives MCP server URL via environment variable `MCP_SERVER_URL`
 - Agent authenticates to MCP using ID Token with IAM `roles/run.invoker`
 - Transport: Streamable HTTP only (Cloud Run does not support stdin transport)
-- `deploy apply` is not yet implemented — current stub in CLI
+- CLI `deploy apply` is not yet implemented (stub returns error); App UI provides full deploy flow via `AIBDeployController` with phase-based UI
 
 #### Cloud Run Alignment
 - Each service = one Cloud Run service (language-agnostic HTTP unit)
@@ -230,29 +230,83 @@ Artifact Registry repository naming is a GCP implementation detail. Users never 
 - `artifactRegistryRepo` does not exist in user-facing target config
 - Repository creation is automated per-service in the deploy pipeline (idempotent)
 
+#### Deploy Architecture — Controller / Service / Executor / Provider
+
+Deploy is orchestrated by four cooperating layers:
+
+| Layer | Type | Responsibility |
+|---|---|---|
+| **Controller** | `AIBDeployController` | State machine (`AIBDeployPhase`), event streaming (`AsyncStream<AIBDeployEvent>`), gate coordination |
+| **Service** | `AIBDeployService` | Plan generation, artifact writing, preflight checks, config loading |
+| **Executor** | `DefaultDeployExecutor` (protocol `DeployExecuting`) | Command execution, progress tracking, real-time log streaming |
+| **Provider** | `GCPCloudRunProvider` (protocol `DeploymentProvider`) | Cloud-specific commands, URL resolution, IAM bindings |
+| **Process Runner** | `DefaultProcessRunner` (protocol `ProcessRunner`) | Async process execution via login shell (`zsh -l -c`), real-time line streaming |
+
+#### Deploy Phase State Machine
+
+```
+idle → preflight → planning → reviewing → [secretsInput] → applying → completed | failed | cancelled
+```
+
+- **Gates**: `ApprovalGate` (user approves plan) and `SecretsGate` (user provides missing secret values)
+- **Secrets gate**: queries remote (Cloud Run) for already-configured env vars, prompts only for **missing** secrets
+- **Events**: `AIBDeployEvent` streamed to UI subscribers for real-time updates (phase changes + log entries)
+
+#### Build Backend — apple/container CLI
+
+AIB uses **apple/container CLI** (not Docker) for container image builds. Docker is unavailable in macOS app sandbox; apple/container integrates with the vmnet + UDS relay networking model.
+
+- `ContainerCLIPolicy.ensureInstalled()` validates CLI availability before deploy and emulator start
+- `BuildBackendAvailabilityChecker` verifies: CLI installed → builder running → default kernel configured
+- Auto-setup: if builder reports "default kernel not configured", runs `container system kernel set --recommended` then `container builder start`
+- `AppleContainerInstaller` (App only): fetches latest release from GitHub, downloads `.pkg`, runs admin installer, performs post-install setup
+
 #### Deploy Pipeline
 
 ```
 workspace.yaml  ──→  aib deploy plan   ──→  Show: services, connections, env vars, IAM
                 ──→  aib deploy apply  ──→
-                        1. Docker auth setup (once)
-                           gcloud auth configure-docker {region}-docker.pkg.dev
+                        1. Registry auth setup (once)
+                           container registry login --username oauth2accesstoken --password-stdin
                         2. Per service:
                            a. Ensure Artifact Registry repo (idempotent create)
-                           b. docker build
-                           c. docker push
-                           d. gcloud run deploy
+                           b. container build --platform linux/amd64
+                           c. container image push --platform linux/amd64
+                           d. gcloud run deploy (env vars with ^||^ delimiter)
                         3. Bind IAM invoker roles for connection edges
 ```
 
-- Infrastructure setup (Docker auth) runs once before all services
+- Infrastructure setup (registry auth) runs once before all services
 - Artifact Registry repo creation is per-service (repo = service)
-- `ArtifactRegistryChecker` is unnecessary — replaced by auto-setup in deploy
+- Process execution uses login shell (`zsh -l -c`) to inherit user PATH (Homebrew, gcloud SDK)
+- `Foundation.Progress` tree: parent = total services, child = steps per service — observed by SwiftUI `ProgressView`
+
+#### Preflight Check System
+
+Provider-driven dynamic check system with dependency tracking.
+
+- `PreflightCheckID` is a **struct** (not enum) — providers can define custom check IDs without modifying core
+- Each `PreflightChecker` has an ID, title, async `run()` method, and returns `PreflightCheckResult` with status + remediation info
+- Provider declares dependencies via `preflightDependencies()` — if a prerequisite fails, dependent checks are skipped
+- Common checks: `.buildBackendAvailable` (apple/container CLI + builder + kernel)
+- GCP checks: `.gcloudInstalled`, `.gcloudAuthenticated`, `.gcloudProjectConfigured`, `.cloudRunAPIEnabled`, `.cloudBuildAPIEnabled`
+- Failed checks include: error message, remediation command (copyable in UI), documentation URL
+- `cachedPreflightReport` stored in controller for re-display in failure view
+
+#### Dockerfile Resolution (Priority-based)
+
+1. `Dockerfile.{runtime}` (e.g., `Dockerfile.node`) — custom runtime-specific
+2. `Dockerfile` — generic custom
+3. Auto-generated using `DockerfileGeneratorRegistry.generator(for: runtime)`
+
+#### Deploy Target Config
+
+Stored at `.aib/targets/{providerID}.yaml`. Contains region, auth mode, resource defaults, and provider-specific config (e.g., GCP project ID). Auto-detected values (e.g., GCP project from `gcloud config`) merged during plan generation.
 
 #### Key Constraint
 - `service_ref` resolution differs by environment:
   - Local: `http://localhost:{gateway_port}/{mount_path}`
-  - Cloud Run: `https://{service-name}-{hash}.{region}.run.app`
+  - Cloud Run: `https://{service-name}-{region}.a.run.app`
 - This resolution is the core job of `aib deploy plan` — it maps topology edges to concrete URLs
 
 ## Change Policy
@@ -281,12 +335,15 @@ workspace.yaml  ──→  aib deploy plan   ──→  Show: services, connecti
 ### When modifying Deploy or Provider
 - **Provider-specific check IDs, service names, CLI commands をハードコードしない** — すべて `DeploymentProvider` protocol 経由で取得する
 - Check ID のフィルタリングは `provider.preflightCheckers()` や `provider.prerequisiteCheckIDs` から動的に導出する — `[.gcloudInstalled, ...]` のようなリテラル列挙は禁止
-- Docker は全 Provider 共通の依存なので `PreflightCheckID.dockerInstalled` / `.dockerDaemonRunning` の直接参照は許容する
+- **apple/container CLI が唯一のビルドバックエンド** — Docker CLI は使わない。`container build` / `container image push` / `container registry login` を使用する
+- `ContainerCLIPolicy.ensureInstalled()` はデプロイ開始前とエミュレータ起動前の両方で呼び出す
 - UI が Provider 情報を表示する場合は `provider.displayName` を使う — "GCP" 等の文字列リテラルを埋め込まない
 - 新しい Provider を追加する際は `DeploymentProvider` を実装し `DeploymentProviderRegistry` に登録するだけで、App / CLI 側のコード変更は不要であるべき
 - **サービス名はパッケージマニフェストから取得する** — AIB が独自に名前を生成しない。`RuntimeDetectionResult.serviceNames` が正規の名前源
 - **Artifact Registry リポジトリ名 = サービス名** — ユーザーが設定する項目ではない。Provider 内部で自動処理する
-- **インフラ準備（Docker認証、リポジトリ作成）はデプロイフロー内で自動実行する** — 手動設定を前提としない
+- **インフラ準備（レジストリ認証、リポジトリ作成）はデプロイフロー内で自動実行する** — 手動設定を前提としない
+- **デプロイフェーズの遷移は `AIBDeployController` のみが行う** — Service/Executor/Provider はフェーズを直接変更しない
+- **シークレットはリモート照会後に未設定分のみプロンプトする** — 全シークレットを毎回入力させない
 
 ## Specifications
 - Runtime spec: `docs/cloud-run-aligned-local-runtime-spec.md`

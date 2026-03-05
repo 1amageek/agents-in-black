@@ -17,16 +17,22 @@ struct DeploySheet: View {
     private var content: some View {
         switch model.deployPhase {
         case .idle, .preflight, .planning:
-            DeployProgressView(phase: model.deployPhase)
+            DeployProgressView(phase: model.deployPhase, onCancel: {
+                model.deployController.cancel()
+            })
         case .reviewing(let plan):
             DeployReviewView(plan: plan, model: model)
         case .secretsInput(let plan, let requiredSecrets):
             DeploySecretsInputView(plan: plan, requiredSecrets: requiredSecrets, model: model)
         case .applying(let plan):
             if let progress = model.deployController.deployProgress {
-                DeployApplyingView(plan: plan, progress: progress)
+                DeployApplyingView(plan: plan, progress: progress) {
+                    model.deployController.cancel()
+                }
             } else {
-                DeployProgressView(phase: model.deployPhase)
+                DeployProgressView(phase: model.deployPhase, onCancel: {
+                    model.deployController.cancel()
+                })
             }
         case .completed(let result):
             DeployCompletedView(result: result) {

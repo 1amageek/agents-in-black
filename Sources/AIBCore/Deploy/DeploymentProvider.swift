@@ -53,6 +53,10 @@ public protocol DeploymentProvider: Sendable {
     /// Return shell commands to configure registry authentication (run once before all services).
     func registryAuthCommands(targetConfig: AIBDeployTargetConfig) -> [DeployCommand]
 
+    /// Return shell commands to prepare build backend state (run once before all services).
+    /// Useful for best-effort cleanup of stale local artifacts before image builds.
+    func buildBackendPreparationCommands(targetConfig: AIBDeployTargetConfig) -> [DeployCommand]
+
     /// Return shell commands to ensure the registry repository exists for a service (idempotent).
     func ensureRegistryRepoCommands(
         service: AIBDeployServicePlan,
@@ -63,7 +67,8 @@ public protocol DeploymentProvider: Sendable {
     func buildAndPushCommands(
         imageTag: String,
         dockerfilePath: String,
-        buildContext: String
+        buildContext: String,
+        targetConfig: AIBDeployTargetConfig
     ) -> [DeployCommand]
 
     /// Return shell commands for deploying a service.
@@ -109,6 +114,7 @@ extension DeploymentProvider {
     }
 
     public func registryAuthCommands(targetConfig: AIBDeployTargetConfig) -> [DeployCommand] { [] }
+    public func buildBackendPreparationCommands(targetConfig: AIBDeployTargetConfig) -> [DeployCommand] { [] }
     public func ensureRegistryRepoCommands(service: AIBDeployServicePlan, targetConfig: AIBDeployTargetConfig) -> [DeployCommand] { [] }
 
     public func existingEnvVarNames(
