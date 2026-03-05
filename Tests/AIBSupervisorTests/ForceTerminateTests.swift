@@ -40,9 +40,14 @@ private struct SelectiveReadyHealthClient: HealthProbeClient {
 /// Process controller that creates mock container handles without real containers.
 private final class MockProcessController: ProcessController, Sendable {
     private let _spawnedIDs = Mutex<[String]>([])
+    private let _spawnedServiceIDs = Mutex<[ServiceID]>([])
 
     var spawnedIDs: [String] {
         _spawnedIDs.withLock { $0 }
+    }
+
+    var spawnedServiceIDs: [ServiceID] {
+        _spawnedServiceIDs.withLock { $0 }
     }
 
     func spawn(
@@ -53,12 +58,19 @@ private final class MockProcessController: ProcessController, Sendable {
     ) async throws -> ChildHandle {
         let id = "test-\(service.id.rawValue.replacingOccurrences(of: "/", with: "-"))-\(UUID().uuidString.prefix(4))"
         _spawnedIDs.withLock { $0.append(id) }
+        let ordinal = _spawnedServiceIDs.withLock { serviceIDs -> Int in
+            serviceIDs.append(service.id)
+            return serviceIDs.count
+        }
+        let containerIPAddress = "192.168.0.\(ordinal + 1)"
         return ChildHandle(
             serviceID: service.id,
             containerID: id,
+            containerIPAddress: containerIPAddress,
             containerState: ContainerState(),
             startedAt: Date(),
             resolvedPort: resolvedPort,
+            backendEndpoint: BackendEndpoint(host: "127.0.0.1", port: resolvedPort),
             monitorTask: nil,
             logTask: nil
         )
@@ -281,5 +293,90 @@ func initialStartPublishesRoutesBeforeAllServicesBecomeReady() async throws {
     } catch {
         // Expected.
     }
+    await supervisor.stopAll(graceful: false)
+}
+
+@Test(.timeLimit(.minutes(1)))
+func startupResolvesAgentServiceRefsToContainerReachableURLs() async throws {
+    let tempRoot = FileManager.default.temporaryDirectory
+        .appendingPathComponent("aib-supervisor-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+    let workspaceYAML = tempRoot.appendingPathComponent("workspace.yaml")
+    try Data().write(to: workspaceYAML)
+
+    defer {
+        do {
+            try FileManager.default.removeItem(at: tempRoot)
+        } catch {
+            // Best-effort cleanup for test temp directory.
+        }
+    }
+
+    let mcpService = ServiceConfig(
+        id: ServiceID("swift-browse/main"),
+        kind: .mcp,
+        mountPath: "/swift-browse",
+        port: 0,
+        run: ["swift", "run", "swift-browse"],
+        watchMode: .external,
+        health: ServiceHealthConfig(startupReadyTimeout: .seconds(5)),
+        restart: ServiceRestartConfig(),
+        mcp: MCPServiceConfig(path: "/mcp")
+    )
+    let agentService = ServiceConfig(
+        id: ServiceID("agent/node"),
+        kind: .agent,
+        mountPath: "/agent/node",
+        port: 0,
+        run: ["node", "server.js"],
+        watchMode: .external,
+        health: ServiceHealthConfig(startupReadyTimeout: .seconds(5)),
+        restart: ServiceRestartConfig(),
+        connections: ServiceConnectionsConfig(
+            mcpServers: [ServiceConnectionTarget(serviceRef: "swift-browse/main")],
+            a2aAgents: []
+        )
+    )
+
+    let config = AIBConfig(
+        version: 1,
+        gateway: GatewayConfig(port: 8080),
+        services: [agentService, mcpService]
+    )
+
+    let controller = MockProcessController()
+    let configProvider: ConfigProvider = {
+        LoadedConfig(config: config, warnings: [], configPath: workspaceYAML.path)
+    }
+    let supervisor = DevSupervisor(
+        gatewayControl: GatewayControl(),
+        configProvider: configProvider,
+        watchFilePath: workspaceYAML.path,
+        gatewayPort: 8080,
+        reloadEnabled: false,
+        processController: controller,
+        healthClient: AlwaysReadyHealthClient(),
+        logger: Logger(label: "test")
+    )
+
+    try await supervisor.startAll()
+
+    let spawnedServiceIDs = controller.spawnedServiceIDs.map(\.rawValue)
+    #expect(spawnedServiceIDs == ["swift-browse/main", "agent/node"])
+
+    let connectionsURL = tempRoot
+        .appendingPathComponent("generated/runtime/connections/agent__node.json")
+    let data = try Data(contentsOf: connectionsURL)
+    let object = try JSONSerialization.jsonObject(with: data)
+    let json = try #require(object as? [String: Any])
+    let mcpServers = try #require(json["mcp_servers"] as? [[String: Any]])
+    let first = try #require(mcpServers.first)
+    let resolvedURLString = try #require(first["resolved_url"] as? String)
+    let resolvedURL = try #require(URL(string: resolvedURLString))
+
+    #expect(resolvedURL.host == "192.168.0.2")
+    #expect(resolvedURL.path == "/mcp")
+    #expect(resolvedURL.host != "127.0.0.1")
+
     await supervisor.stopAll(graceful: false)
 }

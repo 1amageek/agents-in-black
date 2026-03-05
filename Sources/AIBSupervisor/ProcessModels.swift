@@ -10,23 +10,25 @@ import Synchronization
 public final class ContainerState: Sendable {
     let isAlive: Mutex<Bool>
     let exitCode: Mutex<Int32?>
+    let runPhaseStarted: Mutex<Bool>
 
     public init() {
         self.isAlive = Mutex(true)
         self.exitCode = Mutex(nil)
+        // Default true so non-container test/mocks continue to probe immediately.
+        self.runPhaseStarted = Mutex(true)
     }
 }
 
 public struct ChildHandle: @unchecked Sendable {
     public let serviceID: ServiceID
     public let containerID: String
+    public let containerIPAddress: String
     public let containerState: ContainerState
     public let startedAt: Date
     public let resolvedPort: Int
-
-    /// Path to the host-side Unix domain socket exposed via vsock relay.
-    /// Used by the gateway and health probes to reach the container service.
-    public let unixSocketPath: String?
+    public let backendEndpoint: BackendEndpoint
+    public let usesRunPhaseSignal: Bool
 
     /// Host-side directory containing generated entrypoint scripts.
     /// Cleaned up on container termination.
@@ -40,20 +42,24 @@ public struct ChildHandle: @unchecked Sendable {
     public init(
         serviceID: ServiceID,
         containerID: String,
+        containerIPAddress: String,
         containerState: ContainerState,
         startedAt: Date,
         resolvedPort: Int,
-        unixSocketPath: String? = nil,
+        backendEndpoint: BackendEndpoint,
+        usesRunPhaseSignal: Bool = false,
         scriptDir: URL? = nil,
         monitorTask: Task<Void, Never>?,
         logTask: Task<Void, Never>?
     ) {
         self.serviceID = serviceID
         self.containerID = containerID
+        self.containerIPAddress = containerIPAddress
         self.containerState = containerState
         self.startedAt = startedAt
         self.resolvedPort = resolvedPort
-        self.unixSocketPath = unixSocketPath
+        self.backendEndpoint = backendEndpoint
+        self.usesRunPhaseSignal = usesRunPhaseSignal
         self.scriptDir = scriptDir
         self.monitorTask = monitorTask
         self.logTask = logTask
@@ -67,6 +73,11 @@ public struct ChildHandle: @unchecked Sendable {
     /// Exit code from the container process, or 0 if still running.
     public var terminationStatus: Int32 {
         containerState.exitCode.withLock { $0 ?? 0 }
+    }
+
+    /// Whether the entrypoint has entered the final service run phase.
+    public var hasStartedRunPhase: Bool {
+        containerState.runPhaseStarted.withLock { $0 }
     }
 }
 

@@ -139,7 +139,8 @@ public actor DevSupervisor {
         // Publish mount paths immediately so early requests get service_unavailable (not no_route)
         // while the remaining services are still booting.
         try await publishRoutes()
-        for service in config.services {
+        let orderedServices = try startupOrderedServices(from: config.services)
+        for service in orderedServices {
             try await prepareAndStart(service: service, reason: .initialStart)
         }
     }
@@ -176,14 +177,12 @@ public actor DevSupervisor {
             if let service = newByID[id] {
                 await stopRuntime(id: id, draining: true)
                 runtimes[id] = ServiceRuntime(service: service, configVersion: configVersion)
-                try await prepareAndStart(service: service, reason: .configReload)
             }
         }
 
         for id in added {
             if let service = newByID[id] {
                 runtimes[id] = ServiceRuntime(service: service, configVersion: configVersion)
-                try await prepareAndStart(service: service, reason: .configReload)
             }
         }
 
@@ -193,6 +192,14 @@ public actor DevSupervisor {
                 updated.service = newByID[id] ?? existing.service
                 updated.configVersion = configVersion
                 runtimes[id] = updated
+            }
+        }
+
+        let servicesToStart = Set(changed).union(added)
+        if !servicesToStart.isEmpty {
+            let orderedServices = try startupOrderedServices(from: newConfig.services)
+            for service in orderedServices where servicesToStart.contains(service.id) {
+                try await prepareAndStart(service: service, reason: .configReload)
             }
         }
 
@@ -218,6 +225,8 @@ public actor DevSupervisor {
             service.env[key] = value
         }
 
+        try materializeConnectionArtifactsIfNeeded(for: service)
+
         let resolvedPort = try allocatePort(preferred: service.port)
         let handle = try await processController.spawn(
             service: service,
@@ -230,11 +239,7 @@ public actor DevSupervisor {
 
         runtime.childHandle = handle
         runtime.resolvedPort = resolvedPort
-        let endpoint = BackendEndpoint(
-            host: "127.0.0.1",
-            port: resolvedPort,
-            unixSocketPath: handle.unixSocketPath
-        )
+        let endpoint = handle.backendEndpoint
         runtime.backendEndpoint = endpoint
         runtimes[id] = runtime
 
@@ -258,13 +263,41 @@ public actor DevSupervisor {
         let timeout = try runtime.service.health.startupReadyTimeout.parse().timeInterval
         let deadline = Date().addingTimeInterval(timeout)
         var lastError: String?
+        var waitingRunPhaseLogged = false
+        var appliedRunPhaseSettlingDelay = false
         while Date() < deadline {
-            if let handle = runtimes[id]?.childHandle, !handle.isRunning {
+            guard let handle = runtimes[id]?.childHandle else {
+                return false
+            }
+
+            if !handle.isRunning {
                 logger.warning("Container exited before becoming ready", metadata: [
                     "service_id": .string(id.rawValue),
                 ])
                 return false
             }
+
+            if handle.usesRunPhaseSignal && !handle.hasStartedRunPhase {
+                if !waitingRunPhaseLogged {
+                    logger.debug("Waiting for service run phase before readiness probing", metadata: [
+                        "service_id": .string(id.rawValue),
+                    ])
+                    waitingRunPhaseLogged = true
+                }
+                try await Task.sleep(for: .milliseconds(500))
+                continue
+            }
+
+            if handle.usesRunPhaseSignal && !appliedRunPhaseSettlingDelay {
+                appliedRunPhaseSettlingDelay = true
+                logger.debug("Applying post-run-phase settling delay before readiness probing", metadata: [
+                    "service_id": .string(id.rawValue),
+                    "delay_ms": .string("500"),
+                ])
+                try await Task.sleep(for: .milliseconds(500))
+                continue
+            }
+
             let currentRuntime = runtimes[id] ?? runtime
             let probe = await healthClient.checkReadiness(service: currentRuntime)
             if probe.success { return true }
@@ -285,6 +318,9 @@ public actor DevSupervisor {
             "service_id": .string(id.rawValue),
             "timeout_seconds": .string("\(timeout)"),
             "last_error": .string(lastError ?? "unknown"),
+            "readiness_target": .string("\(runtime.backendEndpoint?.baseURLString ?? "none")\(runtime.service.health.readinessPath)"),
+            "container_running": .string("\(runtime.childHandle?.isRunning ?? false)"),
+            "run_phase_started": .string("\(runtime.childHandle?.hasStartedRunPhase ?? false)"),
         ])
         return false
     }
@@ -432,6 +468,277 @@ public actor DevSupervisor {
         }
     }
 
+    private func startupOrderedServices(from services: [ServiceConfig]) throws -> [ServiceConfig] {
+        if services.isEmpty {
+            return []
+        }
+
+        let servicesByID = Dictionary(uniqueKeysWithValues: services.map { ($0.id, $0) })
+        let serviceOrderIndex = Dictionary(uniqueKeysWithValues: services.enumerated().map { ($1.id, $0) })
+        let knownServiceIDs = Set(servicesByID.keys)
+
+        var indegree = Dictionary(uniqueKeysWithValues: services.map { ($0.id, 0) })
+        var dependents: [ServiceID: [ServiceID]] = [:]
+
+        for service in services {
+            let dependencies = serviceConnectionDependencies(for: service, knownServiceIDs: knownServiceIDs)
+            for dependencyID in dependencies {
+                indegree[service.id, default: 0] += 1
+                dependents[dependencyID, default: []].append(service.id)
+            }
+        }
+
+        var queue = services
+            .map(\.id)
+            .filter { indegree[$0] == 0 }
+            .sorted { (serviceOrderIndex[$0] ?? 0) < (serviceOrderIndex[$1] ?? 0) }
+        var ordered: [ServiceConfig] = []
+
+        while !queue.isEmpty {
+            let currentID = queue.removeFirst()
+            guard let currentService = servicesByID[currentID] else {
+                continue
+            }
+            ordered.append(currentService)
+
+            let nextDependents = (dependents[currentID] ?? [])
+                .sorted { (serviceOrderIndex[$0] ?? 0) < (serviceOrderIndex[$1] ?? 0) }
+            for dependentID in nextDependents {
+                let updated = (indegree[dependentID] ?? 0) - 1
+                indegree[dependentID] = updated
+                if updated == 0 {
+                    queue.append(dependentID)
+                }
+            }
+            queue.sort { (serviceOrderIndex[$0] ?? 0) < (serviceOrderIndex[$1] ?? 0) }
+        }
+
+        if ordered.count != services.count {
+            let blocked = indegree
+                .filter { $0.value > 0 }
+                .map { $0.key.rawValue }
+                .sorted()
+                .joined(separator: ",")
+            throw ReloadApplyError(
+                "Service dependency cycle detected",
+                metadata: ["blocked_services": blocked]
+            )
+        }
+
+        return ordered
+    }
+
+    private func serviceConnectionDependencies(
+        for service: ServiceConfig,
+        knownServiceIDs: Set<ServiceID>
+    ) -> Set<ServiceID> {
+        var dependencies: Set<ServiceID> = []
+        let allTargets = service.connections.mcpServers + service.connections.a2aAgents
+        for target in allTargets {
+            guard let serviceRef = target.serviceRef, !serviceRef.isEmpty else {
+                continue
+            }
+            let dependencyID = ServiceID(serviceRef)
+            if knownServiceIDs.contains(dependencyID) {
+                dependencies.insert(dependencyID)
+            }
+        }
+        return dependencies
+    }
+
+    private func materializeConnectionArtifactsIfNeeded(for service: ServiceConfig) throws {
+        guard service.kind == .agent else {
+            return
+        }
+
+        let mcpTargets = try resolveRuntimeConnectionTargets(
+            service.connections.mcpServers,
+            defaultPathProvider: { target in target.mcp?.path ?? "/mcp" }
+        )
+        let a2aTargets = try resolveRuntimeConnectionTargets(
+            service.connections.a2aAgents,
+            defaultPathProvider: { target in target.a2a?.rpcPath ?? "/a2a" }
+        )
+
+        try writeRuntimeConnectionArtifact(
+            serviceID: service.id.rawValue,
+            mcpTargets: mcpTargets,
+            a2aTargets: a2aTargets
+        )
+        try writeMCPProjectConfigs(
+            serviceID: service.id.rawValue,
+            mcpTargets: mcpTargets
+        )
+    }
+
+    private func resolveRuntimeConnectionTargets(
+        _ targets: [ServiceConnectionTarget],
+        defaultPathProvider: (ServiceConfig) -> String
+    ) throws -> [RuntimeResolvedConnectionTarget] {
+        var resolved: [RuntimeResolvedConnectionTarget] = []
+        for target in targets {
+            if let url = target.url, !url.isEmpty {
+                resolved.append(RuntimeResolvedConnectionTarget(
+                    serviceRef: nil,
+                    resolvedURL: url,
+                    source: "url"
+                ))
+                continue
+            }
+
+            guard let serviceRef = target.serviceRef, !serviceRef.isEmpty else {
+                continue
+            }
+            let targetID = ServiceID(serviceRef)
+            guard let targetRuntime = runtimes[targetID] else {
+                throw ReloadApplyError(
+                    "Connection target service missing in runtime map",
+                    metadata: [
+                        "service_ref": serviceRef,
+                    ]
+                )
+            }
+            guard targetRuntime.lifecycleState == .ready,
+                  let targetHandle = targetRuntime.childHandle,
+                  let targetPort = targetRuntime.resolvedPort
+            else {
+                throw ReloadApplyError(
+                    "Connection target service is not ready",
+                    metadata: [
+                        "service_ref": serviceRef,
+                        "lifecycle_state": targetRuntime.lifecycleState.rawValue,
+                    ]
+                )
+            }
+
+            let suffix = normalizedPath(defaultPathProvider(targetRuntime.service))
+            let resolvedURL = "http://\(targetHandle.containerIPAddress):\(targetPort)\(suffix)"
+            resolved.append(RuntimeResolvedConnectionTarget(
+                serviceRef: serviceRef,
+                resolvedURL: resolvedURL,
+                source: "service_ref"
+            ))
+        }
+        return resolved
+    }
+
+    private func writeRuntimeConnectionArtifact(
+        serviceID: String,
+        mcpTargets: [RuntimeResolvedConnectionTarget],
+        a2aTargets: [RuntimeResolvedConnectionTarget]
+    ) throws {
+        let outputRoot = URL(fileURLWithPath: configBaseDirectory)
+            .appendingPathComponent("generated/runtime/connections")
+            .standardizedFileURL
+        do {
+            try FileManager.default.createDirectory(at: outputRoot, withIntermediateDirectories: true)
+        } catch {
+            throw ProcessSpawnError(
+                "Failed to create runtime connection output directory",
+                metadata: [
+                    "path": outputRoot.path,
+                    "underlying_error": "\(error)",
+                ]
+            )
+        }
+
+        let artifact = RuntimeConnectionArtifact(
+            serviceID: serviceID,
+            mcpServers: mcpTargets,
+            a2aAgents: a2aTargets
+        )
+        let outputURL = outputRoot
+            .appendingPathComponent("\(sanitizedServiceID(serviceID)).json")
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        do {
+            let data = try encoder.encode(artifact)
+            try data.write(to: outputURL, options: .atomic)
+        } catch {
+            throw ProcessSpawnError(
+                "Failed to write runtime connection artifact",
+                metadata: [
+                    "path": outputURL.path,
+                    "underlying_error": "\(error)",
+                ]
+            )
+        }
+    }
+
+    private func writeMCPProjectConfigs(
+        serviceID: String,
+        mcpTargets: [RuntimeResolvedConnectionTarget]
+    ) throws {
+        let outputRoot = URL(fileURLWithPath: configBaseDirectory)
+            .appendingPathComponent("generated/runtime/mcp/\(sanitizedServiceID(serviceID))")
+            .standardizedFileURL
+        do {
+            try FileManager.default.createDirectory(at: outputRoot, withIntermediateDirectories: true)
+        } catch {
+            throw ProcessSpawnError(
+                "Failed to create MCP config output directory",
+                metadata: [
+                    "path": outputRoot.path,
+                    "underlying_error": "\(error)",
+                ]
+            )
+        }
+
+        var servers: [String: RuntimeMCPProjectServerEntry] = [:]
+        for target in mcpTargets {
+            let name = mcpServerName(from: target)
+            servers[name] = RuntimeMCPProjectServerEntry(type: "http", url: target.resolvedURL)
+        }
+        let config = RuntimeMCPProjectConfig(mcpServers: servers)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        do {
+            let data = try encoder.encode(config)
+            try data.write(to: outputRoot.appendingPathComponent(".mcp.json"), options: .atomic)
+            try data.write(to: outputRoot.appendingPathComponent(".claude.json"), options: .atomic)
+        } catch {
+            throw ProcessSpawnError(
+                "Failed to write MCP project config",
+                metadata: [
+                    "path": outputRoot.path,
+                    "underlying_error": "\(error)",
+                ]
+            )
+        }
+    }
+
+    private func mcpServerName(from target: RuntimeResolvedConnectionTarget) -> String {
+        if let serviceRef = target.serviceRef, !serviceRef.isEmpty {
+            return serviceRef.replacingOccurrences(of: "/", with: "-")
+        }
+        guard let url = URL(string: target.resolvedURL) else {
+            return "mcp-server"
+        }
+        let host = url.host ?? "unknown"
+        let path = url.path
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            .replacingOccurrences(of: "/", with: "-")
+        if path.isEmpty {
+            return host
+        }
+        return "\(host)-\(path)"
+    }
+
+    private func sanitizedServiceID(_ value: String) -> String {
+        value.replacingOccurrences(of: "/", with: "__")
+    }
+
+    private func normalizedPath(_ path: String) -> String {
+        if path.isEmpty {
+            return ""
+        }
+        if path.hasPrefix("/") {
+            return path
+        }
+        return "/" + path
+    }
+
     private var configBaseDirectory: String {
         URL(fileURLWithPath: watchFilePath).deletingLastPathComponent().path
     }
@@ -504,4 +811,37 @@ public actor DevSupervisor {
     public nonisolated func forceTerminateAll() {
         _activeChildren.withLock { $0.removeAll() }
     }
+}
+
+private struct RuntimeConnectionArtifact: Codable {
+    var serviceID: String
+    var mcpServers: [RuntimeResolvedConnectionTarget]
+    var a2aAgents: [RuntimeResolvedConnectionTarget]
+
+    enum CodingKeys: String, CodingKey {
+        case serviceID = "service_id"
+        case mcpServers = "mcp_servers"
+        case a2aAgents = "a2a_agents"
+    }
+}
+
+private struct RuntimeResolvedConnectionTarget: Codable {
+    var serviceRef: String?
+    var resolvedURL: String
+    var source: String
+
+    enum CodingKeys: String, CodingKey {
+        case serviceRef = "service_ref"
+        case resolvedURL = "resolved_url"
+        case source
+    }
+}
+
+private struct RuntimeMCPProjectConfig: Codable {
+    var mcpServers: [String: RuntimeMCPProjectServerEntry]
+}
+
+private struct RuntimeMCPProjectServerEntry: Codable {
+    var type: String
+    var url: String
 }

@@ -205,6 +205,22 @@ func workspaceSyncWritesRuntimeConnectionArtifacts() throws {
     let a2aAgents = decoded?["a2a_agents"] as? [[String: Any]] ?? []
     #expect(mcpServers.contains(where: { $0["service_ref"] as? String == "mcp-web/web" }))
     #expect(a2aAgents.contains(where: { $0["service_ref"] as? String == "agent-a/helper" }))
+
+    let mcpProjectConfig = root
+        .appendingPathComponent(".aib/generated/runtime/mcp")
+        .appendingPathComponent("agent-a__app/.mcp.json")
+    let mcpProjectData = try Data(contentsOf: mcpProjectConfig)
+    let mcpProjectDecoded = try JSONSerialization.jsonObject(with: mcpProjectData) as? [String: Any]
+    let mcpProjectServers = mcpProjectDecoded?["mcpServers"] as? [String: Any]
+    #expect(mcpProjectServers?["mcp-web-web"] != nil)
+
+    let claudeConfig = root
+        .appendingPathComponent(".aib/generated/runtime/mcp")
+        .appendingPathComponent("agent-a__app/.claude.json")
+    let claudeConfigData = try Data(contentsOf: claudeConfig)
+    let claudeConfigDecoded = try JSONSerialization.jsonObject(with: claudeConfigData) as? [String: Any]
+    let claudeServers = claudeConfigDecoded?["mcpServers"] as? [String: Any]
+    #expect(claudeServers?["mcp-web-web"] != nil)
 }
 
 @Test(.timeLimit(.minutes(1)))

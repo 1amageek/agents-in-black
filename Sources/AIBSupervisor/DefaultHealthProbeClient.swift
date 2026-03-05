@@ -52,8 +52,7 @@ public struct DefaultHealthProbeClient: HealthProbeClient {
         let url = endpoint.requestURL(path: path)
         var request = HTTPClientRequest(url: url)
         request.method = .GET
-        // AsyncHTTPClient does not guarantee Host header synthesis for all URL schemes
-        // (notably http+unix). Always provide explicit authority from endpoint.
+        // Always provide explicit authority from endpoint.
         request.headers.replaceOrAdd(name: "Host", value: endpoint.hostHeaderValue)
         do {
             let response = try await HTTPClient.shared.execute(request, timeout: timeout)

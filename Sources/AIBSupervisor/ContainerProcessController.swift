@@ -4,6 +4,9 @@ import Containerization
 import ContainerizationExtras
 import Foundation
 import Logging
+import NIOCore
+import NIOPosix
+import SocketForwarder
 import Synchronization
 
 /// Process controller that runs each service in a Linux VM using apple/containerization.
@@ -16,6 +19,11 @@ import Synchronization
 /// - `com.apple.security.virtualization` entitlement
 /// - Linux kernel binary (vmlinux) — auto-discovered or downloaded
 public actor ContainerProcessController: ProcessController {
+    private struct ForwarderContext {
+        let result: SocketForwarderResult
+        let eventLoopGroup: MultiThreadedEventLoopGroup
+    }
+
     private let logger: Logger
 
     /// Observable progress for one-time setup tasks (kernel download).
@@ -29,8 +37,11 @@ public actor ContainerProcessController: ProcessController {
     /// Active containers keyed by container ID for lifecycle management.
     private var containers: [String: LinuxContainer] = [:]
 
-    /// Directory for host-side Unix domain sockets and generated entrypoint scripts.
-    private let socketDir: URL
+    /// Active host-side TCP forwarders keyed by container ID.
+    private var forwarders: [String: ForwarderContext] = [:]
+
+    /// Directory for generated entrypoint scripts.
+    private let scriptRootDir: URL
 
     /// Cache directory for kernel, init image, and OCI image store.
     private let cacheRoot: URL
@@ -40,8 +51,8 @@ public actor ContainerProcessController: ProcessController {
         self.setupProgress = Progress(totalUnitCount: 0)
         self.cacheRoot = URL(fileURLWithPath: NSHomeDirectory())
             .appendingPathComponent(".aib/container-cache")
-        self.socketDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("aib-sockets")
+        self.scriptRootDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("aib-runtime-scripts")
     }
 
     // MARK: - ProcessController
@@ -70,11 +81,11 @@ public actor ContainerProcessController: ProcessController {
         // Determine OCI image reference
         let imageRef = try imageReference(for: service, runtime: runtime, packageManager: packageManager)
 
-        // Generate entrypoint and bridge scripts (mounted via VirtioFS)
+        // Generate entrypoint scripts (mounted via VirtioFS)
         let scripts = try EntrypointGenerator.generate(
             service: service,
             runtime: runtime,
-            baseDir: socketDir,
+            baseDir: scriptRootDir,
             containerID: containerID
         )
 
@@ -82,24 +93,18 @@ public actor ContainerProcessController: ProcessController {
             service: service,
             resolvedPort: resolvedPort,
             gatewayPort: gatewayPort,
-            sanitizedID: sanitizedID,
             configBaseDirectory: configBaseDirectory,
             runtime: runtime,
-            packageManager: packageManager,
-            bridgeCommand: scripts.bridgeCommand
+            packageManager: packageManager
         )
 
-        // Set up host-side Unix domain socket for vsock relay
-        try FileManager.default.createDirectory(at: socketDir, withIntermediateDirectories: true)
-        let hostSocketPath = socketDir.appendingPathComponent("\(containerID).sock")
-        // Clean up any stale socket file from a previous run
-        try? FileManager.default.removeItem(at: hostSocketPath)
+        try FileManager.default.createDirectory(at: scriptRootDir, withIntermediateDirectories: true)
 
         logger.info("Creating container", metadata: [
             "service_id": .string(service.id.rawValue),
             "container_id": .string(containerID),
             "image": .string(imageRef),
-            "socket": .string(hostSocketPath.path),
+            "container_port": .stringConvertible(resolvedPort),
         ])
 
         // Create container via ContainerManager
@@ -112,9 +117,20 @@ public actor ContainerProcessController: ProcessController {
             .standardizedFileURL.path
         let runtimeDirExists = FileManager.default.fileExists(atPath: runtimeDir)
 
-        // Log writers to capture container stdout/stderr
-        let stdoutWriter = LogWriter(logger: logger, containerID: containerID, stream: "stdout")
-        let stderrWriter = LogWriter(logger: logger, containerID: containerID, stream: "stderr")
+        // Shared runtime state and log writers to capture container stdout/stderr.
+        let state = ContainerState()
+        state.runPhaseStarted.withLock { $0 = false }
+        let stdoutWriter = LogWriter(
+            logger: logger,
+            containerID: containerID,
+            stream: "stdout",
+            containerState: state
+        )
+        let stderrWriter = LogWriter(
+            logger: logger,
+            containerID: containerID,
+            stream: "stderr"
+        )
 
         logger.info("Container entrypoint", metadata: [
             "container_id": .string(containerID),
@@ -137,25 +153,10 @@ public actor ContainerProcessController: ProcessController {
             config.cpus = 2
             config.memoryInBytes = 512.mib()
 
-            // Network: VmnetNetwork (configured at ContainerManager level) provides
-            // outbound internet for the guest (apt, pip, npm). Host-to-guest inbound
-            // traffic uses UnixSocketRelay via vsock (vmnet IPs are NAT'd/not routable).
-
-            // Socket relay: expose guest UDS to host via vsock.
-            // Guest service listens on TCP :PORT → bridge script → /tmp/aib-svc.sock
-            // → vsock relay → host UDS at socketDir/{containerID}.sock
-            config.sockets = [
-                UnixSocketConfiguration(
-                    source: URL(filePath: "/tmp/aib-svc.sock"),
-                    destination: hostSocketPath,
-                    direction: .outOf
-                ),
-            ]
-
             // Mount source directory via VirtioFS
             config.mounts.append(.share(source: cwd, destination: "/app"))
 
-            // Mount generated scripts (entrypoint + bridge) via VirtioFS
+            // Mount generated scripts via VirtioFS
             config.mounts.append(.share(
                 source: scripts.directory.path,
                 destination: "/aib-scripts",
@@ -173,22 +174,66 @@ public actor ContainerProcessController: ProcessController {
         }
         self.manager = mgr
 
-        if let containerAddress = container.interfaces.first?.ipv4Address.address.description {
-            logger.info("Container network configured", metadata: [
-                "container_id": .string(containerID),
-                "ip": .string(containerAddress),
+        guard let containerAddress = container.interfaces.first?.ipv4Address.address.description else {
+            throw ProcessSpawnError("Container network address unavailable", metadata: [
+                "container_id": containerID,
             ])
         }
+        logger.info("Container network configured", metadata: [
+            "container_id": .string(containerID),
+            "ip": .string(containerAddress),
+        ])
 
         // Start the container VM
         try await container.create()
-        try await container.start()
+        do {
+            try await container.start()
+        } catch {
+            cleanupManager(id: containerID)
+            EntrypointGenerator.cleanup(directory: scripts.directory)
+            throw error
+        }
+
+        // Publish host ingress on localhost using apple/container SocketForwarder.
+        do {
+            try await startPortForwarder(
+                containerID: containerID,
+                hostPort: resolvedPort,
+                containerAddress: containerAddress,
+                containerPort: resolvedPort
+            )
+        } catch {
+            logger.error("Failed to publish container port", metadata: [
+                "service_id": .string(service.id.rawValue),
+                "container_id": .string(containerID),
+                "container_ip": .string(containerAddress),
+                "container_port": .stringConvertible(resolvedPort),
+                "host_port": .stringConvertible(resolvedPort),
+                "error": .string("\(error)"),
+            ])
+            do {
+                try await container.stop()
+            } catch {
+                logger.debug("Container stop after forwarder failure failed", metadata: [
+                    "container_id": .string(containerID),
+                    "error": .string("\(error)"),
+                ])
+            }
+            cleanupManager(id: containerID)
+            EntrypointGenerator.cleanup(directory: scripts.directory)
+            throw ProcessSpawnError(
+                "Failed to start host port publish",
+                metadata: [
+                    "container_id": containerID,
+                    "host_port": "\(resolvedPort)",
+                    "container_port": "\(resolvedPort)",
+                    "container_ip": containerAddress,
+                ]
+            )
+        }
 
         // Track container for lifecycle management
         containers[containerID] = container
-
-        // Set up state tracking
-        let state = ContainerState()
 
         // Monitor task: wait for container exit and record exit code
         let monitorTask = Task { [logger] in
@@ -209,10 +254,15 @@ public actor ContainerProcessController: ProcessController {
         return ChildHandle(
             serviceID: service.id,
             containerID: containerID,
+            containerIPAddress: containerAddress,
             containerState: state,
             startedAt: Date(),
             resolvedPort: resolvedPort,
-            unixSocketPath: hostSocketPath.path,
+            backendEndpoint: BackendEndpoint(
+                host: "127.0.0.1",
+                port: resolvedPort
+            ),
+            usesRunPhaseSignal: true,
             scriptDir: scripts.directory,
             monitorTask: monitorTask,
             logTask: nil
@@ -221,14 +271,16 @@ public actor ContainerProcessController: ProcessController {
 
     public func terminateGroup(_ handle: ChildHandle, grace: Duration) async -> TerminationResult {
         guard let container = containers[handle.containerID] else {
+            await stopForwarder(containerID: handle.containerID)
             return TerminationResult(terminatedGracefully: false, exitCode: nil)
         }
         do {
             try await container.stop()
+            await stopForwarder(containerID: handle.containerID)
             handle.containerState.isAlive.withLock { $0 = false }
             handle.monitorTask?.cancel()
             containers.removeValue(forKey: handle.containerID)
-            cleanupSocket(handle)
+            cleanupArtifacts(handle)
             cleanupManager(id: handle.containerID)
             return TerminationResult(terminatedGracefully: true, exitCode: 0)
         } catch {
@@ -236,25 +288,28 @@ public actor ContainerProcessController: ProcessController {
                 "container_id": .string(handle.containerID),
                 "error": .string("\(error)"),
             ])
+            await stopForwarder(containerID: handle.containerID)
             handle.monitorTask?.cancel()
             containers.removeValue(forKey: handle.containerID)
-            cleanupSocket(handle)
+            cleanupArtifacts(handle)
             cleanupManager(id: handle.containerID)
             return TerminationResult(terminatedGracefully: false, exitCode: nil)
         }
     }
 
     public func killGroup(_ handle: ChildHandle) async {
-        guard let container = containers[handle.containerID] else { return }
-        do {
-            try await container.kill(SIGKILL)
-        } catch {
-            // Best-effort — VM may already be dead
+        if let container = containers[handle.containerID] {
+            do {
+                try await container.kill(SIGKILL)
+            } catch {
+                // Best-effort — VM may already be dead
+            }
         }
+        await stopForwarder(containerID: handle.containerID)
         handle.containerState.isAlive.withLock { $0 = false }
         handle.monitorTask?.cancel()
         containers.removeValue(forKey: handle.containerID)
-        cleanupSocket(handle)
+        cleanupArtifacts(handle)
         cleanupManager(id: handle.containerID)
     }
 
@@ -285,11 +340,77 @@ public actor ContainerProcessController: ProcessController {
         ])
     }
 
-    /// Remove the host-side Unix domain socket and generated scripts.
-    private func cleanupSocket(_ handle: ChildHandle) {
-        if let socketPath = handle.unixSocketPath {
-            try? FileManager.default.removeItem(atPath: socketPath)
+    // MARK: - Host Publish
+
+    private func startPortForwarder(
+        containerID: String,
+        hostPort: Int,
+        containerAddress: String,
+        containerPort: Int
+    ) async throws {
+        let eventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        do {
+            let proxyAddress = try SocketAddress(ipAddress: "127.0.0.1", port: hostPort)
+            let serverAddress = try SocketAddress(ipAddress: containerAddress, port: containerPort)
+            let forwarder = try TCPForwarder(
+                proxyAddress: proxyAddress,
+                serverAddress: serverAddress,
+                eventLoopGroup: eventLoopGroup,
+                log: logger
+            )
+            let result = try await forwarder.run().get()
+            forwarders[containerID] = ForwarderContext(
+                result: result,
+                eventLoopGroup: eventLoopGroup
+            )
+            logger.info("Container port published", metadata: [
+                "container_id": .string(containerID),
+                "host": .string("127.0.0.1"),
+                "host_port": .stringConvertible(hostPort),
+                "container_ip": .string(containerAddress),
+                "container_port": .stringConvertible(containerPort),
+            ])
+        } catch {
+            try await shutdownEventLoopGroup(eventLoopGroup)
+            throw error
         }
+    }
+
+    private func stopForwarder(containerID: String) async {
+        guard let context = forwarders.removeValue(forKey: containerID) else { return }
+        context.result.close()
+        do {
+            try await context.result.wait()
+        } catch {
+            logger.debug("Forwarder close wait failed", metadata: [
+                "container_id": .string(containerID),
+                "error": .string("\(error)"),
+            ])
+        }
+        do {
+            try await shutdownEventLoopGroup(context.eventLoopGroup)
+        } catch {
+            logger.debug("Forwarder eventLoopGroup shutdown failed", metadata: [
+                "container_id": .string(containerID),
+                "error": .string("\(error)"),
+            ])
+        }
+    }
+
+    private nonisolated func shutdownEventLoopGroup(_ group: MultiThreadedEventLoopGroup) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            group.shutdownGracefully { error in
+                if let error {
+                    continuation.resume(throwing: error)
+                } else {
+                    continuation.resume()
+                }
+            }
+        }
+    }
+
+    /// Remove generated per-container artifacts.
+    private func cleanupArtifacts(_ handle: ChildHandle) {
         if let scriptDir = handle.scriptDir {
             EntrypointGenerator.cleanup(directory: scriptDir)
         }
@@ -537,11 +658,9 @@ public actor ContainerProcessController: ProcessController {
         service: ServiceConfig,
         resolvedPort: Int,
         gatewayPort: Int,
-        sanitizedID: String,
         configBaseDirectory: String,
         runtime: EntrypointGenerator.Runtime,
-        packageManager: String?,
-        bridgeCommand: String
+        packageManager: String?
     ) -> [String] {
         var env: [String: String] = [:]
 
@@ -571,7 +690,6 @@ public actor ContainerProcessController: ProcessController {
             env["AIB_BUILD_COMMAND"] = build.joined(separator: " ")
         }
         env["AIB_RUN_COMMAND"] = service.run.joined(separator: " ")
-        env["AIB_BRIDGE_COMMAND"] = bridgeCommand
 
         // Connection file (remapped to container path)
         let connectionsFileName = "\(service.id.rawValue.replacingOccurrences(of: "/", with: "__")).json"
@@ -584,12 +702,12 @@ public actor ContainerProcessController: ProcessController {
 
         // MCP config for agent services (remapped to container path)
         if service.kind == .agent {
-            let normalizedID = sanitizedID.replacingOccurrences(of: "-", with: "__")
+            let normalizedID = sanitizedServiceID(service.id.rawValue)
             let mcpConfigDir = "/tmp/claude-config/\(normalizedID)"
             let mcpConfigSource = "/aib-runtime/mcp/\(normalizedID)"
             env["CLAUDE_CONFIG_DIR"] = mcpConfigDir
             env["AIB_CLAUDE_CONFIG_SOURCE"] = mcpConfigSource
-            env["ENABLE_CLAUDEAI_MCP_SERVERS"] = "false"
+            env["AIB_MCP_PROJECT_CONFIG_FILE"] = "\(mcpConfigSource)/.mcp.json"
         }
 
         // Force line-buffered stdout for Python
@@ -601,6 +719,10 @@ public actor ContainerProcessController: ProcessController {
         }
 
         return env.map { "\($0.key)=\($0.value)" }
+    }
+
+    private func sanitizedServiceID(_ value: String) -> String {
+        value.replacingOccurrences(of: "/", with: "__")
     }
 }
 
@@ -659,20 +781,43 @@ private final class LogWriter: Writer, @unchecked Sendable {
     private let logger: Logger
     private let containerID: String
     private let stream: String
+    private let containerState: ContainerState?
+    private let pendingLine = Mutex("")
 
-    init(logger: Logger, containerID: String, stream: String) {
+    init(logger: Logger, containerID: String, stream: String, containerState: ContainerState? = nil) {
         self.logger = logger
         self.containerID = containerID
         self.stream = stream
+        self.containerState = containerState
     }
 
     func write(_ data: Data) throws {
         guard !data.isEmpty else { return }
-        let text = String(data: data, encoding: .utf8)
+        let chunk = String(data: data, encoding: .utf8)
             ?? String(data: data, encoding: .ascii)
             ?? "<binary \(data.count) bytes>"
-        // Split on newlines and log each line separately
-        for line in text.split(omittingEmptySubsequences: true, whereSeparator: \.isNewline) {
+
+        let lines = pendingLine.withLock { buffer in
+            buffer.append(chunk)
+            var completed: [String] = []
+            while let range = buffer.rangeOfCharacter(from: .newlines) {
+                let line = String(buffer[..<range.lowerBound])
+                completed.append(line)
+                buffer = String(buffer[range.upperBound...])
+            }
+            return completed
+        }
+
+        for rawLine in lines {
+            let line = rawLine.trimmingCharacters(in: .newlines)
+            guard !line.isEmpty else { continue }
+            if line == EntrypointGenerator.runPhaseStartedMarker {
+                containerState?.runPhaseStarted.withLock { $0 = true }
+                logger.debug("Container entered run phase", metadata: [
+                    "container_id": .string(containerID),
+                ])
+                continue
+            }
             logger.info("\(line)", metadata: [
                 "container_id": .string(containerID),
                 "stream": .string(stream),
@@ -680,5 +825,16 @@ private final class LogWriter: Writer, @unchecked Sendable {
         }
     }
 
-    func close() throws {}
+    func close() throws {
+        let tail = pendingLine.withLock { buffer in
+            defer { buffer = "" }
+            return buffer
+        }.trimmingCharacters(in: .newlines)
+
+        guard !tail.isEmpty else { return }
+        logger.info("\(tail)", metadata: [
+            "container_id": .string(containerID),
+            "stream": .string(stream),
+        ])
+    }
 }

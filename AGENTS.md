@@ -11,7 +11,7 @@
 
 ## 2. アーキテクチャ不変条件（壊してはいけない契約）
 
-1. `services.yaml`（workspace `.aib/services.yaml`）がローカル実行の source of truth
+1. `workspace.yaml`（workspace `.aib/workspace.yaml`）がローカル実行の source of truth
 2. **`.aib/` はワークスペースルートにのみ存在する** — 個別リポジトリに AIB 固有のファイルやディレクトリを作成しない
 3. 実行境界は service 単位（言語非依存 HTTP Unit）
 4. ローカル公開は単一ポート（Gateway 経由）
@@ -48,7 +48,7 @@
 
 ## 4. 変更ポリシー
 
-1. `services.yaml` スキーマ変更時:
+1. `workspace.yaml` スキーマ変更時:
 - `AIBConfig` の decode + validation を更新
 - `AIBCore` モデルへの反映
 - 最低 1 つのテスト更新（Config または E2E相当）
@@ -93,7 +93,7 @@
 - `try?` によるエラー握りつぶし
 - optional 未実装機能の暗黙無効化
 - App 層でのランタイム重複実装
-- source of truth を増やす変更（`services.yaml` と競合する設定導入）
+- source of truth を増やす変更（`workspace.yaml` と競合する設定導入）
 - 個別リポジトリ内に `.aib/` ディレクトリやファイルを作成すること
 
 ## 8. 参照起点

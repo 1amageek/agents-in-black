@@ -10,7 +10,7 @@ Each Agent/MCP repository remains an independent Git repository. AIB manages onl
 - AIB manages the workspace, not project initialization.
 - `.aib/` exists **only at the workspace root**. Individual repositories are never invaded with AIB-specific files or directories.
 - Repositories are discovered by scanning for native build files (`Package.swift`, `package.json`, `deno.json`, `pyproject.toml`, etc.).
-- All service definitions are managed entirely within the workspace-level `.aib/services.yaml`.
+- All service definitions are managed entirely within the workspace-level `.aib/workspace.yaml`.
 - Services are language-agnostic HTTP units.
 
 ## Commands
@@ -24,7 +24,7 @@ Responsibilities:
 - Discover repositories by scanning for `.git`
 - Detect runtime/framework from native build files (`Package.swift`, `package.json`, `deno.json`, `pyproject.toml`, etc.)
 - Generate `.aib/workspace.yaml` with discovered repo metadata
-- Generate `.aib/services.yaml` (local runtime config) from workspace configuration
+- Resolve runtime service config from `.aib/workspace.yaml`
 
 Options:
 - `--scan <path>`: scan root (default current directory)
@@ -37,20 +37,20 @@ Lists discovered repositories and status.
 
 ### `aib workspace scan`
 
-Re-scan workspace repositories and refresh `.aib/workspace.yaml`, then regenerate `.aib/services.yaml`.
+Re-scan workspace repositories and refresh `.aib/workspace.yaml`.
 
 ### `aib workspace sync`
 
-Regenerate `.aib/services.yaml` from `.aib/workspace.yaml`.
+Resolve runtime service config from `.aib/workspace.yaml` and refresh generated runtime artifacts.
 
 ### `aib emulator start`
 
-Runs the local runtime using generated `.aib/services.yaml`.
+Runs the local runtime using generated `.aib/workspace.yaml`.
 Internally wraps the existing DevGateway + DevSupervisor runtime.
 
 ### `aib emulator validate`
 
-Validates generated `.aib/services.yaml` using existing runtime config validation.
+Validates generated `.aib/workspace.yaml` using existing runtime config validation.
 
 ### `aib emulator status`
 
@@ -70,7 +70,6 @@ Reserved for Cloud Run deployment workflows.
 ```text
 .aib/
   workspace.yaml
-  services.yaml              # generated local runtime config
   environments/
     local.yaml
     staging.yaml
@@ -83,7 +82,7 @@ Reserved for Cloud Run deployment workflows.
 ## Workspace Source of Truth
 
 - Workspace orchestration config: `.aib/workspace.yaml`
-- Local runtime config: `.aib/services.yaml` (generated from workspace config)
+- Local runtime config: resolved from `.aib/workspace.yaml`
 - **No per-repo manifests**: `.aib/` does not exist inside individual repositories
 
 ## Repo Status Classification
@@ -117,7 +116,7 @@ For auto-discovered repos, the default service ID is `<repoName>/main`.
 
 ## Generated Local Service Defaults
 
-When a repo is discovered and a command candidate is selected, AIB generates a default service entry in `.aib/services.yaml` with:
+When a repo is discovered and a command candidate is selected, AIB generates a default service entry in `.aib/workspace.yaml` with:
 
 - `id`: `<repoName>/main`
 - `mount_path`: `/<repoName>`
@@ -125,7 +124,7 @@ When a repo is discovered and a command candidate is selected, AIB generates a d
 - `watch_mode`: runtime default (`swift=external`, others usually `internal`)
 - default health/restart/concurrency values
 
-Users can customize service configuration by editing `.aib/services.yaml` directly.
+Users can customize service configuration by editing `.aib/workspace.yaml` directly.
 
 ## Non-goals (v1)
 

@@ -104,7 +104,7 @@ public enum WorkspaceSyncer {
     }
 
     /// Sync workspace: resolve config and write runtime connection artifacts.
-    /// Does NOT write services.yaml — workspace.yaml is the sole source of truth.
+    /// Does NOT write a separate runtime manifest — workspace.yaml is the sole source of truth.
     public static func sync(workspaceRoot: String, workspace: AIBWorkspaceConfig) throws -> WorkspaceSyncResult {
         let resolved = try resolveConfig(workspaceRoot: workspaceRoot, workspace: workspace)
         try writeRuntimeConnectionArtifacts(
@@ -169,8 +169,8 @@ public enum WorkspaceSyncer {
                 )
             }
 
-            // Generate native .mcp.json for Claude Code / Claude Agent SDK
-            try writeMCPProjectConfig(
+            // Generate native MCP config files for Claude Code / Claude Agent SDK.
+            try writeMCPProjectConfigs(
                 serviceID: service.id.rawValue,
                 mcpTargets: mcpTargets,
                 workspaceRoot: workspaceRoot
@@ -178,10 +178,11 @@ public enum WorkspaceSyncer {
         }
     }
 
-    /// Generate a `.mcp.json` file in Claude Code's native format for an agent service.
-    /// Placed at `.aib/generated/runtime/mcp/{sanitized_id}/.mcp.json`.
-    /// The process controller copies this to the agent's cwd at spawn time.
-    private static func writeMCPProjectConfig(
+    /// Generate native MCP config files for an agent service.
+    /// Placed at `.aib/generated/runtime/mcp/{sanitized_id}/`.
+    /// - `.mcp.json`: Claude Code project MCP config.
+    /// - `.claude.json`: legacy Claude config format used by some SDK flows.
+    private static func writeMCPProjectConfigs(
         serviceID: String,
         mcpTargets: [ResolvedConnectionTarget],
         workspaceRoot: String
@@ -208,14 +209,20 @@ public enum WorkspaceSyncer {
         let config = MCPProjectConfig(mcpServers: servers)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        let outputURL = mcpDir.appendingPathComponent(".mcp.json")
+
+        let outputURLs = [
+            mcpDir.appendingPathComponent(".mcp.json"),
+            mcpDir.appendingPathComponent(".claude.json"),
+        ]
         do {
             let data = try encoder.encode(config)
-            try data.write(to: outputURL, options: .atomic)
+            for outputURL in outputURLs {
+                try data.write(to: outputURL, options: .atomic)
+            }
         } catch {
             throw ConfigError(
                 "Failed to write MCP project config",
-                metadata: ["path": outputURL.path, "underlying_error": "\(error)"]
+                metadata: ["path": mcpDir.path, "underlying_error": "\(error)"]
             )
         }
     }

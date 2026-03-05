@@ -1,5 +1,5 @@
 {
-  "originHash" : "9c214feab59aefd28ade78902a28d75de837685254fb83e93f068577d51f2e57",
+  "originHash" : "a091180fd8ccf4ffacd87dc563f2b7a6a48765629998522de3d2933fa9449beb",
   "pins" : [
     {
       "identity" : "async-http-client",
@@ -8,6 +8,15 @@
       "state" : {
         "revision" : "2fc4652fb4689eb24af10e55cabaa61d8ba774fd",
         "version" : "1.32.0"
+      }
+    },
+    {
+      "identity" : "container",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/apple/container.git",
+      "state" : {
+        "revision" : "6bdb647b69671c037e2188558ed2e5ba49af2e1a",
+        "version" : "0.10.0"
       }
     },
     {

@@ -67,7 +67,7 @@ cd demo
 ## Architecture
 
 ### Invariants (never violate)
-1. **`workspace.yaml`** (`.aib/workspace.yaml`) is the sole source of truth for all runtime config — `services.yaml` is eliminated
+1. **`workspace.yaml`** (`.aib/workspace.yaml`) is the sole source of truth for all runtime config — no separate runtime manifest file exists
 2. **`.aib/` exists only at the workspace root** — individual repositories are never invaded with AIB-specific files
 3. Execution boundary = service (language-agnostic HTTP unit)
 4. Local exposure via single port (Gateway)

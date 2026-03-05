@@ -14,7 +14,7 @@ Implemented:
 - `aib init` (workspace bootstrap + repo discovery)
 - `aib workspace list|scan|sync`
 - `aib emulator start|validate|status|stop` (runtime wrapper)
-- workspace-level `.aib/services.yaml` generation
+- workspace-level `.aib/workspace.yaml` generation
 - reverse proxy + supervisor runtime (`aib-dev` internals)
 
 Planned / partial:
@@ -29,11 +29,10 @@ AIB manages a **workspace**, not project initialization.
 - `.aib/` exists **only at the workspace root** — individual repositories are never invaded
 - Each Agent/MCP repo remains an independent git repository with no AIB-specific files
 - AIB discovers repos from native build files (`Package.swift`, `package.json`, etc.)
-- All service configuration is managed in the workspace-level `.aib/services.yaml`
+- All service configuration is managed in the workspace-level `.aib/workspace.yaml`
 
 Workspace directory structure:
-- `.aib/workspace.yaml` — discovered repos and workspace metadata
-- `.aib/services.yaml` — generated local runtime config (source of truth for emulator)
+- `.aib/workspace.yaml` — discovered repos + local runtime config (source of truth for emulator)
 - `.aib/generated/` — runtime artifacts (connection files, etc.)
 - `.aib/state/` — runtime state (PID files, etc.)
 - `.aib/logs/` — service logs

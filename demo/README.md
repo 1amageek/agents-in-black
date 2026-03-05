@@ -156,7 +156,7 @@ demo/
   agent-swift/       Swift Agent repo (Package.swift)
   mcp-node/          Node.js MCP repo (server.js)
   mcp-web/           Python MCP repo (server.py) — Web ツール
-  .aib/              workspace 設定・生成物（workspace.yaml, services.yaml, state, logs）
+  .aib/              workspace 設定・生成物（workspace.yaml, state, logs）
   test.sh            統合テストスクリプト
 ```
 

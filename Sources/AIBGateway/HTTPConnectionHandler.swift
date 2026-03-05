@@ -192,9 +192,7 @@ struct HTTPConnectionHandler: Sendable {
         var request = HTTPClientRequest(url: url)
         request.method = .RAW(value: head.method.rawValue)
         var headers = sanitizedRequestHeaders(from: head.headers, match: match)
-        if headers.first(name: "Host") == nil {
-            headers.replaceOrAdd(name: "Host", value: match.entry.backend.hostHeaderValue)
-        }
+        headers.replaceOrAdd(name: "Host", value: match.entry.backend.hostHeaderValue)
         headers.replaceOrAdd(name: "X-Forwarded-Proto", value: "http")
         headers.replaceOrAdd(name: "X-Forwarded-Host", value: head.headers.first(name: "Host") ?? "localhost")
         if match.entry.pathRewrite == .stripPrefix {
