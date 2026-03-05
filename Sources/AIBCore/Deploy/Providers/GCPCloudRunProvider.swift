@@ -162,7 +162,7 @@ public struct GCPCloudRunProvider: DeploymentProvider, Sendable {
     }
 
     public func buildBackendPreparationCommands(targetConfig: AIBDeployTargetConfig) -> [DeployCommand] {
-        let minFreeGiB = max(1, Int(targetConfig.providerConfig["appleContainerMinFreeGiB"] ?? "") ?? 8)
+        let minFreeGiB = max(1, Int(targetConfig.providerConfig["appleContainerMinFreeGiB"] ?? "") ?? 10)
         let minFreeKiB = minFreeGiB * 1024 * 1024
         let script = """
         set -euo pipefail
@@ -189,7 +189,7 @@ public struct GCPCloudRunProvider: DeploymentProvider, Sendable {
         free_gib="$((free_kb / 1024 / 1024))"
         echo "Free disk before build prep: ${free_gib}GiB (threshold: ${threshold_gib}GiB)"
 
-        if [ "$free_kb" -ge "$threshold_kb" ]; then
+        if [ "$free_kb" -gt "$threshold_kb" ]; then
           echo "Disk space is sufficient. Skipping apple/container cleanup."
           exit 0
         fi
@@ -321,6 +321,7 @@ public struct GCPCloudRunProvider: DeploymentProvider, Sendable {
         buildContext: String,
         targetConfig: AIBDeployTargetConfig
     ) -> [DeployCommand] {
+        let stagedContextEnabled = parseTruthyBool(targetConfig.providerConfig["appleContainerStageContext"])
         let dockerfileArgument: String
         if dockerfilePath.hasPrefix(buildContext + "/") {
             dockerfileArgument = String(dockerfilePath.dropFirst(buildContext.count + 1))
@@ -376,16 +377,55 @@ public struct GCPCloudRunProvider: DeploymentProvider, Sendable {
         echo "Build backend: apple-container"
         build_start="$(date +%s)"
         cd \(contextForShell)
+        stage_context="."
+        stage_dir=""
+        cleanup_staged_context() {
+          if [ -n "${stage_dir:-}" ] && [ -d "$stage_dir" ]; then
+            rm -rf "$stage_dir"
+            stage_dir=""
+          fi
+        }
+        if [ "\(stagedContextEnabled ? "1" : "0")" = "1" ] && [ -f .dockerignore ]; then
+          if grep -Eq '^[[:space:]]*!' .dockerignore; then
+            echo ".dockerignore contains negation patterns; skipping staged build context optimization."
+          elif command -v rsync >/dev/null 2>&1; then
+            stage_sync_start="$(date +%s)"
+            stage_dir="$(mktemp -d -t aib-container-context.XXXXXX)"
+            set +e
+            rsync -a --delete --exclude-from=.dockerignore ./ "$stage_dir"/
+            stage_sync_status=$?
+            set -e
+            if [ "$stage_sync_status" -eq 0 ]; then
+              stage_context="$stage_dir"
+              stage_sync_end="$(date +%s)"
+              echo "Prepared staged build context in $((stage_sync_end - stage_sync_start))s"
+            else
+              echo "Failed to stage build context with rsync (exit $stage_sync_status). Falling back to direct build context."
+              cleanup_staged_context
+            fi
+          else
+            echo "rsync not found; skipping staged build context optimization."
+          fi
+        fi
         build_log="$(mktemp -t aib-container-build.XXXXXX)"
         build_attempt=1
         build_max_attempts=2
+        staged_context_fallback_attempted=0
         while true; do
           set +e
-          container build --platform linux/amd64 --file \(dockerfileForShell) --tag \(imageForShell) . 2>&1 | tee "$build_log"
+          container build --platform linux/amd64 --file \(dockerfileForShell) --tag \(imageForShell) "$stage_context" 2>&1 | tee "$build_log"
           build_status=${PIPESTATUS[0]}
           set -e
           if [ "$build_status" -eq 0 ]; then
             break
+          fi
+
+          if [ "$stage_context" != "." ] && [ "$staged_context_fallback_attempted" -eq 0 ]; then
+            echo "Staged build context may be incompatible with this service. Retrying with direct build context..."
+            cleanup_staged_context
+            stage_context="."
+            staged_context_fallback_attempted=1
+            continue
           fi
 
           if grep -Eqi "ECONNRESET|npm error network aborted|connection reset by peer|TLS handshake timeout|i/o timeout|temporary failure" "$build_log" \
@@ -399,6 +439,7 @@ public struct GCPCloudRunProvider: DeploymentProvider, Sendable {
           fi
 
           rm -f "$build_log"
+          cleanup_staged_context
           exit "$build_status"
         done
         rm -f "$build_log"
@@ -428,11 +469,13 @@ public struct GCPCloudRunProvider: DeploymentProvider, Sendable {
           fi
 
           rm -f "$push_log"
+          cleanup_staged_context
           exit "$push_status"
         done
         rm -f "$push_log"
         push_end="$(date +%s)"
         echo "apple/container push duration: $((push_end - push_start))s"
+        cleanup_staged_context
         """
 
         return [
@@ -651,6 +694,18 @@ public struct GCPCloudRunProvider: DeploymentProvider, Sendable {
 
     private func shellQuote(_ value: String) -> String {
         "'\(value.replacingOccurrences(of: "'", with: "'\"'\"'"))'"
+    }
+
+    private func parseTruthyBool(_ raw: String?) -> Bool {
+        guard let value = raw?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() else {
+            return false
+        }
+        switch value {
+        case "1", "true", "yes", "on":
+            return true
+        default:
+            return false
+        }
     }
 
 }

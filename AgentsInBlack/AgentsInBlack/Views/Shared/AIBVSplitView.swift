@@ -73,7 +73,6 @@ private struct AIBVSplitViewRepresentable: NSViewRepresentable {
 
         // Restore proportions if we had them
         if totalOldHeight > 0, oldHeights.count == subviews.count {
-            splitView.layoutSubtreeIfNeeded()
             for (index, height) in oldHeights.enumerated() where index < splitView.arrangedSubviews.count {
                 let view = splitView.arrangedSubviews[index]
                 var frame = view.frame

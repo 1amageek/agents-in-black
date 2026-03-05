@@ -274,9 +274,11 @@ public actor ContainerProcessController: ProcessController {
             await stopForwarder(containerID: handle.containerID)
             return TerminationResult(terminatedGracefully: false, exitCode: nil)
         }
+        // Stop host publish first to prevent new inbound connections while
+        // the backend container is shutting down.
+        await stopForwarder(containerID: handle.containerID)
         do {
             try await container.stop()
-            await stopForwarder(containerID: handle.containerID)
             handle.containerState.isAlive.withLock { $0 = false }
             handle.monitorTask?.cancel()
             containers.removeValue(forKey: handle.containerID)
@@ -288,7 +290,6 @@ public actor ContainerProcessController: ProcessController {
                 "container_id": .string(handle.containerID),
                 "error": .string("\(error)"),
             ])
-            await stopForwarder(containerID: handle.containerID)
             handle.monitorTask?.cancel()
             containers.removeValue(forKey: handle.containerID)
             cleanupArtifacts(handle)
@@ -298,6 +299,9 @@ public actor ContainerProcessController: ProcessController {
     }
 
     public func killGroup(_ handle: ChildHandle) async {
+        // Stop host publish first to prevent new inbound connections while
+        // the backend container is terminating.
+        await stopForwarder(containerID: handle.containerID)
         if let container = containers[handle.containerID] {
             do {
                 try await container.kill(SIGKILL)
@@ -305,7 +309,6 @@ public actor ContainerProcessController: ProcessController {
                 // Best-effort — VM may already be dead
             }
         }
-        await stopForwarder(containerID: handle.containerID)
         handle.containerState.isAlive.withLock { $0 = false }
         handle.monitorTask?.cancel()
         containers.removeValue(forKey: handle.containerID)
