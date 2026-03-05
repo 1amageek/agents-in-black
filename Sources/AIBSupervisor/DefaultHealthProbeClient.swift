@@ -1,15 +1,12 @@
+import AsyncHTTPClient
 import Foundation
+import NIOCore
 
 public struct DefaultHealthProbeClient: HealthProbeClient {
-    private let session: URLSession
-    private let timeout: TimeInterval
+    private let timeout: TimeAmount
 
     public init(timeout: TimeInterval = 2.0) {
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.timeoutIntervalForRequest = timeout
-        configuration.timeoutIntervalForResource = timeout
-        self.session = URLSession(configuration: configuration)
-        self.timeout = timeout
+        self.timeout = .milliseconds(Int64(timeout * 1000))
     }
 
     public func checkLiveness(service: ServiceRuntime) async -> ProbeResult {
@@ -52,16 +49,16 @@ public struct DefaultHealthProbeClient: HealthProbeClient {
         guard let endpoint = service.backendEndpoint else {
             return .init(success: false, errorDescription: "missing backend endpoint")
         }
-        guard let url = URL(string: "\(endpoint.baseURLString)\(path)") else {
-            return .init(success: false, errorDescription: "invalid probe url")
-        }
-        var request = URLRequest(url: url)
-        request.timeoutInterval = timeout
+        let url = endpoint.requestURL(path: path)
+        var request = HTTPClientRequest(url: url)
+        request.method = .GET
+        // AsyncHTTPClient does not guarantee Host header synthesis for all URL schemes
+        // (notably http+unix). Always provide explicit authority from endpoint.
+        request.headers.replaceOrAdd(name: "Host", value: endpoint.hostHeaderValue)
         do {
-            let (_, response) = try await session.data(for: request)
-            let status = (response as? HTTPURLResponse)?.statusCode
-            let ok = status.map { 200 ... 299 ~= $0 } ?? false
-            return .init(success: ok, statusCode: status)
+            let response = try await HTTPClient.shared.execute(request, timeout: timeout)
+            let status = Int(response.status.code)
+            return .init(success: 200...299 ~= status, statusCode: status)
         } catch {
             return .init(success: false, errorDescription: "\(error)")
         }

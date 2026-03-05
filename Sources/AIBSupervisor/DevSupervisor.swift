@@ -1,17 +1,15 @@
 import AIBConfig
 import AIBGateway
 import AIBRuntimeCore
-import Darwin
 import Foundation
 import Logging
 import Synchronization
 
 public typealias ConfigProvider = @Sendable () async throws -> LoadedConfig
 
-/// Entry in the process registry for synchronous emergency cleanup.
-private struct ChildPIDEntry: Sendable {
-    let pid: pid_t
-    let usesDedicatedGroup: Bool
+/// Entry in the container registry for synchronous emergency cleanup.
+private struct ChildEntry: Sendable {
+    let containerID: String
 }
 
 public actor DevSupervisor {
@@ -27,9 +25,9 @@ public actor DevSupervisor {
     private let reloadEnabled: Bool
     private let additionalEnvironment: [String: String]
 
-    /// Thread-safe PID registry for synchronous emergency cleanup.
+    /// Thread-safe container ID registry for synchronous emergency cleanup.
     /// Accessible from any isolation domain via `nonisolated` methods.
-    private nonisolated let _activeChildPIDs = Mutex<[ChildPIDEntry]>([])
+    private nonisolated let _activeChildren = Mutex<[ChildEntry]>([])
 
     private var currentConfig: AIBConfig?
     private var configVersion: Int = 0
@@ -45,7 +43,7 @@ public actor DevSupervisor {
         gatewayPort: Int,
         reloadEnabled: Bool = true,
         additionalEnvironment: [String: String] = [:],
-        processController: ProcessController = DefaultProcessController(),
+        processController: ProcessController,
         healthClient: HealthProbeClient = DefaultHealthProbeClient(),
         logger: Logger
     ) {
@@ -61,21 +59,17 @@ public actor DevSupervisor {
         self.logMux = LogMux(logger: logger)
     }
 
-    public func startAll() async {
-        do {
-            let loaded = try await configProvider()
-            for warning in loaded.warnings {
-                logger.warning("Config warning", metadata: ["warning": "\(warning)"])
-            }
-            try await applyInitialConfig(loaded.config)
-            configFileMTime = fileMTime(path: watchFilePath)
-            if reloadEnabled {
-                startConfigPolling()
-            }
-            startLivenessMonitoring()
-        } catch {
-            logger.error("Failed to start supervisor", metadata: ["error": "\(error)"])
+    public func startAll() async throws {
+        let loaded = try await configProvider()
+        for warning in loaded.warnings {
+            logger.warning("Config warning", metadata: ["warning": "\(warning)"])
         }
+        try await applyInitialConfig(loaded.config)
+        configFileMTime = fileMTime(path: watchFilePath)
+        if reloadEnabled {
+            startConfigPolling()
+        }
+        startLivenessMonitoring()
     }
 
     public func reloadConfig(trigger: ReloadTrigger) async {
@@ -142,10 +136,12 @@ public actor DevSupervisor {
         for service in config.services {
             runtimes[service.id] = ServiceRuntime(service: service, configVersion: configVersion)
         }
+        // Publish mount paths immediately so early requests get service_unavailable (not no_route)
+        // while the remaining services are still booting.
+        try await publishRoutes()
         for service in config.services {
             try await prepareAndStart(service: service, reason: .initialStart)
         }
-        try await publishRoutes()
     }
 
     private func applyReloadedConfig(_ newConfig: AIBConfig) async throws {
@@ -204,10 +200,8 @@ public actor DevSupervisor {
     }
 
     private func prepareAndStart(service: ServiceConfig, reason: RestartReason) async throws {
-        if service.watchMode == .external {
-            try await runInstallIfNeeded(service: service)
-            try await runBuildIfNeeded(service: service)
-        }
+        // install/build commands are handled by the container entrypoint
+        // (chained by ContainerProcessController.spawn)
         try await startService(id: service.id)
         logger.info("Service started", metadata: ["service_id": .string(service.id.rawValue), "reason": .string(reason.rawValue)])
     }
@@ -231,12 +225,17 @@ public actor DevSupervisor {
             gatewayPort: gatewayPort,
             configBaseDirectory: configBaseDirectory
         )
-        registerChildPID(handle)
+        registerContainer(handle)
         logMux.attach(handle)
 
         runtime.childHandle = handle
         runtime.resolvedPort = resolvedPort
-        runtime.backendEndpoint = BackendEndpoint(port: resolvedPort)
+        let endpoint = BackendEndpoint(
+            host: "127.0.0.1",
+            port: resolvedPort,
+            unixSocketPath: handle.unixSocketPath
+        )
+        runtime.backendEndpoint = endpoint
         runtimes[id] = runtime
 
         let ready = try await waitForReadiness(id: id)
@@ -244,7 +243,7 @@ public actor DevSupervisor {
             runtime = runtimes[id] ?? runtime
             runtime.lifecycleState = .ready
             runtimes[id] = runtime
-            await gatewayControl.markServiceReady(id, endpoint: BackendEndpoint(port: resolvedPort))
+            await gatewayControl.markServiceReady(id, endpoint: endpoint)
         } else {
             runtime = runtimes[id] ?? runtime
             runtime.lifecycleState = .backoff
@@ -258,14 +257,35 @@ public actor DevSupervisor {
         guard let runtime = runtimes[id] else { return false }
         let timeout = try runtime.service.health.startupReadyTimeout.parse().timeInterval
         let deadline = Date().addingTimeInterval(timeout)
+        var lastError: String?
         while Date() < deadline {
-            if let handle = (runtimes[id]?.childHandle), !handle.process.isRunning {
+            if let handle = runtimes[id]?.childHandle, !handle.isRunning {
+                logger.warning("Container exited before becoming ready", metadata: [
+                    "service_id": .string(id.rawValue),
+                ])
                 return false
             }
-            let probe = await healthClient.checkReadiness(service: runtimes[id] ?? runtime)
+            let currentRuntime = runtimes[id] ?? runtime
+            let probe = await healthClient.checkReadiness(service: currentRuntime)
             if probe.success { return true }
-            try await Task.sleep(for: .milliseconds(200))
+            // Log probe failure details (deduplicated by error message)
+            let error = probe.errorDescription ?? "status=\(probe.statusCode ?? -1)"
+            if error != lastError {
+                let endpoint = currentRuntime.backendEndpoint
+                logger.debug("Readiness probe failed", metadata: [
+                    "service_id": .string(id.rawValue),
+                    "endpoint": .string(endpoint?.baseURLString ?? "none"),
+                    "error": .string(error),
+                ])
+                lastError = error
+            }
+            try await Task.sleep(for: .milliseconds(500))
         }
+        logger.warning("Readiness timeout exceeded", metadata: [
+            "service_id": .string(id.rawValue),
+            "timeout_seconds": .string("\(timeout)"),
+            "last_error": .string(lastError ?? "unknown"),
+        ])
         return false
     }
 
@@ -323,66 +343,16 @@ public actor DevSupervisor {
         if !result.terminatedGracefully {
             await processController.killGroup(handle)
         }
-        unregisterChildPID(handle)
+        unregisterContainer(handle)
         logMux.detach(handle)
 
         runtime.childHandle = nil
         runtime.backendEndpoint = nil
         runtime.resolvedPort = nil
-        runtime.lastExitStatus = handle.process.terminationStatus
+        runtime.lastExitStatus = handle.terminationStatus
         runtime.lifecycleState = .stopped
         runtimes[id] = runtime
         await gatewayControl.markServiceUnavailable(id, reason: .startup)
-    }
-
-    private func runBuildIfNeeded(service: ServiceConfig) async throws {
-        guard let build = service.build else { return }
-        try await runOneShotCommand(argv: build, service: service, label: "build")
-    }
-
-    private func runInstallIfNeeded(service: ServiceConfig) async throws {
-        guard let install = service.install else { return }
-        // v1: run install on startup/restart; lockfile-specific optimization is deferred.
-        try await runOneShotCommand(argv: install, service: service, label: "install")
-    }
-
-    private func runOneShotCommand(argv: [String], service: ServiceConfig, label: String) async throws {
-        guard let command = argv.first else { return }
-        let process = Process()
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = pipe
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = [command] + Array(argv.dropFirst())
-        process.currentDirectoryURL = URL(fileURLWithPath: service.cwd.map { path in
-            URL(fileURLWithPath: path, relativeTo: URL(fileURLWithPath: configBaseDirectory)).standardizedFileURL.path
-        } ?? configBaseDirectory)
-
-        pipe.fileHandleForReading.readabilityHandler = { [logger, serviceID = service.id.rawValue] handle in
-            let data = handle.availableData
-            guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
-            text.split(whereSeparator: \.isNewline).forEach { line in
-                logger.info("[\(serviceID)][\(label)] \(line)")
-            }
-        }
-
-        do {
-            try process.run()
-        } catch {
-            throw ProcessSpawnError("Failed to run \(label)", metadata: [
-                "service_id": service.id.rawValue,
-                "command": argv.joined(separator: " "),
-                "error": "\(error)",
-            ])
-        }
-        process.waitUntilExit()
-        pipe.fileHandleForReading.readabilityHandler = nil
-        if process.terminationStatus != 0 {
-            throw ProcessSpawnError("\(label) failed", metadata: [
-                "service_id": service.id.rawValue,
-                "termination_status": "\(process.terminationStatus)",
-            ])
-        }
     }
 
     private func startConfigPolling() {
@@ -510,39 +480,28 @@ public actor DevSupervisor {
         return Int(UInt16(bigEndian: addr.sin_port))
     }
 
-    // MARK: - Child PID Registry (thread-safe, synchronous access)
+    // MARK: - Container Registry (thread-safe, synchronous access)
 
-    private func registerChildPID(_ handle: ChildHandle) {
-        let pid = handle.process.processIdentifier
-        guard pid > 0 else { return }
-        _activeChildPIDs.withLock { entries in
-            entries.append(ChildPIDEntry(pid: pid, usesDedicatedGroup: handle.usesDedicatedProcessGroup))
+    private func registerContainer(_ handle: ChildHandle) {
+        _activeChildren.withLock { entries in
+            entries.append(ChildEntry(containerID: handle.containerID))
         }
     }
 
-    private func unregisterChildPID(_ handle: ChildHandle) {
-        let pid = handle.process.processIdentifier
-        guard pid > 0 else { return }
-        _activeChildPIDs.withLock { entries in
-            entries.removeAll { $0.pid == pid }
+    private func unregisterContainer(_ handle: ChildHandle) {
+        _activeChildren.withLock { entries in
+            entries.removeAll { $0.containerID == handle.containerID }
         }
     }
 
-    /// Synchronously send SIGKILL to all tracked child process groups.
+    /// Synchronously mark all tracked containers as abandoned.
     /// Safe to call from any isolation domain — does not require `await`.
     /// Used for emergency cleanup when the app is about to terminate.
+    ///
+    /// With the Containerization library, VMs run in-process. When the host
+    /// process exits, all VMs are automatically terminated by the hypervisor.
+    /// This method just clears the registry to prevent double-cleanup.
     public nonisolated func forceTerminateAll() {
-        let entries = _activeChildPIDs.withLock { entries in
-            let copy = entries
-            entries.removeAll()
-            return copy
-        }
-        for entry in entries {
-            if entry.usesDedicatedGroup {
-                Darwin.kill(-entry.pid, SIGKILL)
-            } else {
-                Darwin.kill(entry.pid, SIGKILL)
-            }
-        }
+        _activeChildren.withLock { $0.removeAll() }
     }
 }

@@ -1,20 +1,83 @@
 import AIBConfig
 import AIBRuntimeCore
 import Foundation
+import Synchronization
+
+/// Shared mutable state for a container-backed process.
+/// Uses reference semantics so `ChildHandle` (a struct) can be copied
+/// while sharing the same state across the supervisor and monitor task.
+/// `Mutex<T>` is `~Copyable` so it must live inside a class, not a struct.
+public final class ContainerState: Sendable {
+    let isAlive: Mutex<Bool>
+    let exitCode: Mutex<Int32?>
+
+    public init() {
+        self.isAlive = Mutex(true)
+        self.exitCode = Mutex(nil)
+    }
+}
 
 public struct ChildHandle: @unchecked Sendable {
     public let serviceID: ServiceID
-    public let process: Process
-    public let stdoutPipe: Pipe
-    public let stderrPipe: Pipe
+    public let containerID: String
+    public let containerState: ContainerState
     public let startedAt: Date
     public let resolvedPort: Int
-    public let usesDedicatedProcessGroup: Bool
+
+    /// Path to the host-side Unix domain socket exposed via vsock relay.
+    /// Used by the gateway and health probes to reach the container service.
+    public let unixSocketPath: String?
+
+    /// Host-side directory containing generated entrypoint scripts.
+    /// Cleaned up on container termination.
+    public let scriptDir: URL?
+
+    /// Background task that monitors container exit status.
+    let monitorTask: Task<Void, Never>?
+    /// Background task that streams container logs.
+    let logTask: Task<Void, Never>?
+
+    public init(
+        serviceID: ServiceID,
+        containerID: String,
+        containerState: ContainerState,
+        startedAt: Date,
+        resolvedPort: Int,
+        unixSocketPath: String? = nil,
+        scriptDir: URL? = nil,
+        monitorTask: Task<Void, Never>?,
+        logTask: Task<Void, Never>?
+    ) {
+        self.serviceID = serviceID
+        self.containerID = containerID
+        self.containerState = containerState
+        self.startedAt = startedAt
+        self.resolvedPort = resolvedPort
+        self.unixSocketPath = unixSocketPath
+        self.scriptDir = scriptDir
+        self.monitorTask = monitorTask
+        self.logTask = logTask
+    }
+
+    /// Whether the container is still running.
+    public var isRunning: Bool {
+        containerState.isAlive.withLock { $0 }
+    }
+
+    /// Exit code from the container process, or 0 if still running.
+    public var terminationStatus: Int32 {
+        containerState.exitCode.withLock { $0 ?? 0 }
+    }
 }
 
 public struct TerminationResult: Sendable {
     public let terminatedGracefully: Bool
     public let exitCode: Int32?
+
+    public init(terminatedGracefully: Bool, exitCode: Int32?) {
+        self.terminatedGracefully = terminatedGracefully
+        self.exitCode = exitCode
+    }
 }
 
 public protocol ProcessController: Sendable {

@@ -5,4 +5,5 @@ public enum AIBEmulatorEvent: Sendable {
     case log(AIBEmulatorLogEntry)
     case serviceSnapshotsChanged([AIBServiceRuntimeSnapshot])
     case activeServicesChanged(Set<String>)
+    case kernelDownloadStarted(Progress)
 }

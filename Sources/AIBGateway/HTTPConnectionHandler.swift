@@ -187,14 +187,14 @@ struct HTTPConnectionHandler: Sendable {
         match: RouteMatch,
         trace: TraceContext
     ) async throws -> UpstreamResponse {
-        var url = match.entry.backend.baseURLString + match.backendPath
-        if let query = match.query, !query.isEmpty {
-            url += "?\(query)"
-        }
+        let url = match.entry.backend.requestURL(path: match.backendPath, query: match.query)
 
         var request = HTTPClientRequest(url: url)
         request.method = .RAW(value: head.method.rawValue)
         var headers = sanitizedRequestHeaders(from: head.headers, match: match)
+        if headers.first(name: "Host") == nil {
+            headers.replaceOrAdd(name: "Host", value: match.entry.backend.hostHeaderValue)
+        }
         headers.replaceOrAdd(name: "X-Forwarded-Proto", value: "http")
         headers.replaceOrAdd(name: "X-Forwarded-Host", value: head.headers.first(name: "Host") ?? "localhost")
         if match.entry.pathRewrite == .stripPrefix {

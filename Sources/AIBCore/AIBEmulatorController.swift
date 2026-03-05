@@ -124,9 +124,9 @@ public final class AIBEmulatorController {
         serviceSnapshotPollTask = nil
         finishEventStreams()
 
-        // Synchronously kill all child processes.
+        // Synchronously stop all containers.
         // This does not require `await` because `forceTerminateAll()` is
-        // nonisolated and uses a Mutex-protected PID registry internally.
+        // nonisolated and uses a Mutex-protected container registry internally.
         supervisor?.forceTerminateAll()
         supervisor = nil
         gateway = nil
@@ -182,6 +182,9 @@ public final class AIBEmulatorController {
                     gatewayPort: gatewayPort
                 )
             }
+            let processController = ContainerProcessController(logger: logger)
+            emit(.kernelDownloadStarted(processController.setupProgress))
+
             let supervisor = DevSupervisor(
                 gatewayControl: gatewayControl,
                 configProvider: configProvider,
@@ -189,9 +192,10 @@ public final class AIBEmulatorController {
                 gatewayPort: loaded.config.gateway.port,
                 reloadEnabled: true,
                 additionalEnvironment: additionalEnvironment,
+                processController: processController,
                 logger: logger
             )
-            await supervisor.startAll()
+            try await supervisor.startAll()
 
             self.gateway = gateway
             self.supervisor = supervisor

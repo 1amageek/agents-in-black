@@ -6,8 +6,11 @@ Written in Swift, optimized for Apple Silicon.
 
 - Repository: https://github.com/apple/container
 - API Docs: https://apple.github.io/container/documentation/
-- Swift Package: `ContainerClient` (product of `apple/container`)
-- Requirements: Apple Silicon + macOS 26+
+- Swift Package: `ContainerAPIClient` (product of `apple/container`)
+- Latest Version: **0.10.0** (Feb 2026)
+- swift-tools-version: 6.2
+- Depends on: `apple/containerization` 0.26.3
+- Requirements: Apple Silicon + macOS 15+ (macOS 26+ recommended for full features)
 - Daemon: `container system start` must be running
 
 ## Architecture
@@ -28,15 +31,17 @@ Key properties:
 // Package.swift
 .package(url: "https://github.com/apple/container.git", from: "0.10.0"),
 
-// Target dependency
-.product(name: "ContainerClient", package: "container"),
+// Target dependency — the client library product
+.product(name: "ContainerAPIClient", package: "container"),
 ```
+
+`import ContainerAPIClient` to use the types below.
 
 ## Core Types
 
 ### ContainerConfiguration
 
-Container setup. Passed to `ClientContainer.create()`.
+Container setup. Passed to `ContainerClient.create()`.
 
 ```swift
 struct ContainerConfiguration: Codable, Sendable {
@@ -121,43 +126,59 @@ struct Filesystem: Codable, Sendable {
 }
 ```
 
-### ClientContainer
+### ContainerClient (0.10.0 — reworked)
 
-Represents a running or created container. Primary interface for container lifecycle.
+Generic client for all container operations. Holds a reusable XPC connection.
+In 0.10.0, the old `ClientContainer` per-instance type was removed and replaced with this
+stateless client where every method takes an `id` parameter.
 
 ```swift
-struct ClientContainer: Codable, Sendable {
-    let configuration: ContainerConfiguration
-    var id: String
-    let status: RuntimeStatus               // .unknown, .stopped, .running
-    var initProcess: any ClientProcess
-    let networks: [Attachment]
-    var platform: Platform
+struct ContainerClient: Sendable {
+    init()  // Creates XPC connection to container-apiserver
 
     // Lifecycle
-    static func create(
+    func create(
         configuration: ContainerConfiguration,
-        options: ContainerCreateOptions,
-        kernel: Kernel
-    ) async throws -> ClientContainer
+        options: ContainerCreateOptions = .default,
+        kernel: Kernel,
+        initImage: String? = nil
+    ) async throws
 
-    func bootstrap() async throws -> any ClientProcess
-    func stop(opts: ContainerStopOptions) async throws
-    func delete() async throws
-    func kill(_ signal: Int32) async throws
-
-    // Process management
-    func createProcess(id: String, configuration: ProcessConfiguration) async throws -> any ClientProcess
-
-    // I/O
-    func logs() async throws -> [FileHandle]
-    func dial(_ port: UInt32) async throws -> FileHandle
+    func bootstrap(id: String, stdio: [FileHandle?]) async throws -> ClientProcess
+    func stop(id: String, opts: ContainerStopOptions = .default) async throws
+    func delete(id: String, force: Bool = false) async throws
+    func kill(id: String, signal: Int32) async throws
 
     // Query
-    static func get(id: String) async throws -> ClientContainer
-    static func list() async throws -> [ClientContainer]
+    func list(filters: ContainerListFilters = .all) async throws -> [ContainerSnapshot]
+    func get(id: String) async throws -> ContainerSnapshot
+
+    // Process management
+    func createProcess(
+        containerId: String,
+        processId: String,
+        configuration: ProcessConfiguration,
+        stdio: [FileHandle?]
+    ) async throws -> ClientProcess
+
+    // I/O
+    func logs(id: String) async throws -> [FileHandle]
+    func dial(id: String, port: UInt32) async throws -> FileHandle
+
+    // Stats
+    func stats(id: String) async throws -> ContainerStats
+    func diskUsage(id: String) async throws -> UInt64
+
+    // Export
+    func export(id: String, archive: URL) async throws
 }
 ```
+
+**Key differences from pre-0.10.0:**
+- `ContainerClient` is instantiated once and reused (holds XPC connection)
+- `create()` returns `Void` (not a container handle) — use `get(id:)` to query state
+- `bootstrap()` takes `stdio` parameter directly and returns `ClientProcess`
+- All methods take `id: String` to identify the target container
 
 ### ContainerCreateOptions
 
@@ -270,7 +291,7 @@ struct ClientNetwork {
 
 ### SandboxClient
 
-Lower-level interface for sandbox (VM) management. Used internally by `ClientContainer`.
+Lower-level interface for sandbox (VM) management. Used internally by `ContainerClient`.
 
 ```swift
 struct SandboxClient: Codable, Sendable {
@@ -303,12 +324,15 @@ struct ContainerSnapshot: Codable, Sendable {
 ### 1. Create and Run
 
 ```swift
-import ContainerClient
+import ContainerAPIClient
 
-// 1. Ensure daemon is running
+// 1. Create a reusable client (holds XPC connection)
+let client = ContainerClient()
+
+// 2. Ensure daemon is running
 try await ClientHealthCheck.ping(timeout: .seconds(5))
 
-// 2. Pull or fetch the image
+// 3. Pull or fetch the image
 let image = try await ClientImage.pull(
     reference: "docker.io/node:22-alpine",
     platform: nil,
@@ -316,7 +340,7 @@ let image = try await ClientImage.pull(
     progressUpdate: nil
 )
 
-// 3. Configure the process
+// 4. Configure the process
 let process = ProcessConfiguration(
     executable: "/usr/local/bin/node",
     arguments: ["server.js"],
@@ -331,16 +355,17 @@ let process = ProcessConfiguration(
     rlimits: []
 )
 
-// 4. Configure the container
+// 5. Configure the container
+let containerID = "my-service"
 var config = ContainerConfiguration(
-    id: "my-service",
+    id: containerID,
     image: image.description,
     process: process
 )
 config.resources.cpus = 2
 config.resources.memoryInBytes = 512 * 1024 * 1024  // 512 MiB
 
-// 5. Add VirtioFS mount for source code
+// 6. Add VirtioFS mount for source code
 config.mounts = [
     .virtiofs(
         source: "/Users/dev/my-project/src",
@@ -349,20 +374,18 @@ config.mounts = [
     )
 ]
 
-// 6. Create the container
-let container = try await ClientContainer.create(
-    configuration: config,
-    options: .default,
-    kernel: .default
+// 7. Create the container (returns Void)
+try await client.create(configuration: config, kernel: .default)
+
+// 8. Bootstrap — starts the VM and init process, returns ClientProcess
+let stdoutPipe = Pipe()
+let stderrPipe = Pipe()
+let initProcess = try await client.bootstrap(
+    id: containerID,
+    stdio: [nil, stdoutPipe.fileHandleForWriting, stderrPipe.fileHandleForWriting]
 )
 
-// 7. Bootstrap (start the VM init process)
-let initProcess = try await container.bootstrap()
-
-// 8. Start the process with stdio handles
-try await initProcess.start([nil, nil, nil])  // stdin, stdout, stderr
-
-// 9. Wait for exit (blocking)
+// 9. Wait for exit (blocking async)
 let exitCode = try await initProcess.wait()
 ```
 
@@ -370,7 +393,7 @@ let exitCode = try await initProcess.wait()
 
 ```swift
 // Get stdout/stderr log handles
-let handles = try await container.logs()
+let handles = try await client.logs(id: containerID)
 // handles[0] = stdout, handles[1] = stderr
 
 // Read asynchronously
@@ -396,19 +419,20 @@ let execConfig = ProcessConfiguration(
     rlimits: []
 )
 
-let execProcess = try await container.createProcess(
-    id: "exec-ls",
-    configuration: execConfig
+let execProcess = try await client.createProcess(
+    containerId: containerID,
+    processId: "exec-ls",
+    configuration: execConfig,
+    stdio: [nil, nil, nil]
 )
-try await execProcess.start([nil, nil, nil])
 let code = try await execProcess.wait()
 ```
 
 ### 4. Port Forwarding (dial)
 
 ```swift
-// Connect to container port 8080 from the host
-let fileHandle = try await container.dial(8080)
+// Connect to container port 8080 from the host via vsock
+let fileHandle = try await client.dial(id: containerID, port: 8080)
 // fileHandle is a bidirectional socket to the container port
 ```
 
@@ -421,22 +445,24 @@ container run -d --rm -p 127.0.0.1:8080:8000 node:latest npx http-server -p 8000
 
 ```swift
 // Graceful stop with timeout
-try await container.stop(opts: .default)
+try await client.stop(id: containerID)
 // or with custom timeout and signal
-try await container.stop(opts: ContainerStopOptions(timeoutInSeconds: 10, signal: 15))
+try await client.stop(id: containerID, opts: ContainerStopOptions(timeoutInSeconds: 10, signal: 15))
 
 // Delete container resources
-try await container.delete()
+try await client.delete(id: containerID)
+// or force delete
+try await client.delete(id: containerID, force: true)
 
 // Or send a signal directly
-try await container.kill(SIGTERM)
+try await client.kill(id: containerID, signal: SIGTERM)
 ```
 
 ### 6. Auto-Remove
 
 ```swift
 // Container auto-removes when stopped
-let container = try await ClientContainer.create(
+try await client.create(
     configuration: config,
     options: ContainerCreateOptions(autoRemove: true),
     kernel: .default
@@ -509,8 +535,8 @@ container run --rm --network default alpine/curl curl http://db.test:5432
 ### API: dial()
 
 ```swift
-// Connect to a port inside the container
-let handle = try await container.dial(8080)
+// Connect to a port inside the container via vsock
+let handle = try await client.dial(id: containerID, port: 8080)
 // Returns a FileHandle for bidirectional TCP communication
 ```
 
@@ -567,10 +593,11 @@ config.resources.memoryInBytes = 2 * 1024 * 1024 * 1024  // 2 GiB
 
 ## Error Handling
 
-All async methods throw errors. Key error scenarios:
+All async methods throw `ContainerizationError`. Key error scenarios:
 - Daemon not running: `ClientHealthCheck.ping()` fails
 - Image not found: `ClientImage.get()` / `pull()` throws
-- Container already exists: `ClientContainer.create()` with duplicate ID throws
+- Container already exists: `client.create()` with duplicate ID throws
+- Container not found: `client.get(id:)` throws `.notFound`
 - Container not running: `bootstrap()`, `stop()` on wrong state throws
 
 ## CLI Quick Reference

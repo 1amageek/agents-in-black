@@ -5,7 +5,7 @@ import PackageDescription
 let package = Package(
     name: "AgentsInBlack",
     platforms: [
-        .macOS(.v15),
+        .macOS(.v26),
     ],
     products: [
         .executable(name: "aib-dev", targets: ["AIBCLI"]),
@@ -22,6 +22,7 @@ let package = Package(
         .package(url: "https://github.com/swift-server/async-http-client.git", from: "1.25.0"),
         .package(url: "https://github.com/apple/swift-log.git", from: "1.6.0"),
         .package(url: "https://github.com/jpsim/Yams", from: "6.2.0"),
+        .package(url: "https://github.com/apple/containerization.git", from: "0.26.0"),
     ],
     targets: [
         .target(
@@ -69,6 +70,8 @@ let package = Package(
                 "AIBGateway",
                 .product(name: "AsyncHTTPClient", package: "async-http-client"),
                 .product(name: "Logging", package: "swift-log"),
+                .product(name: "Containerization", package: "containerization"),
+                .product(name: "ContainerizationExtras", package: "containerization"),
             ]
         ),
         .target(

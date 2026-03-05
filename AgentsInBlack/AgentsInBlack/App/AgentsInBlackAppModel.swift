@@ -59,6 +59,7 @@ final class AgentsInBlackAppModel {
     let terminalManager = TerminalManager()
 
     var emulatorState: EmulatorState = .stopped
+    var kernelDownloadProgress: Progress?
     var emulatorOutput: String = ""
     var serviceLogOutputByServiceID: [String: String] = [:]
     var serviceSnapshotsByID: [String: AIBServiceRuntimeSnapshot] = [:]
@@ -1807,6 +1808,7 @@ final class AgentsInBlackAppModel {
             switch lifecycle {
             case .stopped:
                 emulatorState = .stopped
+                kernelDownloadProgress = nil
                 serviceSnapshotsByID = [:]
                 activeServiceIDs = []
                 rebuildAllSidebarStatuses()
@@ -1815,12 +1817,14 @@ final class AgentsInBlackAppModel {
                 rebuildAllSidebarStatuses()
             case .running(let pid, let port):
                 emulatorState = .running(pid: pid, port: port)
+                kernelDownloadProgress = nil
                 rebuildAllSidebarStatuses()
             case .stopping:
                 emulatorState = .stopping
                 rebuildAllSidebarStatuses()
             case .failed(let message):
                 emulatorState = .error(message)
+                kernelDownloadProgress = nil
                 serviceSnapshotsByID = [:]
                 activeServiceIDs = []
                 setError("Failed to start emulator: \(message)")
@@ -1841,6 +1845,8 @@ final class AgentsInBlackAppModel {
             rebuildAllSidebarStatuses()
         case .activeServicesChanged(let serviceIDs):
             activeServiceIDs = serviceIDs
+        case .kernelDownloadStarted(let progress):
+            kernelDownloadProgress = progress
         }
     }
 

@@ -134,11 +134,20 @@ struct ToolbarActivityView: View {
     private var activityLabel: some View {
         HStack(spacing: 5) {
             activityIndicator
-            Text(model.emulatorState.label)
+            Text(activityLabelText)
                 .font(.caption.weight(.medium))
                 .foregroundStyle(activityColor)
                 .lineLimit(1)
         }
+    }
+
+    private var activityLabelText: String {
+        if case .starting = model.emulatorState,
+           model.kernelDownloadProgress != nil
+        {
+            return "Downloading kernel..."
+        }
+        return model.emulatorState.label
     }
 
     @ViewBuilder
@@ -148,7 +157,16 @@ struct ToolbarActivityView: View {
             Circle()
                 .fill(.green)
                 .frame(width: 6, height: 6)
-        case .starting, .stopping:
+        case .starting:
+            if let progress = model.kernelDownloadProgress {
+                ProgressView(progress)
+                    .progressViewStyle(.linear)
+                    .frame(width: 80)
+            } else {
+                ProgressView()
+                    .controlSize(.mini)
+            }
+        case .stopping:
             ProgressView()
                 .controlSize(.mini)
         case .error:

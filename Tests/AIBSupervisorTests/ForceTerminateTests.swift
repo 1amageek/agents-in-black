@@ -1,4 +1,3 @@
-import Darwin
 import Foundation
 import Logging
 import Synchronization
@@ -22,13 +21,28 @@ private struct AlwaysReadyHealthClient: HealthProbeClient {
     }
 }
 
-/// Process controller that records spawned PIDs for post-test verification.
-private final class RecordingProcessController: ProcessController, Sendable {
-    private let real = DefaultProcessController()
-    private let _spawnedPIDs = Mutex<[pid_t]>([])
+/// Health probe client that marks only one service as ready.
+private struct SelectiveReadyHealthClient: HealthProbeClient {
+    let readyServiceID: ServiceID
 
-    var spawnedPIDs: [pid_t] {
-        _spawnedPIDs.withLock { $0 }
+    func checkLiveness(service: ServiceRuntime) async -> ProbeResult {
+        ProbeResult(success: true, statusCode: 200)
+    }
+
+    func checkReadiness(service: ServiceRuntime) async -> ProbeResult {
+        if service.service.id == readyServiceID {
+            return ProbeResult(success: true, statusCode: 200)
+        }
+        return ProbeResult(success: false, statusCode: 503)
+    }
+}
+
+/// Process controller that creates mock container handles without real containers.
+private final class MockProcessController: ProcessController, Sendable {
+    private let _spawnedIDs = Mutex<[String]>([])
+
+    var spawnedIDs: [String] {
+        _spawnedIDs.withLock { $0 }
     }
 
     func spawn(
@@ -37,31 +51,30 @@ private final class RecordingProcessController: ProcessController, Sendable {
         gatewayPort: Int,
         configBaseDirectory: String
     ) async throws -> ChildHandle {
-        let handle = try await real.spawn(
-            service: service,
+        let id = "test-\(service.id.rawValue.replacingOccurrences(of: "/", with: "-"))-\(UUID().uuidString.prefix(4))"
+        _spawnedIDs.withLock { $0.append(id) }
+        return ChildHandle(
+            serviceID: service.id,
+            containerID: id,
+            containerState: ContainerState(),
+            startedAt: Date(),
             resolvedPort: resolvedPort,
-            gatewayPort: gatewayPort,
-            configBaseDirectory: configBaseDirectory
+            monitorTask: nil,
+            logTask: nil
         )
-        let pid = handle.process.processIdentifier
-        _spawnedPIDs.withLock { $0.append(pid) }
-        return handle
     }
 
     func terminateGroup(_ handle: ChildHandle, grace: Duration) async -> TerminationResult {
-        await real.terminateGroup(handle, grace: grace)
+        handle.containerState.isAlive.withLock { $0 = false }
+        return TerminationResult(terminatedGracefully: true, exitCode: 0)
     }
 
     func killGroup(_ handle: ChildHandle) async {
-        await real.killGroup(handle)
+        handle.containerState.isAlive.withLock { $0 = false }
     }
 }
 
 // MARK: - Helpers
-
-private func isProcessAlive(_ pid: pid_t) -> Bool {
-    Darwin.kill(pid, 0) == 0
-}
 
 private func makeSleepServiceConfig(id: String = "test/sleeper") -> ServiceConfig {
     ServiceConfig(
@@ -75,11 +88,27 @@ private func makeSleepServiceConfig(id: String = "test/sleeper") -> ServiceConfi
     )
 }
 
+private func makeServiceConfig(
+    id: String,
+    mountPath: String,
+    startupReadyTimeout: DurationString
+) -> ServiceConfig {
+    ServiceConfig(
+        id: ServiceID(id),
+        mountPath: mountPath,
+        port: 0,
+        run: ["sleep", "9999"],
+        watchMode: .external,
+        health: ServiceHealthConfig(startupReadyTimeout: startupReadyTimeout),
+        restart: ServiceRestartConfig()
+    )
+}
+
 // MARK: - Tests
 
 @Test(.timeLimit(.minutes(1)))
-func forceTerminateAllKillsChildProcesses() async throws {
-    let controller = RecordingProcessController()
+func forceTerminateAllDoesNotCrashWithMockContainers() async throws {
+    let controller = MockProcessController()
     let config = AIBConfig(
         version: 1,
         gateway: GatewayConfig(port: 0),
@@ -99,24 +128,18 @@ func forceTerminateAllKillsChildProcesses() async throws {
         logger: Logger(label: "test")
     )
 
-    await supervisor.startAll()
+    try await supervisor.startAll()
 
     let snapshots = await supervisor.serviceStatusSnapshots()
     #expect(snapshots.count == 1)
     #expect(snapshots[0].lifecycleState == .ready)
 
-    let pids = controller.spawnedPIDs
-    #expect(pids.count == 1)
-    let pid = pids[0]
-    #expect(isProcessAlive(pid))
+    let ids = controller.spawnedIDs
+    #expect(ids.count == 1)
 
     // forceTerminateAll is nonisolated — no await required.
+    // With mock containers, the CLI `container stop` will fail silently (best-effort).
     supervisor.forceTerminateAll()
-
-    // Allow time for SIGKILL to take effect.
-    try await Task.sleep(for: .milliseconds(200))
-
-    #expect(!isProcessAlive(pid))
 
     // Cleanup: stop the supervisor to cancel internal tasks.
     await supervisor.stopAll(graceful: false)
@@ -129,7 +152,7 @@ func forceTerminateAllIsIdempotent() async throws {
         gateway: GatewayConfig(port: 0),
         services: [makeSleepServiceConfig()]
     )
-    let controller = RecordingProcessController()
+    let controller = MockProcessController()
     let configProvider: ConfigProvider = {
         LoadedConfig(config: config, warnings: [], configPath: "/tmp")
     }
@@ -144,23 +167,18 @@ func forceTerminateAllIsIdempotent() async throws {
         logger: Logger(label: "test")
     )
 
-    await supervisor.startAll()
-
-    let pid = controller.spawnedPIDs[0]
-    #expect(isProcessAlive(pid))
+    try await supervisor.startAll()
 
     // Call twice — second call must not crash.
     supervisor.forceTerminateAll()
-    try await Task.sleep(for: .milliseconds(100))
     supervisor.forceTerminateAll()
-
-    #expect(!isProcessAlive(pid))
 
     await supervisor.stopAll(graceful: false)
 }
 
 @Test(.timeLimit(.minutes(1)))
 func forceTerminateAllOnEmptySupervisorDoesNotCrash() {
+    let controller = MockProcessController()
     let configProvider: ConfigProvider = {
         LoadedConfig(
             config: AIBConfig(version: 1, gateway: GatewayConfig(port: 0), services: []),
@@ -174,16 +192,17 @@ func forceTerminateAllOnEmptySupervisorDoesNotCrash() {
         watchFilePath: "/tmp/workspace.yaml",
         gatewayPort: 0,
         reloadEnabled: false,
+        processController: controller,
         logger: Logger(label: "test")
     )
 
-    // Must not crash when called with no registered processes.
+    // Must not crash when called with no registered containers.
     supervisor.forceTerminateAll()
 }
 
 @Test(.timeLimit(.minutes(1)))
-func normalStopClearsPIDRegistry() async throws {
-    let controller = RecordingProcessController()
+func normalStopClearsContainerRegistry() async throws {
+    let controller = MockProcessController()
     let config = AIBConfig(
         version: 1,
         gateway: GatewayConfig(port: 0),
@@ -203,17 +222,64 @@ func normalStopClearsPIDRegistry() async throws {
         logger: Logger(label: "test")
     )
 
-    await supervisor.startAll()
+    try await supervisor.startAll()
 
-    let pid = controller.spawnedPIDs[0]
-    #expect(isProcessAlive(pid))
+    let ids = controller.spawnedIDs
+    #expect(ids.count == 1)
 
-    // Normal graceful stop should kill the process and clear the registry.
+    // Normal graceful stop should clear the container registry.
     await supervisor.stopAll(graceful: true)
 
-    try await Task.sleep(for: .milliseconds(200))
-    #expect(!isProcessAlive(pid))
-
-    // After normal stop, forceTerminateAll should be a no-op (no crash, no kill calls).
+    // After normal stop, forceTerminateAll should be a no-op (no crash).
     supervisor.forceTerminateAll()
+}
+
+@Test(.timeLimit(.minutes(1)))
+func initialStartPublishesRoutesBeforeAllServicesBecomeReady() async throws {
+    let controller = MockProcessController()
+    let gatewayControl = GatewayControl()
+    let readyServiceID = ServiceID("agent/ready")
+    let blockedServiceID = ServiceID("agent/blocked")
+    let config = AIBConfig(
+        version: 1,
+        gateway: GatewayConfig(port: 0),
+        services: [
+            makeServiceConfig(id: readyServiceID.rawValue, mountPath: "/agent/ready", startupReadyTimeout: .seconds(2)),
+            makeServiceConfig(id: blockedServiceID.rawValue, mountPath: "/agent/blocked", startupReadyTimeout: .seconds(2)),
+        ]
+    )
+    let configProvider: ConfigProvider = {
+        LoadedConfig(config: config, warnings: [], configPath: "/tmp")
+    }
+    let supervisor = DevSupervisor(
+        gatewayControl: gatewayControl,
+        configProvider: configProvider,
+        watchFilePath: "/tmp/workspace.yaml",
+        gatewayPort: 0,
+        reloadEnabled: false,
+        processController: controller,
+        healthClient: SelectiveReadyHealthClient(readyServiceID: readyServiceID),
+        logger: Logger(label: "test")
+    )
+
+    let startTask = Task {
+        try await supervisor.startAll()
+    }
+    try await Task.sleep(for: .milliseconds(200))
+
+    let matchResult = await gatewayControl.match(path: "/agent/ready/", query: nil)
+    switch matchResult {
+    case .success(let match):
+        #expect(match.entry.serviceID == readyServiceID)
+    case .failure(let error):
+        Issue.record("Expected /agent/ready route to be available during startup, got \(error)")
+    }
+
+    do {
+        _ = try await startTask.value
+        Issue.record("Expected startup to fail because agent/blocked never becomes ready")
+    } catch {
+        // Expected.
+    }
+    await supervisor.stopAll(graceful: false)
 }

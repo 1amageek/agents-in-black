@@ -73,9 +73,10 @@ public enum AIBRuntimeCoreService {
                 watchFilePath: workspacePath,
                 gatewayPort: initial.config.gateway.port,
                 reloadEnabled: options.reloadEnabled,
+                processController: ContainerProcessController(logger: logger),
                 logger: logger
             )
-            await supervisor.startAll()
+            try await supervisor.startAll()
             do {
                 try await waitForTerminationSignal()
             } catch {
