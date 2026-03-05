@@ -64,6 +64,7 @@ final class AgentsInBlackAppModel {
     var serviceLogOutputByServiceID: [String: String] = [:]
     var serviceSnapshotsByID: [String: AIBServiceRuntimeSnapshot] = [:]
     var activeServiceIDs: Set<String> = []
+    var mcpConnectionStatusByConnectionID: [String: MCPConnectionRuntimeStatus] = [:]
     var showInspector: Bool = false
     var selectedChatMessage: ChatMessageItem?
     var lastErrorMessage: String?
@@ -215,6 +216,7 @@ final class AgentsInBlackAppModel {
             let snapshot = try workspaceDiscovery.loadWorkspace(at: url)
             workspace = snapshot
             runtimeIssues = []
+            mcpConnectionStatusByConnectionID = [:]
             showIssuesInSidebar = false
             issueListFilter = nil
             if let firstRepo = snapshot.repos.first {
@@ -492,6 +494,7 @@ final class AgentsInBlackAppModel {
         emulatorOutput = ""
         serviceLogOutputByServiceID = [:]
         serviceSnapshotsByID = [:]
+        mcpConnectionStatusByConnectionID = [:]
         runtimeIssues = []
         rebuildAllSidebarStatuses()
         if effectiveGatewayPort != requestedGatewayPort {
@@ -1675,6 +1678,17 @@ final class AgentsInBlackAppModel {
         return headers
     }
 
+    private struct MCPStatusEntry: Decodable {
+        let name: String?
+        let status: String
+        let config: MCPStatusConfig?
+    }
+
+    private struct MCPStatusConfig: Decodable {
+        let type: String?
+        let url: String?
+    }
+
     private func extractServiceID(from entry: AIBEmulatorLogEntry) -> String? {
         if let raw = entry.metadata["service_id"] {
             let normalized = trimmedQuotes(raw)
@@ -1702,6 +1716,123 @@ final class AgentsInBlackAppModel {
             return local.id
         }
         return nil
+    }
+
+    private func updateMCPConnectionStatus(from entry: AIBEmulatorLogEntry) {
+        guard let workspace else { return }
+        guard let sourceRawServiceID = extractServiceID(from: entry),
+              let sourceServiceID = resolveServiceSelectionID(from: sourceRawServiceID),
+              let sourceService = service(by: sourceServiceID),
+              sourceService.serviceKind == .agent else {
+            return
+        }
+        guard let statuses = parseMCPStatusEntries(from: entry.message) else { return }
+
+        let existingConnectionIDs = flowConnections()
+            .filter { $0.kind == .mcp && $0.sourceServiceID == sourceServiceID }
+            .map(\.id)
+
+        var nextStatusMap = mcpConnectionStatusByConnectionID
+        for connectionID in existingConnectionIDs {
+            nextStatusMap.removeValue(forKey: connectionID)
+        }
+
+        for status in statuses {
+            guard let targetServiceID = resolveMCPStatusTargetServiceID(
+                for: status,
+                sourceService: sourceService,
+                workspace: workspace
+            ) else {
+                continue
+            }
+            let connectionID = "mcp::\(sourceServiceID)->\(targetServiceID)"
+            nextStatusMap[connectionID] = normalizeMCPRuntimeStatus(status.status)
+        }
+
+        mcpConnectionStatusByConnectionID = nextStatusMap
+    }
+
+    private func parseMCPStatusEntries(from message: String) -> [MCPStatusEntry]? {
+        guard let statusRange = message.range(of: "MCP status:") else { return nil }
+        let payload = message[statusRange.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !payload.isEmpty else { return [] }
+        guard let data = payload.data(using: .utf8) else { return nil }
+
+        do {
+            return try JSONDecoder().decode([MCPStatusEntry].self, from: data)
+        } catch {
+            return nil
+        }
+    }
+
+    private func resolveMCPStatusTargetServiceID(
+        for status: MCPStatusEntry,
+        sourceService: AIBServiceModel,
+        workspace: AIBWorkspaceSnapshot
+    ) -> String? {
+        let targetRefs = Set(sourceService.connections.mcpServers.compactMap(\.serviceRef))
+        let candidates = workspace.services.filter { service in
+            service.serviceKind == .mcp && targetRefs.contains(service.namespacedID)
+        }
+
+        guard !candidates.isEmpty else { return nil }
+
+        if let urlString = status.config?.url,
+           let url = URL(string: urlString),
+           let port = url.port {
+            let matchedByPort = candidates.filter { candidate in
+                serviceSnapshotsByID[candidate.namespacedID]?.backendPort == port
+            }
+            if matchedByPort.count == 1, let matched = matchedByPort.first {
+                return matched.id
+            }
+        }
+
+        if let serverName = status.name {
+            let normalizedServerName = normalizeMCPServerToken(serverName)
+            if !normalizedServerName.isEmpty {
+                let matchedByName = candidates.filter { candidate in
+                    normalizeMCPServerToken(candidate.namespacedID) == normalizedServerName ||
+                    normalizeMCPServerToken(candidate.localID) == normalizedServerName
+                }
+                if matchedByName.count == 1, let matched = matchedByName.first {
+                    return matched.id
+                }
+            }
+        }
+
+        return candidates.count == 1 ? candidates.first?.id : nil
+    }
+
+    private func normalizeMCPServerToken(_ value: String) -> String {
+        let canonical = value
+            .lowercased()
+            .replacingOccurrences(of: "/", with: "-")
+            .replacingOccurrences(of: "_", with: "-")
+        let normalized = canonical
+            .map { character -> Character in
+                if character.isLetter || character.isNumber || character == "-" {
+                    return character
+                }
+                return "-"
+            }
+        let collapsed = String(normalized).replacingOccurrences(
+            of: "-+",
+            with: "-",
+            options: .regularExpression
+        )
+        return collapsed.trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+    }
+
+    private func normalizeMCPRuntimeStatus(_ status: String) -> MCPConnectionRuntimeStatus {
+        switch status.lowercased() {
+        case "connected":
+            return .connected
+        case "failed", "error", "disconnected":
+            return .failed
+        default:
+            return .connecting
+        }
     }
 
     private func registerIssue(
@@ -1795,6 +1926,7 @@ final class AgentsInBlackAppModel {
                 emulatorOutput.removeFirst(emulatorOutput.count - 200_000)
             }
             registerIssue(from: entry)
+            updateMCPConnectionStatus(from: entry)
             if let serviceID = extractServiceID(from: entry) {
                 var output = serviceLogOutputByServiceID[serviceID, default: ""]
                 output.append(entry.formattedLine)
@@ -1811,6 +1943,7 @@ final class AgentsInBlackAppModel {
                 kernelDownloadProgress = nil
                 serviceSnapshotsByID = [:]
                 activeServiceIDs = []
+                mcpConnectionStatusByConnectionID = [:]
                 rebuildAllSidebarStatuses()
             case .starting:
                 emulatorState = .starting
@@ -1827,6 +1960,7 @@ final class AgentsInBlackAppModel {
                 kernelDownloadProgress = nil
                 serviceSnapshotsByID = [:]
                 activeServiceIDs = []
+                mcpConnectionStatusByConnectionID = [:]
                 setError("Failed to start emulator: \(message)")
                 registerIssue(
                     severity: .error,

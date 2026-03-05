@@ -36,6 +36,7 @@ struct FlowCanvasView: View {
     private var activitySnapshot: FlowActivitySnapshot {
         FlowActivitySnapshot(
             activeServiceIDs: model.activeServiceIDs,
+            mcpConnectionStatusByConnectionID: model.mcpConnectionStatusByConnectionID,
             serviceLifecycles: model.serviceSnapshotsByID.reduce(into: [:]) { result, pair in
                 result[pair.key] = pair.value.lifecycleStateString
             }
@@ -423,22 +424,68 @@ struct FlowCanvasView: View {
     private var nodeVisualsByID: [String: FlowNodeVisual] {
         let outgoingCounts = Dictionary(grouping: model.flowConnections(), by: \.sourceServiceID).mapValues(\.count)
         let activity = activitySnapshot
+        let connectionModels = model.flowConnections()
+        let namespacedIDByNodeID = Dictionary(uniqueKeysWithValues: model.flowNodes().map { ($0.id, $0.namespacedID) })
+        var connectedMCPNodeIDs = Set<String>()
+        var connectingMCPNodeIDs = Set<String>()
+        var failedMCPNodeIDs = Set<String>()
+        var activeSourceMCPNodeIDs = Set<String>()
+
+        for connection in connectionModels where connection.kind == .mcp {
+            guard let status = activity.mcpConnectionStatusByConnectionID[connection.id] else { continue }
+            switch status {
+            case .connected:
+                connectedMCPNodeIDs.insert(connection.targetServiceID)
+            case .connecting:
+                connectingMCPNodeIDs.insert(connection.targetServiceID)
+            case .failed:
+                failedMCPNodeIDs.insert(connection.targetServiceID)
+            }
+        }
+        for connection in connectionModels where connection.kind == .mcp {
+            let sourceNamespacedID = namespacedIDByNodeID[connection.sourceServiceID] ?? ""
+            if activity.activeServiceIDs.contains(sourceNamespacedID) {
+                activeSourceMCPNodeIDs.insert(connection.targetServiceID)
+            }
+        }
+
         return Dictionary(
             uniqueKeysWithValues: model.flowNodes().map { node in
                 let lifecycle = activity.serviceLifecycles[node.namespacedID]
                 let isActive = activity.activeServiceIDs.contains(node.namespacedID)
                 let activityState: FlowNodeVisual.ActivityState
-                switch lifecycle {
-                case "ready" where isActive:
-                    activityState = .readyActive
-                case "ready":
-                    activityState = .readyIdle
-                case "starting":
-                    activityState = .starting
-                case "unhealthy", "backoff":
-                    activityState = .unhealthy
-                default:
-                    activityState = .stopped
+                if node.serviceKind == .mcp {
+                    if failedMCPNodeIDs.contains(node.id) {
+                        activityState = .unhealthy
+                    } else if connectedMCPNodeIDs.contains(node.id) || isActive {
+                        activityState = .readyActive
+                    } else if connectingMCPNodeIDs.contains(node.id) || activeSourceMCPNodeIDs.contains(node.id) {
+                        activityState = .starting
+                    } else {
+                        switch lifecycle {
+                        case "ready":
+                            activityState = .readyIdle
+                        case "starting":
+                            activityState = .starting
+                        case "unhealthy", "backoff":
+                            activityState = .unhealthy
+                        default:
+                            activityState = .stopped
+                        }
+                    }
+                } else {
+                    switch lifecycle {
+                    case "ready" where isActive:
+                        activityState = .readyActive
+                    case "ready":
+                        activityState = .readyIdle
+                    case "starting":
+                        activityState = .starting
+                    case "unhealthy", "backoff":
+                        activityState = .unhealthy
+                    default:
+                        activityState = .stopped
+                    }
                 }
                 return (
                     node.id,
@@ -460,13 +507,33 @@ struct FlowCanvasView: View {
     private func updateEdgeAnimations() {
         let nodeModels = model.flowNodes()
         let namespacedIDByNodeID = Dictionary(uniqueKeysWithValues: nodeModels.map { ($0.id, $0.namespacedID) })
+        let connectionByID = Dictionary(uniqueKeysWithValues: model.flowConnections().map { ($0.id, $0) })
         let activeIDs = model.activeServiceIDs
+        let lifecycleByServiceID = model.serviceSnapshotsByID.reduce(into: [String: String]()) { result, pair in
+            result[pair.key] = pair.value.lifecycleStateString
+        }
+        let mcpStatuses = model.mcpConnectionStatusByConnectionID
 
         var animatedIDs = Set<String>()
         for edge in store.edges {
+            if let connection = connectionByID[edge.id], connection.kind == .mcp {
+                if let status = mcpStatuses[connection.id], status == .connecting || status == .connected {
+                    animatedIDs.insert(edge.id)
+                } else {
+                    let sourceNS = namespacedIDByNodeID[edge.sourceNodeID] ?? ""
+                    let targetNS = namespacedIDByNodeID[edge.targetNodeID] ?? ""
+                    let targetLifecycle = lifecycleByServiceID[targetNS]
+                    if activeIDs.contains(sourceNS), targetLifecycle == "ready" || targetLifecycle == "starting" {
+                        animatedIDs.insert(edge.id)
+                    }
+                }
+                continue
+            }
+
             let sourceNS = namespacedIDByNodeID[edge.sourceNodeID] ?? ""
             let targetNS = namespacedIDByNodeID[edge.targetNodeID] ?? ""
-            if activeIDs.contains(sourceNS) && activeIDs.contains(targetNS) {
+            let targetLifecycle = lifecycleByServiceID[targetNS]
+            if activeIDs.contains(sourceNS), targetLifecycle == "ready" || targetLifecycle == "starting" {
                 animatedIDs.insert(edge.id)
             }
         }
@@ -742,6 +809,7 @@ private struct FlowGraphSnapshot: Hashable {
 
 private struct FlowActivitySnapshot: Hashable {
     let activeServiceIDs: Set<String>
+    let mcpConnectionStatusByConnectionID: [String: MCPConnectionRuntimeStatus]
     let serviceLifecycles: [String: String]
 }
 

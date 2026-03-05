@@ -7,6 +7,12 @@ enum FlowConnectionKind: String, Hashable {
     case a2a = "A2A"
 }
 
+enum MCPConnectionRuntimeStatus: String, Hashable {
+    case connecting
+    case connected
+    case failed
+}
+
 struct FlowNodeModel: Identifiable, Hashable {
     let id: String
     let namespacedID: String
