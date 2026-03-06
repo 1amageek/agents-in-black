@@ -58,6 +58,14 @@ jobs:
           mkdir -p "$RUNNER_TEMP/notarize"
           echo "$ASC_KEY_BASE64" | base64 --decode > "$RUNNER_TEMP/notarize/AuthKey.p8"
 
+      - name: Install provisioning profile
+        env:
+          PROVISIONING_PROFILE_BASE64: ${{ secrets.PROVISIONING_PROFILE_BASE64 }}
+        run: |
+          PP_PATH="$HOME/Library/MobileDevice/Provisioning Profiles"
+          mkdir -p "$PP_PATH"
+          echo "$PROVISIONING_PROFILE_BASE64" | base64 --decode > "$PP_PATH/AgentsInBlack.provisionprofile"
+
       - name: Archive app
         run: |
           xcodebuild archive \
@@ -71,12 +79,15 @@ jobs:
             CODE_SIGN_STYLE=Manual \
             CODE_SIGN_IDENTITY="Developer ID Application" \
             DEVELOPMENT_TEAM="${{ secrets.APPLE_TEAM_ID }}" \
+            PROVISIONING_PROFILE_SPECIFIER="${{ secrets.PROVISIONING_PROFILE_SPECIFIER }}" \
             OTHER_CODE_SIGN_FLAGS="--timestamp" \
             ONLY_ACTIVE_ARCH=NO
 
       - name: Export archive
+        env:
+          PROVISIONING_PROFILE_SPECIFIER: ${{ secrets.PROVISIONING_PROFILE_SPECIFIER }}
         run: |
-          cat > "$RUNNER_TEMP/export-options.plist" << 'PLIST'
+          cat > "$RUNNER_TEMP/export-options.plist" << PLIST
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
             "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -85,11 +96,16 @@ jobs:
               <key>method</key>
               <string>developer-id</string>
               <key>teamID</key>
-              <string>WWCKBW8CKN</string>
+              <string>${{ secrets.APPLE_TEAM_ID }}</string>
               <key>signingStyle</key>
               <string>manual</string>
               <key>signingCertificate</key>
               <string>Developer ID Application</string>
+              <key>provisioningProfiles</key>
+              <dict>
+                  <key>team.stamp.AgentsInBlack</key>
+                  <string>${PROVISIONING_PROFILE_SPECIFIER}</string>
+              </dict>
           </dict>
           </plist>
           PLIST
@@ -151,11 +167,12 @@ jobs:
           name: dmg
           path: ${{ runner.temp }}/AgentsInBlack.dmg
 
-      - name: Cleanup keychain
+      - name: Cleanup keychain and profiles
         if: always()
         run: |
           security delete-keychain "$RUNNER_TEMP/build.keychain-db" || true
           rm -rf "$RUNNER_TEMP/notarize" || true
+          rm -f "$HOME/Library/MobileDevice/Provisioning Profiles/AgentsInBlack.provisionprofile" || true
 
   # ── Build & sign CLI binary ────────────────────────────────────
   build-cli:
