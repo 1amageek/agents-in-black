@@ -76,10 +76,9 @@ jobs:
             -archivePath "$RUNNER_TEMP/AgentsInBlack.xcarchive" \
             MARKETING_VERSION="${{ steps.version.outputs.version }}" \
             CURRENT_PROJECT_VERSION="${{ steps.version.outputs.build_number }}" \
-            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_STYLE=Automatic \
             CODE_SIGN_IDENTITY="Developer ID Application" \
             DEVELOPMENT_TEAM="${{ secrets.APPLE_TEAM_ID }}" \
-            PROVISIONING_PROFILE_SPECIFIER="${{ secrets.PROVISIONING_PROFILE_SPECIFIER }}" \
             OTHER_CODE_SIGN_FLAGS="--timestamp" \
             ONLY_ACTIVE_ARCH=NO
 
