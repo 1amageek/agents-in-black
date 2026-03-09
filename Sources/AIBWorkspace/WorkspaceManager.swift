@@ -367,6 +367,35 @@ public enum AIBWorkspaceManager {
         try saveWorkspace(workspace, workspaceRoot: workspaceRoot)
     }
 
+    /// Update deployed endpoint URLs for services in workspace.yaml.
+    /// - Parameter endpointsByNamespacedServiceID: Maps `namespacedID` to `[providerID: url]`.
+    public static func updateServiceEndpoints(
+        workspaceRoot: String,
+        endpointsByNamespacedServiceID: [String: [String: String]]
+    ) throws {
+        var workspace = try loadWorkspace(workspaceRoot: workspaceRoot)
+
+        for repoIndex in workspace.repos.indices {
+            let repo = workspace.repos[repoIndex]
+            guard repo.enabled, let services = repo.services, !services.isEmpty else { continue }
+
+            var updatedServices = services
+            for serviceIndex in updatedServices.indices {
+                let localID = updatedServices[serviceIndex].id
+                let namespacedID = "\(repo.namespace)/\(localID)"
+                guard let newEndpoints = endpointsByNamespacedServiceID[namespacedID] else { continue }
+                var merged = updatedServices[serviceIndex].endpoints ?? [:]
+                for (providerID, url) in newEndpoints {
+                    merged[providerID] = url
+                }
+                updatedServices[serviceIndex].endpoints = merged
+            }
+            workspace.repos[repoIndex].services = updatedServices
+        }
+
+        try saveWorkspace(workspace, workspaceRoot: workspaceRoot)
+    }
+
     private static func merge(existing: AIBWorkspaceConfig, discovered: [WorkspaceRepo]) -> AIBWorkspaceConfig {
         let existingByPath = Dictionary(uniqueKeysWithValues: existing.repos.map { ($0.path, $0) })
         let mergedRepos = discovered.map { repo -> WorkspaceRepo in

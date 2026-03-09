@@ -77,15 +77,21 @@ public struct GCPCloudRunProvider: DeploymentProvider, Sendable {
     // MARK: - URL Resolution
 
     /// Resolve a service_ref to a Cloud Run URL.
-    /// At plan time the exact hash is unknown, so we use the deterministic form.
+    /// Uses the live URL of an already-deployed service when available,
+    /// otherwise falls back to the deterministic form.
     public func resolveURL(
         serviceRef: String,
         region: String,
         path: String?,
-        serviceNameMap: [String: String]
+        serviceNameMap: [String: String],
+        existingServiceURLs: [String: String]
     ) -> String {
-        let cloudRunName = serviceNameMap[serviceRef] ?? deployedServiceName(from: serviceRef)
         let basePath = path ?? "/mcp"
+        // Prefer the live URL from an already-deployed service
+        if let liveBaseURL = existingServiceURLs[serviceRef] {
+            return liveBaseURL + basePath
+        }
+        let cloudRunName = serviceNameMap[serviceRef] ?? deployedServiceName(from: serviceRef)
         return "https://\(cloudRunName)-\(region).a.run.app\(basePath)"
     }
 
@@ -564,7 +570,7 @@ public struct GCPCloudRunProvider: DeploymentProvider, Sendable {
                 .sorted(by: { $0.key < $1.key })
                 .map { "\($0.key)=\($0.value)" }
                 .joined(separator: delimiter)
-            args.append(contentsOf: ["--set-env-vars", envString])
+            args.append(contentsOf: ["--update-env-vars", envString])
         }
 
         return [
@@ -633,6 +639,30 @@ public struct GCPCloudRunProvider: DeploymentProvider, Sendable {
                 stepID: AIBDeployStep.authBind.rawValue
             ),
         ]
+    }
+
+    // MARK: - Existing Service URL
+
+    public func existingServiceURL(
+        serviceName: String,
+        targetConfig: AIBDeployTargetConfig
+    ) async -> String? {
+        let gcpProject = targetConfig.providerConfig["gcpProject"] ?? ""
+        guard !gcpProject.isEmpty else { return nil }
+
+        let command = "gcloud run services describe \(serviceName)"
+            + " --region=\(targetConfig.region)"
+            + " --project=\(gcpProject)"
+            + " --format='value(status.url)'"
+
+        do {
+            let result = try await ShellProbe.run(command: command, timeout: .seconds(15))
+            guard result.exitCode == 0 else { return nil }
+            let url = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+            return url.isEmpty ? nil : url
+        } catch {
+            return nil
+        }
     }
 
     // MARK: - Existing Env Vars

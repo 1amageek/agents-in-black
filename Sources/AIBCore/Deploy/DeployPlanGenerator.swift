@@ -19,7 +19,7 @@ public protocol DeployPlanGenerator: Sendable {
         workspaceRoot: String,
         targetConfig: AIBDeployTargetConfig,
         provider: any DeploymentProvider
-    ) throws -> AIBDeployPlan
+    ) async throws -> AIBDeployPlan
 
     /// Write generated artifacts (Dockerfiles, deploy configs, etc.) to disk.
     func writeArtifacts(plan: AIBDeployPlan, workspaceRoot: String) throws

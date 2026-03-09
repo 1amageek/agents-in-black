@@ -3,6 +3,7 @@ import SwiftUI
 
 struct DeployCompletedView: View {
     let result: AIBDeployResult
+    let onOpenChat: ((_ serviceResultID: String, _ deployedURL: URL) -> Void)?
     let onDismiss: () -> Void
 
     var body: some View {
@@ -69,10 +70,26 @@ struct DeployCompletedView: View {
                         }
                     }
                     Spacer()
+                    if serviceResult.success,
+                       isAgentService(serviceResult.id),
+                       let urlString = serviceResult.deployedURL,
+                       let url = URL(string: urlString) {
+                        Button {
+                            onOpenChat?(serviceResult.id, url)
+                        } label: {
+                            Label("Chat", systemImage: "bubble.left.and.bubble.right")
+                                .font(.caption)
+                        }
+                        .buttonStyle(.bordered)
+                    }
                 }
                 .padding(.vertical, 4)
             }
         }
+    }
+
+    private func isAgentService(_ serviceResultID: String) -> Bool {
+        result.plan.services.first(where: { $0.id == serviceResultID })?.serviceKind == .agent
     }
 
     private var authBindingsSection: some View {

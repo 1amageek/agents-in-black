@@ -213,7 +213,7 @@ struct AIBDevMain {
             }
             try provider.validateTargetConfig(targetConfig)
 
-            let plan = try AIBDeployService.generatePlan(
+            let plan = try await AIBDeployService.generatePlan(
                 workspaceRoot: cwd,
                 targetConfig: targetConfig,
                 provider: provider
@@ -255,7 +255,7 @@ struct AIBDevMain {
             }
             try provider.validateTargetConfig(targetConfig)
 
-            let plan = try AIBDeployService.generatePlan(
+            let plan = try await AIBDeployService.generatePlan(
                 workspaceRoot: cwd,
                 targetConfig: targetConfig,
                 provider: provider

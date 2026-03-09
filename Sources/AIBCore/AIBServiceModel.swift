@@ -18,6 +18,8 @@ public struct AIBServiceModel: Identifiable, Hashable, Sendable {
     /// Display name derived from the package manifest (e.g., package.json "name", Package.swift executableTarget name).
     /// Falls back to `localID` when not available.
     public var packageName: String?
+    /// Deployed endpoint URLs keyed by provider ID (e.g., `"gcp-cloudrun": "https://...run.app"`).
+    public var endpoints: [String: String]
 
     public init(
         repoID: String,
@@ -33,7 +35,8 @@ public struct AIBServiceModel: Identifiable, Hashable, Sendable {
         mcpProfile: AIBMCPProfile? = nil,
         a2aProfile: AIBA2AProfile? = nil,
         uiProfile: AIBServiceUIProfile? = nil,
-        packageName: String? = nil
+        packageName: String? = nil,
+        endpoints: [String: String] = [:]
     ) {
         self.repoID = repoID
         self.repoName = repoName
@@ -50,5 +53,6 @@ public struct AIBServiceModel: Identifiable, Hashable, Sendable {
         self.a2aProfile = a2aProfile
         self.uiProfile = uiProfile
         self.packageName = packageName
+        self.endpoints = endpoints
     }
 }

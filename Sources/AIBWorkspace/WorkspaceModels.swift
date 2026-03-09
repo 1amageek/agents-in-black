@@ -113,6 +113,8 @@ public struct WorkspaceRepoServiceConfig: Codable, Sendable, Equatable {
     public var mcp: WorkspaceRepoMCPConfig?
     public var a2a: WorkspaceRepoA2AConfig?
     public var ui: WorkspaceRepoUIConfig?
+    /// Deployed endpoint URLs keyed by provider ID (e.g., `"gcp-cloudrun": "https://...run.app"`).
+    public var endpoints: [String: String]?
 
     public init(
         id: String,
@@ -136,7 +138,8 @@ public struct WorkspaceRepoServiceConfig: Codable, Sendable, Equatable {
         connections: WorkspaceRepoConnectionsConfig? = nil,
         mcp: WorkspaceRepoMCPConfig? = nil,
         a2a: WorkspaceRepoA2AConfig? = nil,
-        ui: WorkspaceRepoUIConfig? = nil
+        ui: WorkspaceRepoUIConfig? = nil,
+        endpoints: [String: String]? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -160,6 +163,7 @@ public struct WorkspaceRepoServiceConfig: Codable, Sendable, Equatable {
         self.mcp = mcp
         self.a2a = a2a
         self.ui = ui
+        self.endpoints = endpoints
     }
 }
 

@@ -8,6 +8,7 @@ import SwiftUI
 /// appropriate ``ChatSession`` and opening the PiP chat panel.
 struct NodeAccessoryInputBar: View {
     let service: AIBServiceModel
+    var isCloudMode: Bool = false
     let onSend: (String) -> Void
 
     @State private var text: String = ""
@@ -17,6 +18,12 @@ struct NodeAccessoryInputBar: View {
 
     var body: some View {
         HStack(spacing: 6) {
+            if isCloudMode {
+                Image(systemName: "cloud.fill")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.cyan)
+            }
+
             TextField("Message \(displayName)...", text: $text)
                 .textFieldStyle(.plain)
                 .font(.system(.body))
@@ -41,8 +48,10 @@ struct NodeAccessoryInputBar: View {
         .background(.thickMaterial, in: Capsule())
         .overlay(
             Capsule().strokeBorder(
-                colorScheme == .dark ? Color.white.opacity(0.3) : Color.black.opacity(0.2),
-                lineWidth: 1
+                isCloudMode
+                    ? Color.cyan.opacity(0.5)
+                    : (colorScheme == .dark ? Color.white.opacity(0.3) : Color.black.opacity(0.2)),
+                lineWidth: isCloudMode ? 1.5 : 1
             )
         )
         .shadow(color: .black.opacity(0.15), radius: 6, y: 2)

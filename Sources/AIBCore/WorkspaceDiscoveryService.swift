@@ -203,7 +203,8 @@ public final class WorkspaceDiscoveryService {
                         mcpProfile: mcpProfile,
                         a2aProfile: a2aProfile,
                         uiProfile: uiProfile,
-                        packageName: packageName
+                        packageName: packageName,
+                        endpoints: service.endpoints ?? [:]
                     ))
                 }
             } else {

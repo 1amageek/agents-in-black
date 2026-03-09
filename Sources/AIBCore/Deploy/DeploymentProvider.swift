@@ -34,11 +34,13 @@ public protocol DeploymentProvider: Sendable {
     func deployedServiceName(from namespacedID: String) -> String
 
     /// Resolve a service_ref to a deployed URL at plan time.
+    /// - Parameter existingServiceURLs: Live base URLs of already-deployed services (serviceRef → URL).
     func resolveURL(
         serviceRef: String,
         region: String,
         path: String?,
-        serviceNameMap: [String: String]
+        serviceNameMap: [String: String],
+        existingServiceURLs: [String: String]
     ) -> String
 
     /// Generate provider-specific deploy config content (e.g., clouddeploy.yaml).
@@ -85,6 +87,13 @@ public protocol DeploymentProvider: Sendable {
         binding: AIBDeployAuthBinding,
         targetConfig: AIBDeployTargetConfig
     ) -> [DeployCommand]
+
+    /// Query the live URL of an already-deployed service.
+    /// Returns nil if the service does not exist.
+    func existingServiceURL(
+        serviceName: String,
+        targetConfig: AIBDeployTargetConfig
+    ) async -> String?
 
     /// Query existing environment variable names already configured on a deployed service.
     /// Returns an empty set if the service does not exist or has no env vars.

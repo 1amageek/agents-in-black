@@ -107,7 +107,7 @@ public enum AIBDeployService {
         workspaceRoot: String,
         targetConfig: AIBDeployTargetConfig,
         provider: any DeploymentProvider
-    ) throws -> AIBDeployPlan {
+    ) async throws -> AIBDeployPlan {
         let workspacePath = AIBRuntimeCoreService.workspaceYAMLPath(workspaceRoot: workspaceRoot)
         let workspace = try WorkspaceYAMLCodec.loadWorkspace(at: workspacePath)
         let resolved = try WorkspaceSyncer.resolveConfig(workspaceRoot: workspaceRoot, workspace: workspace)
@@ -120,6 +120,17 @@ public enum AIBDeployService {
                 ?? service.id.rawValue.split(separator: "/").last.map(String.init)
                 ?? service.id.rawValue
             serviceNameMap[service.id.rawValue] = provider.deployedServiceName(from: packageName)
+        }
+
+        // Query live URLs of already-deployed services for accurate connection resolution
+        var existingServiceURLs: [String: String] = [:]
+        for (serviceRef, deployedName) in serviceNameMap {
+            if let liveURL = await provider.existingServiceURL(
+                serviceName: deployedName,
+                targetConfig: targetConfig
+            ) {
+                existingServiceURLs[serviceRef] = liveURL
+            }
         }
 
         var servicePlans: [AIBDeployServicePlan] = []
@@ -172,7 +183,8 @@ public enum AIBDeployService {
                         serviceRef: ref,
                         region: targetConfig.region,
                         path: mcpPath,
-                        serviceNameMap: serviceNameMap
+                        serviceNameMap: serviceNameMap,
+                        existingServiceURLs: existingServiceURLs
                     )
                     resolvedConnections.mcpServers.append(AIBDeployConnectionEntry(
                         serviceRef: ref,
@@ -211,7 +223,8 @@ public enum AIBDeployService {
                         serviceRef: ref,
                         region: targetConfig.region,
                         path: a2aPath,
-                        serviceNameMap: serviceNameMap
+                        serviceNameMap: serviceNameMap,
+                        existingServiceURLs: existingServiceURLs
                     )
                     resolvedConnections.a2aAgents.append(AIBDeployConnectionEntry(
                         serviceRef: ref,
@@ -226,6 +239,8 @@ public enum AIBDeployService {
             if !resolvedConnections.mcpServers.isEmpty {
                 let urls = resolvedConnections.mcpServers.map(\.resolvedURL).joined(separator: ",")
                 envVars["MCP_SERVER_URLS"] = urls
+                // Tell the agent where to find the bundled connection config
+                envVars["AIB_CONNECTIONS_FILE"] = "/app/.aib-connections.json"
             }
 
             // Scan source for env var references to detect secrets and missing vars

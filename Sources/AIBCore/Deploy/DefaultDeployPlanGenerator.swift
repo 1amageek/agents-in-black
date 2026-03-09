@@ -27,8 +27,8 @@ public struct DefaultDeployPlanGenerator: DeployPlanGenerator {
         workspaceRoot: String,
         targetConfig: AIBDeployTargetConfig,
         provider: any DeploymentProvider
-    ) throws -> AIBDeployPlan {
-        try AIBDeployService.generatePlan(
+    ) async throws -> AIBDeployPlan {
+        try await AIBDeployService.generatePlan(
             workspaceRoot: workspaceRoot,
             targetConfig: targetConfig,
             provider: provider

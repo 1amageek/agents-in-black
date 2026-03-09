@@ -720,6 +720,49 @@ final class AgentsInBlackAppModel {
         return URL(string: urlString) ?? URL(string: "http://127.0.0.1:\(port)")!
     }
 
+    /// Create a chat session targeting the deployed (remote) endpoint.
+    @discardableResult
+    func createRemoteSession(for service: AIBServiceModel, deployedURL: URL, activate: Bool) -> ChatSession {
+        let rpcPath = service.a2aProfile?.rpcPath ?? "/a2a"
+        let card = agentCardCache.card(for: service.id)
+        let session = ChatSession(
+            serviceID: service.id,
+            baseURL: deployedURL,
+            rpcPath: rpcPath,
+            agentCard: card,
+            title: "Remote"
+        )
+        var sessions = chatSessionsByService[service.id] ?? []
+        sessions.insert(session, at: 0)
+        chatSessionsByService[service.id] = sessions
+        if activate {
+            activeSessionIDByService[service.id] = session.id
+        }
+        return session
+    }
+
+    /// Returns the first deployed endpoint URL for the given service, if available.
+    func deployedURL(for service: AIBServiceModel) -> URL? {
+        service.endpoints.values.first.flatMap { URL(string: $0) }
+    }
+
+    /// Returns the deployed endpoint URL for a specific provider.
+    func deployedURL(for service: AIBServiceModel, providerID: String) -> URL? {
+        service.endpoints[providerID].flatMap { URL(string: $0) }
+    }
+
+    /// Open a chat targeting a deployed (remote) agent.
+    /// Called from DeployCompletedView when user clicks "Chat".
+    func openRemoteChat(serviceResultID: String, deployedURL: URL) {
+        guard let workspace else { return }
+        // serviceResultID is the namespaced ServiceID (e.g. "agent/node")
+        guard let service = workspace.services.first(where: {
+            $0.namespacedID == serviceResultID
+        }) else { return }
+        let session = createRemoteSession(for: service, deployedURL: deployedURL, activate: true)
+        openPiPChat(serviceID: service.id, sessionID: session.id)
+    }
+
     private func fetchAgentCardsForReadyServices(snapshots: [AIBServiceRuntimeSnapshot]) {
         guard let workspace else { return }
         for snapshot in snapshots where snapshot.lifecycleState == .ready {
@@ -1256,11 +1299,43 @@ final class AgentsInBlackAppModel {
         case .applying:
             appendDeployLogLine(level: .info, message: "Applying deploy plan...")
         case .completed(let result):
+            storeDeployedURLs(from: result)
             appendDeployLogLine(level: .info, message: "Deploy completed: \(result.serviceResults.count) service(s)")
         case .failed(let error):
             appendDeployLogLine(level: .error, message: "Deploy failed (\(error.phase)): \(error.message)")
         case .cancelled:
             appendDeployLogLine(level: .warning, message: "Deploy cancelled")
+        }
+    }
+
+    private func storeDeployedURLs(from result: AIBDeployResult) {
+        guard let workspace else { return }
+        let providerID = result.plan.targetConfig.providerID
+
+        // Build a mapping of namespacedServiceID → [providerID: url]
+        var endpointsByNamespacedID: [String: [String: String]] = [:]
+        for serviceResult in result.serviceResults where serviceResult.success {
+            guard let urlString = serviceResult.deployedURL else { continue }
+            // serviceResult.id is the namespaced ServiceID (e.g. "agent/node")
+            if let service = workspace.services.first(where: {
+                $0.namespacedID == serviceResult.id
+            }) {
+                endpointsByNamespacedID[service.namespacedID] = [providerID: urlString]
+            }
+        }
+
+        guard !endpointsByNamespacedID.isEmpty else { return }
+
+        Task {
+            do {
+                try AIBWorkspaceCore.updateServiceEndpoints(
+                    workspaceRoot: workspace.rootURL.path,
+                    endpointsByNamespacedServiceID: endpointsByNamespacedID
+                )
+                await loadWorkspace(at: workspace.rootURL)
+            } catch {
+                setError("Failed to save deployed endpoints: \(error.localizedDescription)")
+            }
         }
     }
 

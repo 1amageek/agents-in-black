@@ -106,7 +106,7 @@ public final class AIBDeployController {
                 // Validate that all required provider config is present
                 try provider.validateTargetConfig(enrichedConfig)
 
-                let plan = try self.planGenerator.generatePlan(
+                let plan = try await self.planGenerator.generatePlan(
                     workspaceRoot: workspaceRoot,
                     targetConfig: enrichedConfig,
                     provider: provider

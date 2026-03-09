@@ -9,6 +9,7 @@ struct FlowCanvasView: View {
     @State private var store = FlowStore<String>()
     @State private var canvasSize: CGSize = .zero
     @State private var hasFittedInitialContent = false
+    @State private var useCloudEndpoint: Bool = false
 
     var body: some View {
         canvas
@@ -79,8 +80,15 @@ struct FlowCanvasView: View {
     @ViewBuilder
     private func nodeAccessoryContent(for node: FlowNode<String>, canvasSize: CGSize) -> some View {
         if let service = model.service(by: node.id), model.canOpenChat(for: service) {
-            NodeAccessoryInputBar(service: service) { text in
-                let chatSession = model.createSession(for: service, activate: true)
+            let hasCloud = model.deployedURL(for: service) != nil
+            let isCloud = useCloudEndpoint && hasCloud
+            NodeAccessoryInputBar(service: service, isCloudMode: isCloud) { text in
+                let chatSession: ChatSession
+                if isCloud, let deployedURL = model.deployedURL(for: service) {
+                    chatSession = model.createRemoteSession(for: service, deployedURL: deployedURL, activate: true)
+                } else {
+                    chatSession = model.createSession(for: service, activate: true)
+                }
                 chatSession.composerText = text
                 store.clearSelection()
                 model.openPiPChat(serviceID: service.id, sessionID: chatSession.id)
@@ -106,6 +114,10 @@ struct FlowCanvasView: View {
     private var canvasToolbar: some View {
         HStack(spacing: 0) {
             legendSection
+            if hasAnyDeployedEndpoint {
+                toolbarDivider
+                endpointToggleSection
+            }
             toolbarDivider
             zoomSection
         }
@@ -125,6 +137,32 @@ struct FlowCanvasView: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
+    }
+
+    private var hasAnyDeployedEndpoint: Bool {
+        guard let workspace = model.workspace else { return false }
+        return workspace.services.contains { !$0.endpoints.isEmpty }
+    }
+
+    private var endpointToggleSection: some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.2)) {
+                useCloudEndpoint.toggle()
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: useCloudEndpoint ? "cloud.fill" : "desktopcomputer")
+                    .font(.caption2.weight(.semibold))
+                Text(useCloudEndpoint ? "Cloud" : "Local")
+                    .font(.caption2.weight(.medium))
+            }
+            .foregroundStyle(useCloudEndpoint ? .cyan : .secondary)
+            .frame(minHeight: 28)
+            .padding(.horizontal, 8)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(useCloudEndpoint ? "Using cloud endpoints" : "Using local emulator")
     }
 
     private var toolbarDivider: some View {

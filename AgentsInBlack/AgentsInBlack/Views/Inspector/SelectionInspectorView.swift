@@ -524,6 +524,19 @@ private struct AgentSessionsSection: View {
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
                 Spacer()
+                if let deployedURL = model.deployedURL(for: service) {
+                    Button {
+                        let session = model.createRemoteSession(
+                            for: service, deployedURL: deployedURL, activate: true
+                        )
+                        openPiPChat(sessionID: session.id)
+                    } label: {
+                        Image(systemName: "cloud")
+                            .font(.caption2.weight(.semibold))
+                    }
+                    .buttonStyle(.plain)
+                    .help("New Remote Session")
+                }
                 Button {
                     let session = model.createSession(for: service, activate: true)
                     openPiPChat(sessionID: session.id)

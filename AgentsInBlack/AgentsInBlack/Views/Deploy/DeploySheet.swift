@@ -35,9 +35,16 @@ struct DeploySheet: View {
                 })
             }
         case .completed(let result):
-            DeployCompletedView(result: result) {
-                model.dismissDeploySheet()
-            }
+            DeployCompletedView(
+                result: result,
+                onOpenChat: { serviceResultID, deployedURL in
+                    model.openRemoteChat(serviceResultID: serviceResultID, deployedURL: deployedURL)
+                    model.dismissDeploySheet()
+                },
+                onDismiss: {
+                    model.dismissDeploySheet()
+                }
+            )
         case .failed(let error):
             DeployFailedView(
                 error: error,

@@ -100,12 +100,35 @@ public struct DefaultDeployExecutor: DeployExecuting {
         for service in plan.services {
             let imageTag = provider.registryImageTag(service: service, targetConfig: plan.targetConfig)
 
-            let dockerfilePath = URL(fileURLWithPath: workspaceRoot)
+            var dockerfilePath = URL(fileURLWithPath: workspaceRoot)
                 .appendingPathComponent(service.artifacts.dockerfile.relativePath)
                 .path
             let buildContext = URL(fileURLWithPath: workspaceRoot)
                 .appendingPathComponent(service.repoPath)
                 .path
+
+            // Copy MCP connection config into build context and patch Dockerfile to include it
+            if let mcpConfig = service.artifacts.mcpConnectionConfig {
+                let connectionsFileName = ".aib-connections.json"
+                let targetPath = URL(fileURLWithPath: buildContext)
+                    .appendingPathComponent(connectionsFileName)
+                try mcpConfig.content.write(
+                    toFile: targetPath.path,
+                    atomically: true,
+                    encoding: .utf8
+                )
+
+                // Append COPY instruction to Dockerfile so the file is available at runtime
+                let originalContent = try String(contentsOfFile: dockerfilePath, encoding: .utf8)
+                if !originalContent.contains(connectionsFileName) {
+                    let patchedPath = URL(fileURLWithPath: buildContext)
+                        .appendingPathComponent("Dockerfile.aib")
+                        .path
+                    let patchedContent = originalContent + "\nCOPY \(connectionsFileName) ./\n"
+                    try patchedContent.write(toFile: patchedPath, atomically: true, encoding: .utf8)
+                    dockerfilePath = patchedPath
+                }
+            }
 
             // Ensure Artifact Registry repository exists (idempotent)
             let repoCommands = provider.ensureRegistryRepoCommands(
@@ -426,6 +449,14 @@ public struct DefaultDeployExecutor: DeployExecuting {
                     break
                 }
             }
+
+            // Clean up temporary files from build context
+            let connectionsCleanup = URL(fileURLWithPath: buildContext)
+                .appendingPathComponent(".aib-connections.json")
+            try? FileManager.default.removeItem(at: connectionsCleanup)
+            let dockerfileCleanup = URL(fileURLWithPath: buildContext)
+                .appendingPathComponent("Dockerfile.aib")
+            try? FileManager.default.removeItem(at: dockerfileCleanup)
 
             if serviceFailed { continue }
         }
