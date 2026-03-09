@@ -672,7 +672,7 @@ final class AgentsInBlackAppModel {
     @discardableResult
     func createSession(for service: AIBServiceModel, activate: Bool) -> ChatSession {
         let baseURL = a2aBaseURL(for: service)
-        let rpcPath = service.a2aProfile?.rpcPath ?? "/"
+        let rpcPath = service.a2aProfile?.rpcPath ?? "/a2a"
         let card = agentCardCache.card(for: service.id)
         let session = ChatSession(
             serviceID: service.id,

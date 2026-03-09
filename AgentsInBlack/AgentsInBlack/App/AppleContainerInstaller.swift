@@ -68,6 +68,12 @@ struct AppleContainerInstaller {
         }
     }
 
+    /// Start container system services and builder without reinstalling.
+    /// Use when the CLI is already installed but the builder is not running.
+    static func startBuilder() async throws {
+        try await runContainerSystemStart()
+    }
+
     static func installLatest() async throws -> String {
         let release = try await fetchLatestRelease()
         guard let asset = selectInstallerAsset(from: release.assets) else {

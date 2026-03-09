@@ -6,8 +6,10 @@ struct DeployFailedView: View {
     let preflightReport: PreflightReport?
     let onDismiss: () -> Void
     @State private var isInstallingAppleContainer: Bool = false
+    @State private var isStartingBuilder: Bool = false
     @State private var appleContainerInstallMessage: String?
     @State private var appleContainerInstallFailed: Bool = false
+    @State private var updatedReport: PreflightReport?
 
     var body: some View {
         ScrollView {
@@ -43,7 +45,7 @@ struct DeployFailedView: View {
                 .frame(maxWidth: 500)
 
                 // Preflight check details
-                if error.phase == "preflight", let report = preflightReport {
+                if error.phase == "preflight", let report = updatedReport ?? preflightReport {
                     preflightResultsSection(report: report)
                 }
 
@@ -174,23 +176,50 @@ struct DeployFailedView: View {
             }
 
             if result.id == .buildBackendAvailable {
-                Button {
-                    Task { await installLatestAppleContainer() }
-                } label: {
-                    if isInstallingAppleContainer {
-                        HStack(spacing: 6) {
-                            ProgressView()
-                                .controlSize(.small)
-                            Text("Installing latest apple/container...")
+                let isCLINotInstalled: Bool = {
+                    if case .failed(let msg) = result.status {
+                        return msg.contains("not installed")
+                    }
+                    return false
+                }()
+
+                if isCLINotInstalled {
+                    Button {
+                        Task { await installLatestAppleContainer() }
+                    } label: {
+                        if isInstallingAppleContainer {
+                            HStack(spacing: 6) {
+                                ProgressView()
+                                    .controlSize(.small)
+                                Text("Installing latest apple/container...")
+                                    .font(.caption)
+                            }
+                        } else {
+                            Text("Install Latest apple/container")
                                 .font(.caption)
                         }
-                    } else {
-                        Text("Install Latest apple/container")
-                            .font(.caption)
                     }
+                    .disabled(isInstallingAppleContainer)
+                    .padding(.leading, 24)
+                } else {
+                    Button {
+                        Task { await startBuilder() }
+                    } label: {
+                        if isStartingBuilder {
+                            HStack(spacing: 6) {
+                                ProgressView()
+                                    .controlSize(.small)
+                                Text("Starting builder...")
+                                    .font(.caption)
+                            }
+                        } else {
+                            Text("Start Builder")
+                                .font(.caption)
+                        }
+                    }
+                    .disabled(isStartingBuilder)
+                    .padding(.leading, 24)
                 }
-                .disabled(isInstallingAppleContainer)
-                .padding(.leading, 24)
             }
 
             if let url = result.remediationURL {
@@ -208,6 +237,35 @@ struct DeployFailedView: View {
     }
 
     @MainActor
+    private func startBuilder() async {
+        guard !isStartingBuilder else { return }
+        isStartingBuilder = true
+        appleContainerInstallMessage = nil
+        appleContainerInstallFailed = false
+
+        do {
+            try await Task.detached(priority: .userInitiated) {
+                try await AppleContainerInstaller.startBuilder()
+            }.value
+            // Rerun the build backend check to update the status icon
+            let recheckResult = await BuildBackendAvailabilityChecker().run()
+            if var report = updatedReport ?? preflightReport {
+                report.results = report.results.map { r in
+                    r.id == .buildBackendAvailable ? recheckResult : r
+                }
+                updatedReport = report
+            }
+            appleContainerInstallMessage = nil
+            appleContainerInstallFailed = false
+        } catch {
+            appleContainerInstallMessage = "Failed to start builder: \(error.localizedDescription)"
+            appleContainerInstallFailed = true
+        }
+
+        isStartingBuilder = false
+    }
+
+    @MainActor
     private func installLatestAppleContainer() async {
         guard !isInstallingAppleContainer else { return }
         isInstallingAppleContainer = true
@@ -215,10 +273,17 @@ struct DeployFailedView: View {
         appleContainerInstallFailed = false
 
         do {
-            let version = try await Task.detached(priority: .userInitiated) {
+            _ = try await Task.detached(priority: .userInitiated) {
                 try await AppleContainerInstaller.installLatest()
             }.value
-            appleContainerInstallMessage = "apple/container \(version) was installed and builder startup was attempted. Run preflight again."
+            let recheckResult = await BuildBackendAvailabilityChecker().run()
+            if var report = updatedReport ?? preflightReport {
+                report.results = report.results.map { r in
+                    r.id == .buildBackendAvailable ? recheckResult : r
+                }
+                updatedReport = report
+            }
+            appleContainerInstallMessage = nil
             appleContainerInstallFailed = false
         } catch {
             appleContainerInstallMessage = "Install failed: \(error.localizedDescription)"

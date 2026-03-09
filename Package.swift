@@ -22,8 +22,8 @@ let package = Package(
         .package(url: "https://github.com/swift-server/async-http-client.git", from: "1.25.0"),
         .package(url: "https://github.com/apple/swift-log.git", from: "1.6.0"),
         .package(url: "https://github.com/jpsim/Yams", from: "6.2.0"),
-        .package(url: "https://github.com/apple/containerization.git", from: "0.26.0"),
-        .package(url: "https://github.com/apple/container.git", from: "0.10.0"),
+        .package(url: "https://github.com/1amageek/containerization.git", revision: "5d048bb"),
+        .package(url: "https://github.com/1amageek/container.git", revision: "0ec965e"),
     ],
     targets: [
         .target(

@@ -1,11 +1,13 @@
 import Foundation
 
 /// Checks whether apple/container build backend is available.
-struct BuildBackendAvailabilityChecker: PreflightChecker {
-    let checkID = PreflightCheckID.buildBackendAvailable
-    let title = "Build Backend"
+public struct BuildBackendAvailabilityChecker: PreflightChecker {
+    public let checkID = PreflightCheckID.buildBackendAvailable
+    public let title = "Build Backend"
 
-    func run() async -> PreflightCheckResult {
+    public init() {}
+
+    public func run() async -> PreflightCheckResult {
         func summarized(_ output: String) -> String {
             let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
             if trimmed.isEmpty {

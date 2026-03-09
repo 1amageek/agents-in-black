@@ -144,6 +144,10 @@ public struct GCPCloudRunProvider: DeploymentProvider, Sendable {
           echo "gcloud CLI is not installed."
           exit 127
         fi
+        if container registry list 2>/dev/null | awk 'NR>1 {print $1}' | grep -Fx -- \(hostForShell) >/dev/null 2>&1; then
+          echo "container registry login already configured for \(host)"
+          exit 0
+        fi
         access_token="$(gcloud auth print-access-token)"
         if [ -z "$access_token" ]; then
           echo "Failed to get gcloud access token."
@@ -331,12 +335,26 @@ public struct GCPCloudRunProvider: DeploymentProvider, Sendable {
         let contextForShell = shellQuote(buildContext)
         let dockerfileForShell = shellQuote(dockerfileArgument)
         let imageForShell = shellQuote(imageTag)
+        let imageHost = imageTag.split(separator: "/", maxSplits: 1).first.map(String.init) ?? imageTag
+        let imageHostForShell = shellQuote(imageHost)
         let script = """
         set -euo pipefail
         if ! command -v container >/dev/null 2>&1; then
           echo "apple/container CLI is not installed. Install it from https://github.com/apple/container/releases"
           exit 127
         fi
+        if ! command -v gcloud >/dev/null 2>&1; then
+          echo "gcloud CLI is not installed."
+          exit 127
+        fi
+        refresh_registry_auth() {
+          access_token="$(gcloud auth print-access-token)"
+          if [ -z "$access_token" ]; then
+            echo "Failed to get gcloud access token."
+            return 1
+          fi
+          printf '%s' "$access_token" | container registry login --username oauth2accesstoken --password-stdin \(imageHostForShell)
+        }
         if ! container builder status >/dev/null 2>&1; then
           set +e
           builder_start_output="$(container builder start 2>&1)"
@@ -449,6 +467,7 @@ public struct GCPCloudRunProvider: DeploymentProvider, Sendable {
         push_log="$(mktemp -t aib-container-push.XXXXXX)"
         push_attempt=1
         push_max_attempts=2
+        push_auth_refresh_attempted=0
         while true; do
           set +e
           container image push --platform linux/amd64 \(imageForShell) 2>&1 | tee "$push_log"
@@ -456,6 +475,14 @@ public struct GCPCloudRunProvider: DeploymentProvider, Sendable {
           set -e
           if [ "$push_status" -eq 0 ]; then
             break
+          fi
+
+          if grep -Eqi "unauthorized|authentication required|denied|no basic auth credentials|insufficient scope" "$push_log" \
+            && [ "$push_auth_refresh_attempted" -eq 0 ]; then
+            echo "Registry authentication appears stale. Refreshing login and retrying push..."
+            refresh_registry_auth
+            push_auth_refresh_attempted=1
+            continue
           fi
 
           if grep -Eqi "connection reset by peer|TLS handshake timeout|i/o timeout|temporary failure|timeout" "$push_log" \
@@ -627,31 +654,31 @@ public struct GCPCloudRunProvider: DeploymentProvider, Sendable {
             let result = try await ShellProbe.run(command: command, timeout: .seconds(15))
             guard result.exitCode == 0, !result.stdout.isEmpty else { return [] }
 
-            // JSON output: {"spec":{"template":{"spec":{"containers":[{"env":[{"name":"KEY","value":"..."}]}]}}}}
-            guard let data = result.stdout.data(using: .utf8),
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-            else { return [] }
+            guard let data = result.stdout.data(using: .utf8) else { return [] }
+            let jsonObject: Any
+            do {
+                jsonObject = try JSONSerialization.jsonObject(with: data)
+            } catch {
+                return []
+            }
 
-            // Navigate the nested structure
+            let envEntries: [[String: Any]]
+            if let topLevelArray = jsonObject as? [[String: Any]] {
+                // `--format='json(spec.template.spec.containers[0].env)'` returns an array.
+                envEntries = topLevelArray
+            } else if let topLevelDict = jsonObject as? [String: Any],
+                      let envArray = Self.extractEnvArray(from: topLevelDict)
+            {
+                // Fallback for full-service JSON output shape.
+                envEntries = envArray
+            } else {
+                return []
+            }
+
             var names: Set<String> = []
-            let envArray: [[String: Any]]? = {
-                if let spec = json["spec"] as? [String: Any],
-                   let template = spec["template"] as? [String: Any],
-                   let templateSpec = template["spec"] as? [String: Any],
-                   let containers = templateSpec["containers"] as? [[String: Any]],
-                   let first = containers.first,
-                   let env = first["env"] as? [[String: Any]]
-                {
-                    return env
-                }
-                return nil
-            }()
-
-            if let envArray {
-                for entry in envArray {
-                    if let name = entry["name"] as? String {
-                        names.insert(name)
-                    }
+            for entry in envEntries {
+                if let name = entry["name"] as? String, !name.isEmpty {
+                    names.insert(name)
                 }
             }
             return names
@@ -706,6 +733,22 @@ public struct GCPCloudRunProvider: DeploymentProvider, Sendable {
         default:
             return false
         }
+    }
+
+    private static func extractEnvArray(from json: [String: Any]) -> [[String: Any]]? {
+        if let env = json["env"] as? [[String: Any]] {
+            return env
+        }
+        if let spec = json["spec"] as? [String: Any],
+           let template = spec["template"] as? [String: Any],
+           let templateSpec = template["spec"] as? [String: Any],
+           let containers = templateSpec["containers"] as? [[String: Any]],
+           let first = containers.first,
+           let env = first["env"] as? [[String: Any]]
+        {
+            return env
+        }
+        return nil
     }
 
 }

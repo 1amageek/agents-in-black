@@ -13,19 +13,19 @@
     {
       "identity" : "container",
       "kind" : "remoteSourceControl",
-      "location" : "https://github.com/apple/container.git",
+      "location" : "https://github.com/1amageek/container.git",
       "state" : {
-        "revision" : "6bdb647b69671c037e2188558ed2e5ba49af2e1a",
-        "version" : "0.10.0"
+        "branch" : "0ec965e",
+        "revision" : "0ec965e0546a29de3c3f46cea39b4a543787d8f1"
       }
     },
     {
       "identity" : "containerization",
       "kind" : "remoteSourceControl",
-      "location" : "https://github.com/apple/containerization.git",
+      "location" : "https://github.com/1amageek/containerization.git",
       "state" : {
-        "revision" : "185bc1ecd7b6d9ef1938da1846e620ab73db8950",
-        "version" : "0.26.3"
+        "branch" : "5d048bb",
+        "revision" : "5d048bbf3f5db946021dc7da3393df37e8e8f9fc"
       }
     },
     {
@@ -69,8 +69,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/apple/swift-async-algorithms.git",
       "state" : {
-        "revision" : "2971dd5d9f6e0515664b01044826bcea16e59fac",
-        "version" : "1.1.2"
+        "revision" : "9d349bcc328ac3c31ce40e746b5882742a0d1272",
+        "version" : "1.1.3"
       }
     },
     {
@@ -105,8 +105,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/apple/swift-configuration.git",
       "state" : {
-        "revision" : "1bb939fe7bbb00b8f8bab664cc90020c035c08d9",
-        "version" : "1.1.0"
+        "revision" : "be76c4ad929eb6c4bcaf3351799f2adf9e6848a9",
+        "version" : "1.2.0"
       }
     },
     {

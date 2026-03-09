@@ -27,7 +27,7 @@ final class ChatSession: Identifiable {
         id: UUID = UUID(),
         serviceID: String,
         baseURL: URL,
-        rpcPath: String = "/",
+        rpcPath: String = "/a2a",
         agentCard: A2AAgentCard? = nil,
         title: String = "New Chat"
     ) {

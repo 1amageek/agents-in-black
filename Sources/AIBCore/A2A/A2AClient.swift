@@ -9,7 +9,7 @@ public final class A2AClient: Sendable {
     private let rpcPath: String
     private let session: URLSession
 
-    public init(baseURL: URL, rpcPath: String = "/") {
+    public init(baseURL: URL, rpcPath: String = "/a2a") {
         self.baseURL = baseURL
         self.rpcPath = rpcPath
         let configuration = URLSessionConfiguration.ephemeral
