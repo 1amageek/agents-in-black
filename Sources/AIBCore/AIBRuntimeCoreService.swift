@@ -141,6 +141,11 @@ public enum AIBRuntimeCoreService {
             workspaceRoot: workspaceRoot,
             gatewayPort: resolved.config.gateway.port
         )
+        try WorkspaceSyncer.writeRuntimeSkillArtifacts(
+            resolved: resolved,
+            workspaceRoot: workspaceRoot,
+            workspace: workspace
+        )
         return LoadedConfig(config: resolved.config, warnings: resolved.warnings, configPath: path)
     }
 

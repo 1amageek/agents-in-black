@@ -35,7 +35,8 @@ struct ToolbarActivityView: View {
 
                     Divider()
 
-                    DockerStatusIndicator(model: model)
+                    EditorStatusIndicator(model: model)
+                    BuildBackendStatusIndicator(model: model)
                     if model.cloudProviderCheckResult != nil || model.detectedProvider != nil {
                         CloudProviderStatusIndicator(
                             result: model.cloudProviderCheckResult,

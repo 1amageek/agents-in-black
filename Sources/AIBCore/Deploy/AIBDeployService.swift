@@ -1,7 +1,7 @@
 import AIBConfig
 import AIBWorkspace
 import Foundation
-import Yams
+import YAML
 
 /// Public facade for deployment operations.
 /// Provider-agnostic: all cloud-specific logic is delegated to DeploymentProvider.
@@ -25,7 +25,7 @@ public enum AIBDeployService {
     }
 
     /// Run only the prerequisite tool-installation checks for the given provider.
-    /// Returns results for prerequisite check IDs only (e.g., dockerInstalled, gcloudInstalled).
+    /// Returns results for prerequisite check IDs only (e.g., buildBackendAvailable, gcloudInstalled).
     /// Lightweight alternative to `preflightCheck(provider:)` for toolbar status indicators.
     public static func checkPrerequisites(provider: any DeploymentProvider) async -> [PreflightCheckResult] {
         let prerequisiteIDs = provider.prerequisiteCheckIDs
@@ -62,29 +62,29 @@ public enum AIBDeployService {
 
         if FileManager.default.fileExists(atPath: targetPath) {
             let content = try String(contentsOfFile: targetPath, encoding: .utf8)
-            if let yaml = try Yams.load(yaml: content) as? [String: Any],
-               let defaults = yaml["defaults"] as? [String: Any]
-            {
-                if let r = defaults["region"] as? String, overrides["region"] == nil {
-                    region = r
-                }
-                if let a = defaults["auth"] as? String {
-                    auth = AIBDeployAuthMode(rawValue: a) ?? .private
-                }
-                // Merge any additional keys from YAML into providerConfig
-                for (key, value) in defaults {
-                    if key != "region" && key != "auth", let strVal = value as? String {
-                        if providerConfig[key] == nil {
-                            providerConfig[key] = strVal
+            if let node = try compose(yaml: content), let root = node.mapping {
+                if let defaults = root["defaults"]?.mapping {
+                    if let r = defaults["region"]?.scalar?.string, overrides["region"] == nil {
+                        region = r
+                    }
+                    if let a = defaults["auth"]?.scalar?.string {
+                        auth = AIBDeployAuthMode(rawValue: a) ?? .private
+                    }
+                    // Merge any additional keys from YAML into providerConfig
+                    for (key, value) in defaults {
+                        guard let keyStr = key.scalar?.string else { continue }
+                        if keyStr != "region" && keyStr != "auth",
+                           let strVal = value.scalar?.string,
+                           providerConfig[keyStr] == nil {
+                            providerConfig[keyStr] = strVal
                         }
                     }
                 }
-            }
-            // Top-level keys (e.g., gcpProject, artifactRegistryHost)
-            if let yaml = try Yams.load(yaml: content) as? [String: Any] {
-                for (key, value) in yaml where key != "defaults" {
-                    if let strVal = value as? String, providerConfig[key] == nil {
-                        providerConfig[key] = strVal
+                // Top-level keys (e.g., gcpProject, artifactRegistryHost)
+                for (key, value) in root {
+                    guard let keyStr = key.scalar?.string, keyStr != "defaults" else { continue }
+                    if let strVal = value.scalar?.string, providerConfig[keyStr] == nil {
+                        providerConfig[keyStr] = strVal
                     }
                 }
             }
@@ -111,6 +111,12 @@ public enum AIBDeployService {
         let workspacePath = AIBRuntimeCoreService.workspaceYAMLPath(workspaceRoot: workspaceRoot)
         let workspace = try WorkspaceYAMLCodec.loadWorkspace(at: workspacePath)
         let resolved = try WorkspaceSyncer.resolveConfig(workspaceRoot: workspaceRoot, workspace: workspace)
+        let workspaceSkillsByID = Dictionary(uniqueKeysWithValues: (workspace.skills ?? []).map { ($0.id, $0) })
+        let skillIDsByService = Dictionary(uniqueKeysWithValues: workspace.repos.flatMap { repo in
+            (repo.services ?? []).map { service in
+                ("\(repo.namespace)/\(service.id)", service.skills ?? [])
+            }
+        })
 
         // Build service name mapping from pre-resolved metadata
         var serviceNameMap: [String: String] = [:]
@@ -154,6 +160,39 @@ public enum AIBDeployService {
                     service: service,
                     workspaceRoot: workspaceRoot
                 )
+            } catch {
+                fatalErrors.append(
+                    "Service '\(service.id.rawValue)': \(error.localizedDescription)"
+                )
+                continue
+            }
+
+            let skillArtifacts: [AIBDeployArtifact]
+            do {
+                skillArtifacts = try resolveSkillArtifacts(
+                    workspaceRoot: workspaceRoot,
+                    assignedSkillIDs: skillIDsByService[service.id.rawValue] ?? [],
+                    workspaceSkillsByID: workspaceSkillsByID
+                )
+            } catch {
+                fatalErrors.append(
+                    "Service '\(service.id.rawValue)': \(error.localizedDescription)"
+                )
+                continue
+            }
+
+            let executionDirectoryArtifacts: [AIBDeployArtifact]
+            do {
+                if service.kind == .agent {
+                    executionDirectoryArtifacts = try resolveExecutionDirectoryArtifacts(
+                        executionRootPath: meta?.executionRootPath
+                            ?? URL(fileURLWithPath: repoPath, relativeTo: URL(fileURLWithPath: workspaceRoot))
+                            .standardizedFileURL
+                            .path(percentEncoded: false)
+                    )
+                } else {
+                    executionDirectoryArtifacts = []
+                }
             } catch {
                 fatalErrors.append(
                     "Service '\(service.id.rawValue)': \(error.localizedDescription)"
@@ -300,7 +339,9 @@ public enum AIBDeployService {
                 artifacts: AIBDeployArtifactSet(
                     dockerfile: dockerfile,
                     deployConfig: AIBDeployArtifact(relativePath: "", content: "", source: .generated),
-                    mcpConnectionConfig: mcpConnectionArtifact
+                    mcpConnectionConfig: mcpConnectionArtifact,
+                    skillConfigs: skillArtifacts,
+                    executionDirectoryConfigs: executionDirectoryArtifacts
                 ),
                 resourceConfig: resourceConfig,
                 envVars: envVars,
@@ -421,11 +462,7 @@ public enum AIBDeployService {
             if service.artifacts.dockerfile.source == .generated {
                 let dockerfileDest = URL(fileURLWithPath: workspaceRoot)
                     .appendingPathComponent(service.artifacts.dockerfile.relativePath)
-                try service.artifacts.dockerfile.content.write(
-                    to: dockerfileDest,
-                    atomically: true,
-                    encoding: .utf8
-                )
+                try service.artifacts.dockerfile.content.write(to: dockerfileDest, options: .atomic)
             }
 
             try ensureDeployDockerignore(
@@ -440,17 +477,43 @@ public enum AIBDeployService {
 
             try service.artifacts.deployConfig.content.write(
                 to: serviceDeployDir.appendingPathComponent("deploy.yaml"),
-                atomically: true,
-                encoding: .utf8
+                options: .atomic
             )
 
             // Write MCP connection config if applicable
             if let mcpConfig = service.artifacts.mcpConnectionConfig {
                 try mcpConfig.content.write(
                     to: serviceDeployDir.appendingPathComponent("connections.json"),
-                    atomically: true,
-                    encoding: .utf8
+                    options: .atomic
                 )
+            }
+
+            if !service.artifacts.skillConfigs.isEmpty {
+                let skillDir = serviceDeployDir.appendingPathComponent("skills")
+                try fm.createDirectory(at: skillDir, withIntermediateDirectories: true)
+
+                for artifact in service.artifacts.skillConfigs {
+                    let destination = skillDir.appendingPathComponent(artifact.relativePath)
+                    try fm.createDirectory(
+                        at: destination.deletingLastPathComponent(),
+                        withIntermediateDirectories: true
+                    )
+                    try artifact.content.write(to: destination, options: .atomic)
+                }
+            }
+
+            if !service.artifacts.executionDirectoryConfigs.isEmpty {
+                let executionDir = serviceDeployDir.appendingPathComponent("execution-directory")
+                try fm.createDirectory(at: executionDir, withIntermediateDirectories: true)
+
+                for artifact in service.artifacts.executionDirectoryConfigs {
+                    let destination = executionDir.appendingPathComponent(artifact.relativePath)
+                    try fm.createDirectory(
+                        at: destination.deletingLastPathComponent(),
+                        withIntermediateDirectories: true
+                    )
+                    try artifact.content.write(to: destination, options: .atomic)
+                }
             }
         }
 
@@ -571,6 +634,86 @@ public enum AIBDeployService {
 }
 
 // MARK: - Helpers
+
+private extension AIBDeployService {
+    static let deployedSkillProjectionRoots: [String] = [
+        "__aib_deploy/claude/skills",
+        "__aib_deploy/agents/skills",
+        "__aib_deploy/skills",
+    ]
+
+    static func resolveSkillArtifacts(
+        workspaceRoot: String,
+        assignedSkillIDs: [String],
+        workspaceSkillsByID: [String: WorkspaceSkillConfig]
+    ) throws -> [AIBDeployArtifact] {
+        let workspaceSkillsRoot = SkillBundleLoader.workspaceSkillsRootURL(workspaceRoot: workspaceRoot)
+        var artifacts: [AIBDeployArtifact] = []
+
+        for skillID in assignedSkillIDs {
+            let bundleFiles = try SkillBundleLoader.bundleFiles(
+                id: skillID,
+                rootURL: workspaceSkillsRoot,
+                fallback: workspaceSkillsByID[skillID]
+            )
+
+            for root in deployedSkillProjectionRoots {
+                for file in bundleFiles {
+                    artifacts.append(AIBDeployArtifact(
+                        relativePath: "\(root)/\(skillID)/\(file.relativePath)",
+                        content: file.content,
+                        source: .generated
+                    ))
+                }
+            }
+        }
+
+        return artifacts.sorted { $0.relativePath < $1.relativePath }
+    }
+
+    static func resolveExecutionDirectoryArtifacts(
+        executionRootPath: String
+    ) throws -> [AIBDeployArtifact] {
+        let executionRootURL = URL(fileURLWithPath: executionRootPath)
+        let files = try AIBExecutionDirectoryInspector.collectFiles(at: executionRootURL)
+
+        return try files.map { file in
+            AIBDeployArtifact(
+                relativePath: try projectedExecutionDirectoryRelativePath(for: file.relativePath),
+                content: file.content,
+                source: .generated
+            )
+        }
+        .sorted { $0.relativePath < $1.relativePath }
+    }
+
+    static func projectedExecutionDirectoryRelativePath(for relativePath: String) throws -> String {
+        let parts = relativePath.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+        guard let head = parts.first else {
+            throw AIBDeployError(
+                phase: "plan",
+                message: "Execution directory artifact path is empty"
+            )
+        }
+
+        let tail = parts.dropFirst().joined(separator: "/")
+        switch head {
+        case ".claude":
+            return tail.isEmpty ? "__aib_deploy/claude" : "__aib_deploy/claude/\(tail)"
+        case ".codex":
+            return tail.isEmpty ? "__aib_deploy/codex" : "__aib_deploy/codex/\(tail)"
+        case ".agents":
+            return tail.isEmpty ? "__aib_deploy/agents" : "__aib_deploy/agents/\(tail)"
+        case "AGENTS.md", "AGENT.md", "CLAUDE.md", "CODEX.md":
+            return "__aib_deploy/root/\(head)"
+        default:
+            throw AIBDeployError(
+                phase: "plan",
+                message: "Unsupported execution directory artifact: \(relativePath)"
+            )
+        }
+    }
+}
 
 private extension AIBServiceKind {
     init(from configKind: ServiceKind) {

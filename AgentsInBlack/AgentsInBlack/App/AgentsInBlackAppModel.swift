@@ -96,7 +96,7 @@ final class AgentsInBlackAppModel {
     private let configStore: DeployTargetConfigStore = DefaultDeployTargetConfigStore()
 
     // MARK: - Deploy Environment Status
-    var dockerCheckResult: PreflightCheckResult?
+    var buildBackendCheckResult: PreflightCheckResult?
     var cloudProviderCheckResult: PreflightCheckResult?
     var detectedProvider: (any DeploymentProvider)?
     var isCheckingEnvironment: Bool = false
@@ -112,15 +112,20 @@ final class AgentsInBlackAppModel {
     // MARK: - Create New Service
     var showCreateServiceSheet: Bool = false
 
-    // MARK: - Docker Runtime
-    var installedDockerRuntimes: [DockerRuntime] = []
-    var preferredDockerRuntime: DockerRuntime?
+    // MARK: - Skills
+    var showAddSkillSheet: Bool = false
+    var showSkillRegistrySheet: Bool = false
+
+    // MARK: - Editor
+    var installedEditorApps: [ExternalEditorApp] = []
+    var preferredEditorApp: ExternalEditorApp?
 
     let workspaceDiscovery = WorkspaceDiscoveryService()
     let emulatorController = AIBEmulatorController()
     let editorService = ExternalEditorService()
 
     init() {
+        refreshPreferredApplications()
         emulatorEventsTask = Task { [weak self] in
             guard let self else { return }
             for await event in emulatorController.events() {
@@ -212,8 +217,11 @@ final class AgentsInBlackAppModel {
     }
 
     func loadWorkspace(at url: URL) async {
+        let logger = os.Logger(subsystem: "com.aib.app", category: "Workspace")
+        logger.info("loadWorkspace: starting at \(url.path)")
         do {
             let snapshot = try workspaceDiscovery.loadWorkspace(at: url)
+            logger.info("loadWorkspace: loaded \(snapshot.repos.count) repos, \(snapshot.services.count) services")
             workspace = snapshot
             runtimeIssues = []
             mcpConnectionStatusByConnectionID = [:]
@@ -242,6 +250,7 @@ final class AgentsInBlackAppModel {
             lastErrorMessage = nil
             refreshEnvironmentStatus()
         } catch {
+            logger.error("loadWorkspace: failed: \(error)")
             setError("Failed to load workspace: \(error.localizedDescription)")
         }
     }
@@ -431,6 +440,8 @@ final class AgentsInBlackAppModel {
             }
         case .issue:
             break
+        case .skill:
+            break
         }
     }
 
@@ -546,21 +557,37 @@ final class AgentsInBlackAppModel {
 
     func openInEditor() {
         if let fileURL = selectedFileURL() {
-            editorService.open(url: fileURL)
+            editorService.open(url: fileURL, preferredEditor: preferredEditorApp)
             return
         }
         if let service = selectedService(),
            let parentRepo = repo(by: service.repoID) {
-            editorService.open(url: parentRepo.rootURL)
+            editorService.open(url: parentRepo.rootURL, preferredEditor: preferredEditorApp)
             return
         }
         if let repo = selectedRepo() {
-            editorService.open(url: repo.rootURL)
+            editorService.open(url: repo.rootURL, preferredEditor: preferredEditorApp)
             return
         }
         if let workspace {
-            editorService.open(url: workspace.rootURL)
+            editorService.open(url: workspace.rootURL, preferredEditor: preferredEditorApp)
         }
+    }
+
+    func openExecutionDirectoryEntry(
+        _ entry: AIBExecutionDirectoryEntry,
+        for service: AIBServiceModel
+    ) {
+        guard let rootPath = service.executionDirectoryPath else { return }
+        let rootURL = URL(fileURLWithPath: rootPath, isDirectory: true)
+        let targetURL = rootURL.appendingPathComponent(entry.relativePath, isDirectory: entry.kind == .directory)
+        editorService.open(url: targetURL, preferredEditor: preferredEditorApp)
+    }
+
+    func openExecutionDirectoryRoot(for service: AIBServiceModel) {
+        guard let rootPath = service.executionDirectoryPath else { return }
+        let rootURL = URL(fileURLWithPath: rootPath, isDirectory: true)
+        editorService.open(url: rootURL, preferredEditor: preferredEditorApp)
     }
 
     func issueCount(for severity: RuntimeIssueSeverity) -> Int {
@@ -631,6 +658,8 @@ final class AgentsInBlackAppModel {
             return repoContaining(filePath: path)
         case .issue:
             return nil
+        case .skill:
+            return nil
         case nil:
             return nil
         }
@@ -639,6 +668,19 @@ final class AgentsInBlackAppModel {
     func selectedService() -> AIBServiceModel? {
         guard case .service(let id) = selection else { return nil }
         return service(by: id)
+    }
+
+    func selectedSkill() -> AIBSkillDefinition? {
+        guard case .skill(let id) = selection else { return nil }
+        return workspace?.skills.first(where: { $0.id == id })
+    }
+
+    /// Services that have this skill assigned.
+    func servicesWithSkill(_ skillID: String) -> [AIBServiceModel] {
+        guard let workspace else { return [] }
+        return workspace.services.filter {
+            $0.assignedSkillIDs.contains(skillID) || $0.nativeSkillIDs.contains(skillID)
+        }
     }
 
     func selectedFlowNode() -> AIBServiceModel? {
@@ -1026,6 +1068,21 @@ final class AgentsInBlackAppModel {
         }
     }
 
+    func removeServiceFromFlow(namespacedServiceID: String) async {
+        guard let workspace else { return }
+        do {
+            _ = try AIBWorkspaceCore.removeService(
+                workspaceRoot: workspace.rootURL.path,
+                namespacedServiceID: namespacedServiceID
+            )
+            _ = try AIBWorkspaceCore.syncWorkspace(workspaceRoot: workspace.rootURL.path)
+            await loadWorkspace(at: workspace.rootURL)
+            lastErrorMessage = nil
+        } catch {
+            setError("Failed to remove service: \(error.localizedDescription)")
+        }
+    }
+
     func updateMCPProfile(namespacedServiceID: String, path: String) async {
         guard let workspace else { return }
         do {
@@ -1060,6 +1117,155 @@ final class AgentsInBlackAppModel {
             lastErrorMessage = nil
         } catch {
             setError("Failed to update service kind: \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - Skill Management (Workspace)
+
+    /// Import a skill from the user library into the workspace and sync.
+    func importSkill(skillID: String) async {
+        guard let workspace else { return }
+        do {
+            try AIBWorkspaceCore.importSkill(workspaceRoot: workspace.rootURL.path, skillID: skillID)
+            _ = try AIBWorkspaceCore.syncWorkspace(workspaceRoot: workspace.rootURL.path)
+            await loadWorkspace(at: workspace.rootURL)
+            lastErrorMessage = nil
+        } catch {
+            setError("Failed to import skill: \(error.localizedDescription)")
+        }
+    }
+
+    func removeSkillFromWorkspace(skillID: String) async {
+        guard let workspace else { return }
+        do {
+            try AIBWorkspaceCore.removeSkill(workspaceRoot: workspace.rootURL.path, skillID: skillID)
+            _ = try AIBWorkspaceCore.syncWorkspace(workspaceRoot: workspace.rootURL.path)
+            await loadWorkspace(at: workspace.rootURL)
+            lastErrorMessage = nil
+        } catch {
+            setError("Failed to remove skill: \(error.localizedDescription)")
+        }
+    }
+
+    func assignSkill(skillID: String, namespacedServiceID: String) async {
+        guard let workspace else { return }
+        do {
+            if let skill = workspace.skills.first(where: { $0.id == skillID }),
+               !skill.isWorkspaceManaged,
+               let bundleRootPath = skill.bundleRootPath {
+                try AIBWorkspaceCore.importSkillBundle(
+                    workspaceRoot: workspace.rootURL.path,
+                    skillID: skillID,
+                    sourcePath: bundleRootPath
+                )
+            }
+            try AIBWorkspaceCore.assignSkill(
+                workspaceRoot: workspace.rootURL.path,
+                skillID: skillID,
+                namespacedServiceID: namespacedServiceID
+            )
+            _ = try AIBWorkspaceCore.syncWorkspace(workspaceRoot: workspace.rootURL.path)
+            await loadWorkspace(at: workspace.rootURL)
+            lastErrorMessage = nil
+        } catch {
+            setError("Failed to assign skill: \(error.localizedDescription)")
+        }
+    }
+
+    func unassignSkill(skillID: String, namespacedServiceID: String) async {
+        guard let workspace else { return }
+        do {
+            try AIBWorkspaceCore.unassignSkill(
+                workspaceRoot: workspace.rootURL.path,
+                skillID: skillID,
+                namespacedServiceID: namespacedServiceID
+            )
+            _ = try AIBWorkspaceCore.syncWorkspace(workspaceRoot: workspace.rootURL.path)
+            await loadWorkspace(at: workspace.rootURL)
+            lastErrorMessage = nil
+        } catch {
+            setError("Failed to unassign skill: \(error.localizedDescription)")
+        }
+    }
+
+    /// Returns workspace-level skill definitions (for deployment).
+    func workspaceSkills() -> [AIBSkillDefinition] {
+        workspace?.skills ?? []
+    }
+
+    /// Returns skill definitions assigned to a given service.
+    func assignedSkills(for service: AIBServiceModel) -> [AIBSkillDefinition] {
+        guard let workspace else { return [] }
+        let skillIDs = Set(service.assignedSkillIDs).union(service.nativeSkillIDs)
+        return skillIDs.compactMap { skillID in
+            workspace.skills.first(where: { $0.id == skillID })
+        }
+        .sorted { lhs, rhs in
+            lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+        }
+    }
+
+    /// Returns workspace skills NOT yet assigned to a given service.
+    func unassignedSkills(for service: AIBServiceModel) -> [AIBSkillDefinition] {
+        guard let workspace else { return [] }
+        let assignedSet = Set(service.assignedSkillIDs).union(service.nativeSkillIDs)
+        return workspace.skills.filter { !assignedSet.contains($0.id) }
+    }
+
+    func isExplicitlyAssigned(skillID: String, to service: AIBServiceModel) -> Bool {
+        service.assignedSkillIDs.contains(skillID)
+    }
+
+    func isNativelyAvailable(skillID: String, for service: AIBServiceModel) -> Bool {
+        service.nativeSkillIDs.contains(skillID)
+    }
+
+    // MARK: - Skill Library (User-level)
+
+    /// Create a skill in the user library (`~/.aib/skills/`).
+    func createLibrarySkill(name: String, description: String?, instructions: String?, tags: [String]) async {
+        do {
+            try AIBWorkspaceCore.createLibrarySkill(
+                name: name,
+                description: description,
+                instructions: instructions,
+                tags: tags
+            )
+            lastErrorMessage = nil
+        } catch {
+            setError("Failed to create skill: \(error.localizedDescription)")
+        }
+    }
+
+    /// Delete a skill from the user library.
+    func deleteLibrarySkill(id: String) async {
+        do {
+            try AIBWorkspaceCore.deleteLibrarySkill(id: id)
+            lastErrorMessage = nil
+        } catch {
+            setError("Failed to delete skill: \(error.localizedDescription)")
+        }
+    }
+
+    /// List all skills in the user library.
+    func librarySkills() -> [AIBSkillDefinition] {
+        (try? AIBWorkspaceCore.listLibrarySkills()) ?? []
+    }
+
+    // MARK: - Skill Registry (Remote)
+
+    /// List skills available in the remote registry.
+    func listRegistrySkills() async throws -> [AIBWorkspaceCore.RegistrySkillEntry] {
+        try await AIBWorkspaceCore.listRegistrySkills()
+    }
+
+    /// Download a skill from the remote registry into the user library.
+    func downloadRegistrySkill(id: String) async {
+        do {
+            try await AIBWorkspaceCore.downloadRegistrySkill(id: id)
+            lastErrorMessage = nil
+        } catch {
+            setError("Failed to download skill: \(error.localizedDescription)")
         }
     }
 
@@ -1115,32 +1321,23 @@ final class AgentsInBlackAppModel {
         showCloudSettings = true
     }
 
-    /// Run prerequisite tool-installation checks (Docker + cloud provider CLI)
+    /// Run prerequisite tool-installation checks for the build backend and cloud provider.
     /// and update toolbar indicators. Called on workspace load and cloud settings dismiss.
-    func selectDockerRuntime(_ runtime: DockerRuntime) {
-        preferredDockerRuntime = runtime
-        DockerRuntimeSettings.preferredRuntimeID = runtime.id
+    func selectEditorApp(_ editor: ExternalEditorApp) {
+        preferredEditorApp = editor
+        ExternalEditorSettings.preferredEditorID = editor.id
     }
 
-    func launchDockerRuntime() {
-        guard let runtime = preferredDockerRuntime else { return }
-        NSWorkspace.shared.openApplication(
-            at: runtime.appURL,
-            configuration: NSWorkspace.OpenConfiguration()
-        ) { [weak self] _, _ in
-            DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
-                self?.refreshEnvironmentStatus()
-            }
-        }
+    func launchEditorApp() {
+        guard let editor = preferredEditorApp else { return }
+        editorService.launch(editor)
     }
 
     func refreshEnvironmentStatus() {
-        // Detect installed Docker runtimes
-        installedDockerRuntimes = DockerRuntime.detectInstalled()
-        preferredDockerRuntime = DockerRuntimeSettings.resolvePreferred(from: installedDockerRuntimes)
+        refreshPreferredApplications()
 
         guard let workspace else {
-            dockerCheckResult = nil
+            buildBackendCheckResult = nil
             cloudProviderCheckResult = nil
             detectedProvider = nil
             return
@@ -1160,12 +1357,7 @@ final class AgentsInBlackAppModel {
                 return
             }
 
-            // Run prerequisite checks in parallel.
-            // Docker checks are optional and only included when the provider requires them.
-            let checkerIDs = Set(provider.preflightCheckers().map(\.checkID))
-            let dockerRelated: Set<PreflightCheckID> = [.dockerInstalled, .dockerDaemonRunning]
-            let includesDockerChecks = !checkerIDs.intersection(dockerRelated).isEmpty
-            let toolbarCheckIDs = provider.prerequisiteCheckIDs.union(includesDockerChecks ? dockerRelated : [])
+            let toolbarCheckIDs = provider.prerequisiteCheckIDs.union([.buildBackendAvailable])
             let checkers = provider.preflightCheckers().filter { toolbarCheckIDs.contains($0.checkID) }
 
             let results = await withTaskGroup(
@@ -1184,28 +1376,12 @@ final class AgentsInBlackAppModel {
 
             guard !Task.isCancelled else { return }
 
-            // Docker status: worst of dockerInstalled and dockerDaemonRunning
-            let dockerInstalled = results.first(where: { $0.id == .dockerInstalled })
-            let dockerDaemon = results.first(where: { $0.id == .dockerDaemonRunning })
-            let dockerStatus: PreflightCheckResult? = {
-                guard includesDockerChecks else {
-                    return PreflightCheckResult(
-                        id: .dockerInstalled,
-                        title: "Docker",
-                        status: .passed(detail: "Not required for current deploy provider")
-                    )
-                }
-                guard let installed = dockerInstalled else { return nil }
-                if installed.isFailed { return installed }
-                if let daemon = dockerDaemon, daemon.isFailed { return daemon }
-                return installed
-            }()
-
-            let cloudPrereqID = provider.prerequisiteCheckIDs.first(where: { !dockerRelated.contains($0) })
+            let buildBackendResult = results.first(where: { $0.id == .buildBackendAvailable })
+            let cloudPrereqID = provider.prerequisiteCheckIDs.first(where: { $0 != .buildBackendAvailable })
             let cloudResult = cloudPrereqID.flatMap { id in results.first(where: { $0.id == id }) }
 
             self.detectedProvider = provider
-            self.dockerCheckResult = dockerStatus
+            self.buildBackendCheckResult = buildBackendResult
             self.cloudProviderCheckResult = cloudResult
             self.isCheckingEnvironment = false
         }
@@ -1237,6 +1413,11 @@ final class AgentsInBlackAppModel {
                 ))
             }
         }
+    }
+
+    private func refreshPreferredApplications() {
+        installedEditorApps = ExternalEditorApp.detectInstalled()
+        preferredEditorApp = ExternalEditorSettings.resolvePreferred(from: installedEditorApps)
     }
 
     /// Trigger sheet dismissal. Actual cleanup happens in `cleanupDeployState()`

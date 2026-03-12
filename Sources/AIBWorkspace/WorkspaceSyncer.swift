@@ -1,7 +1,6 @@
 import AIBConfig
 import AIBRuntimeCore
 import Foundation
-import Yams
 
 public struct ResolvedConfig: Sendable {
     public var config: AIBConfig
@@ -34,7 +33,8 @@ public enum WorkspaceSyncer {
             if let inlineServices = repo.services {
                 // Explicit services list (may be empty if all were removed)
                 if !inlineServices.isEmpty {
-                    let converted = try inlineServices.map { try convertInlineService($0, repo: repo, repoRoot: repoRoot) }
+                    let workspaceSkills = workspace.skills ?? []
+                    let converted = try inlineServices.map { try convertInlineService($0, repo: repo, repoRoot: repoRoot, workspaceSkills: workspaceSkills) }
                     let namespaced = namespacedServices(from: converted, repo: repo, repoRoot: repoRoot)
                     services.append(contentsOf: namespaced)
 
@@ -80,7 +80,10 @@ public enum WorkspaceSyncer {
                                 packageManager: detection?.packageManager ?? .unknown,
                                 packageName: packageName,
                                 repoPath: repo.path,
-                                dockerfilePath: dockerfilePath
+                                dockerfilePath: dockerfilePath,
+                                executionRootPath: URL(fileURLWithPath: repo.path, relativeTo: URL(fileURLWithPath: workspaceRoot))
+                                    .standardizedFileURL
+                                    .path(percentEncoded: false)
                             )
                         }
                     }
@@ -111,6 +114,11 @@ public enum WorkspaceSyncer {
             config: resolved.config,
             workspaceRoot: workspaceRoot,
             gatewayPort: workspace.gateway.port
+        )
+        try writeRuntimeSkillArtifacts(
+            resolved: resolved,
+            workspaceRoot: workspaceRoot,
+            workspace: workspace
         )
         return WorkspaceSyncResult(serviceCount: resolved.config.services.count, warnings: resolved.warnings)
     }
@@ -175,6 +183,55 @@ public enum WorkspaceSyncer {
                 mcpTargets: mcpTargets,
                 workspaceRoot: workspaceRoot
             )
+        }
+    }
+
+    /// Write runtime skill overlays for agent services.
+    /// Artifacts are staged under `.aib/generated/runtime/skills/{service-id}/`
+    /// and mounted into `/app` by the local runtime without mutating repo contents.
+    public static func writeRuntimeSkillArtifacts(
+        resolved: ResolvedConfig,
+        workspaceRoot: String,
+        workspace: AIBWorkspaceConfig
+    ) throws {
+        let outputRoot = URL(fileURLWithPath: ".aib/generated/runtime/skills", relativeTo: URL(fileURLWithPath: workspaceRoot))
+            .standardizedFileURL
+
+        if FileManager.default.fileExists(atPath: outputRoot.path(percentEncoded: false)) {
+            try FileManager.default.removeItem(at: outputRoot)
+        }
+        try FileManager.default.createDirectory(at: outputRoot, withIntermediateDirectories: true)
+
+        let workspaceSkillsByID = Dictionary(uniqueKeysWithValues: (workspace.skills ?? []).map { ($0.id, $0) })
+        guard !workspaceSkillsByID.isEmpty else { return }
+
+        for repo in workspace.repos where repo.enabled {
+            guard let services = repo.services, !services.isEmpty else { continue }
+
+            for service in services {
+                let assignedSkillIDs = service.skills ?? []
+                guard !assignedSkillIDs.isEmpty else { continue }
+
+                let namespacedID = "\(repo.namespace)/\(service.id)"
+                guard resolved.config.services.contains(where: { $0.id.rawValue == namespacedID }) else {
+                    continue
+                }
+
+                let executionRootPath = resolved.serviceMetadata[namespacedID]?.executionRootPath
+                    ?? resolveExecutionRootPath(
+                        inlineCWD: service.cwd,
+                        repoPath: repo.path,
+                        workspaceRoot: workspaceRoot
+                    )
+                try writeRuntimeSkillArtifacts(
+                    serviceID: namespacedID,
+                    assignedSkillIDs: assignedSkillIDs,
+                    workspaceSkillsByID: workspaceSkillsByID,
+                    workspaceRoot: workspaceRoot,
+                    executionRootPath: executionRootPath,
+                    outputRoot: outputRoot
+                )
+            }
         }
     }
 
@@ -334,15 +391,18 @@ public enum WorkspaceSyncer {
         return services
     }
 
-    private static func convertInlineService(_ inline: WorkspaceRepoServiceConfig, repo: WorkspaceRepo, repoRoot: String) throws -> ServiceConfig {
+    private static func convertInlineService(_ inline: WorkspaceRepoServiceConfig, repo: WorkspaceRepo, repoRoot: String, workspaceSkills: [WorkspaceSkillConfig] = []) throws -> ServiceConfig {
         let watchMode = WatchMode(rawValue: inline.watchMode ?? "external") ?? .external
         let pathRewrite = PathRewriteMode(rawValue: inline.pathRewrite ?? "strip_prefix") ?? .stripPrefix
         let overflowMode = OverflowMode(rawValue: inline.concurrency?.overflowMode ?? "reject") ?? .reject
         let authMode = AuthMode(rawValue: inline.auth?.mode ?? "off") ?? .off
         let resolvedKind = inline.kind.flatMap(ServiceKind.init(rawValue:))
             ?? inferServiceKind(from: inline.mountPath)
+
+        let mcpServers = (inline.connections?.mcpServers ?? []).map { ServiceConnectionTarget(serviceRef: $0.serviceRef, url: $0.url) }
+
         let connectionConfig = ServiceConnectionsConfig(
-            mcpServers: (inline.connections?.mcpServers ?? []).map { ServiceConnectionTarget(serviceRef: $0.serviceRef, url: $0.url) },
+            mcpServers: mcpServers,
             a2aAgents: (inline.connections?.a2aAgents ?? []).map { ServiceConnectionTarget(serviceRef: $0.serviceRef, url: $0.url) }
         )
         let mcpConfig: MCPServiceConfig?
@@ -448,6 +508,94 @@ public enum WorkspaceSyncer {
         value.replacingOccurrences(of: "/", with: "__")
     }
 
+    private static func writeRuntimeSkillArtifacts(
+        serviceID: String,
+        assignedSkillIDs: [String],
+        workspaceSkillsByID: [String: WorkspaceSkillConfig],
+        workspaceRoot: String,
+        executionRootPath: String,
+        outputRoot: URL
+    ) throws {
+        let workspaceSkillsRoot = SkillBundleLoader.workspaceSkillsRootURL(workspaceRoot: workspaceRoot)
+        let executionRootURL = URL(fileURLWithPath: executionRootPath)
+        let serviceOutputRoot = outputRoot.appendingPathComponent(sanitizedServiceFilename(serviceID), isDirectory: true)
+
+        for projection in runtimeSkillProjectionDirectories {
+            let stagedDirectoryURL = serviceOutputRoot.appendingPathComponent(projection.stagedRootPath, isDirectory: true)
+            let existingDirectoryURL = executionRootURL.appendingPathComponent(projection.executionRootPath, isDirectory: true)
+            try mergeDirectoryContentsIfPresent(from: existingDirectoryURL, to: stagedDirectoryURL)
+        }
+
+        for skillID in assignedSkillIDs {
+            let bundleFiles = try SkillBundleLoader.bundleFiles(
+                id: skillID,
+                rootURL: workspaceSkillsRoot,
+                fallback: workspaceSkillsByID[skillID]
+            )
+
+            for projection in runtimeSkillProjectionDirectories {
+                let skillRootURL = serviceOutputRoot
+                    .appendingPathComponent(projection.skillInsertionPath, isDirectory: true)
+                    .appendingPathComponent(skillID, isDirectory: true)
+                try FileManager.default.createDirectory(at: skillRootURL, withIntermediateDirectories: true)
+
+                for file in bundleFiles {
+                    let destinationURL = skillRootURL.appendingPathComponent(file.relativePath, isDirectory: false)
+                    try FileManager.default.createDirectory(
+                        at: destinationURL.deletingLastPathComponent(),
+                        withIntermediateDirectories: true
+                    )
+                    try file.content.write(to: destinationURL, options: .atomic)
+                }
+            }
+        }
+    }
+
+    private static func mergeDirectoryContentsIfPresent(from sourceURL: URL, to destinationURL: URL) throws {
+        let fm = FileManager.default
+        var isDirectory: ObjCBool = false
+        guard fm.fileExists(atPath: sourceURL.path(percentEncoded: false), isDirectory: &isDirectory),
+              isDirectory.boolValue else {
+            return
+        }
+
+        try fm.createDirectory(at: destinationURL, withIntermediateDirectories: true)
+
+        guard let enumerator = fm.enumerator(
+            at: sourceURL,
+            includingPropertiesForKeys: [.isDirectoryKey, .isRegularFileKey],
+            options: [.skipsPackageDescendants]
+        ) else {
+            return
+        }
+
+        while let item = enumerator.nextObject() as? URL {
+            let relativeComponents = item.standardizedFileURL.pathComponents.dropFirst(
+                sourceURL.standardizedFileURL.pathComponents.count
+            )
+            guard !relativeComponents.isEmpty else { continue }
+            let fileName = item.lastPathComponent
+            if fileName == ".DS_Store" || fileName == ".git" {
+                continue
+            }
+
+            let destinationItemURL = destinationURL.appendingPathComponent(relativeComponents.joined(separator: "/"))
+            let values = try item.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey])
+            if values.isDirectory == true {
+                try fm.createDirectory(at: destinationItemURL, withIntermediateDirectories: true)
+                continue
+            }
+            guard values.isRegularFile == true else { continue }
+
+            try fm.createDirectory(
+                at: destinationItemURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            let data = try Data(contentsOf: item)
+            try data.write(to: destinationItemURL, options: .atomic)
+        }
+    }
+
     // MARK: - Service Deploy Metadata Resolution
 
     /// Build metadata for an inline service by matching its run command to a detection result.
@@ -475,7 +623,12 @@ public enum WorkspaceSyncer {
             packageManager: detection?.packageManager ?? .unknown,
             packageName: packageName,
             repoPath: repo.path,
-            dockerfilePath: dockerfilePath
+            dockerfilePath: dockerfilePath,
+            executionRootPath: resolveExecutionRootPath(
+                inlineCWD: inline.cwd,
+                repoPath: repo.path,
+                workspaceRoot: workspaceRoot
+            )
         )
     }
 
@@ -527,7 +680,32 @@ public enum WorkspaceSyncer {
         }
         return nil
     }
+
+    private static func resolveExecutionRootPath(
+        inlineCWD: String?,
+        repoPath: String,
+        workspaceRoot: String
+    ) -> String {
+        let repoURL = URL(fileURLWithPath: repoPath, relativeTo: URL(fileURLWithPath: workspaceRoot))
+            .standardizedFileURL
+        guard let inlineCWD, !inlineCWD.isEmpty else {
+            return repoURL.path(percentEncoded: false)
+        }
+        return URL(fileURLWithPath: inlineCWD, relativeTo: repoURL)
+            .standardizedFileURL
+            .path(percentEncoded: false)
+    }
 }
+
+private let runtimeSkillProjectionDirectories: [(
+    executionRootPath: String,
+    stagedRootPath: String,
+    skillInsertionPath: String
+)] = [
+    (executionRootPath: ".claude", stagedRootPath: ".claude", skillInsertionPath: ".claude/skills"),
+    (executionRootPath: ".agents", stagedRootPath: ".agents", skillInsertionPath: ".agents/skills"),
+    (executionRootPath: "skills", stagedRootPath: "skills", skillInsertionPath: "skills"),
+]
 
 private struct RuntimeConnectionArtifact: Codable {
     var serviceID: String

@@ -1,7 +1,6 @@
 import AIBRuntimeCore
 import AIBConfig
 import Foundation
-import Yams
 
 public enum AIBWorkspaceManager {
     public static let workspaceDirectoryName = ".aib"
@@ -53,6 +52,12 @@ public enum AIBWorkspaceManager {
     }
 
     public static func saveWorkspace(_ workspace: AIBWorkspaceConfig, workspaceRoot: String) throws {
+        let workspaceDirectory = URL(
+            fileURLWithPath: workspaceDirectoryName,
+            relativeTo: URL(fileURLWithPath: workspaceRoot)
+        ).standardizedFileURL
+        try FileManager.default.createDirectory(at: workspaceDirectory, withIntermediateDirectories: true)
+
         let path = URL(fileURLWithPath: workspaceConfigRelativePath, relativeTo: URL(fileURLWithPath: workspaceRoot)).standardizedFileURL.path
         try WorkspaceYAMLCodec.saveWorkspace(workspace, to: path)
     }
@@ -396,6 +401,296 @@ public enum AIBWorkspaceManager {
         try saveWorkspace(workspace, workspaceRoot: workspaceRoot)
     }
 
+    // MARK: - Skill Management (Workspace)
+
+    /// List all skill definitions in the workspace (for deployment).
+    public static func listSkills(workspaceRoot: String) throws -> [WorkspaceSkillConfig] {
+        let workspace = try loadWorkspace(workspaceRoot: workspaceRoot)
+        return workspace.skills ?? []
+    }
+
+    /// Add a skill definition directly to the workspace.
+    public static func addSkill(workspaceRoot: String, skill: WorkspaceSkillConfig) throws {
+        var workspace = try loadWorkspace(workspaceRoot: workspaceRoot)
+        guard !(workspace.skills ?? []).contains(where: { $0.id == skill.id }) else {
+            throw ConfigError("Skill already exists", metadata: ["id": skill.id])
+        }
+
+        let workspaceSkillsRoot = SkillBundleLoader.workspaceSkillsRootURL(workspaceRoot: workspaceRoot)
+        try SkillBundleLoader.saveSkill(skill, rootURL: workspaceSkillsRoot)
+
+        do {
+            appendSkillDefinition(skill, to: &workspace)
+            try saveWorkspace(workspace, workspaceRoot: workspaceRoot)
+        } catch {
+            if SkillBundleLoader.skillExists(id: skill.id, rootURL: workspaceSkillsRoot) {
+                do {
+                    try SkillBundleLoader.deleteSkill(id: skill.id, rootURL: workspaceSkillsRoot)
+                } catch {
+                    // Keep the original workspace save failure as the surfaced error.
+                }
+            }
+            throw error
+        }
+    }
+
+    /// Import a skill from the user library (`~/.aib/skills/`) into the workspace.
+    /// Copies the skill definition so the workspace is self-contained for deployment.
+    public static func importSkill(workspaceRoot: String, skillID: String) throws {
+        var workspace = try loadWorkspace(workspaceRoot: workspaceRoot)
+        guard !(workspace.skills ?? []).contains(where: { $0.id == skillID }) else {
+            throw ConfigError("Skill already exists", metadata: ["id": skillID])
+        }
+
+        let skill = try SkillBundleLoader.loadSkill(id: skillID)
+        let workspaceSkillsRoot = SkillBundleLoader.workspaceSkillsRootURL(workspaceRoot: workspaceRoot)
+        try SkillBundleLoader.copySkill(id: skillID, from: SkillBundleLoader.skillsRootURL, to: workspaceSkillsRoot)
+
+        do {
+            appendSkillDefinition(skill, to: &workspace)
+            try saveWorkspace(workspace, workspaceRoot: workspaceRoot)
+        } catch {
+            if SkillBundleLoader.skillExists(id: skillID, rootURL: workspaceSkillsRoot) {
+                do {
+                    try SkillBundleLoader.deleteSkill(id: skillID, rootURL: workspaceSkillsRoot)
+                } catch {
+                    // Keep the original workspace save failure as the surfaced error.
+                }
+            }
+            throw error
+        }
+    }
+
+    /// Import a skill bundle from an arbitrary directory into the workspace.
+    /// Used for skills discovered in execution directories such as `.claude/skills`.
+    public static func importSkillBundle(
+        workspaceRoot: String,
+        skillID: String,
+        sourcePath: String
+    ) throws {
+        var workspace = try loadWorkspace(workspaceRoot: workspaceRoot)
+        guard !(workspace.skills ?? []).contains(where: { $0.id == skillID }) else { return }
+
+        let sourceURL = URL(fileURLWithPath: sourcePath, isDirectory: true)
+        let skill = try SkillBundleLoader.loadSkill(at: sourceURL, id: skillID)
+        let bundle = try SkillBundleLoader.loadBundle(at: sourceURL)
+        let workspaceSkillsRoot = SkillBundleLoader.workspaceSkillsRootURL(workspaceRoot: workspaceRoot)
+        try SkillBundleLoader.saveBundle(bundle, rootURL: workspaceSkillsRoot)
+
+        do {
+            appendSkillDefinition(skill, to: &workspace)
+            try saveWorkspace(workspace, workspaceRoot: workspaceRoot)
+        } catch {
+            if SkillBundleLoader.skillExists(id: skillID, rootURL: workspaceSkillsRoot) {
+                do {
+                    try SkillBundleLoader.deleteSkill(id: skillID, rootURL: workspaceSkillsRoot)
+                } catch {
+                    // Keep the original workspace save failure as the surfaced error.
+                }
+            }
+            throw error
+        }
+    }
+
+    /// Remove a skill definition and all its assignments from services.
+    public static func removeSkill(workspaceRoot: String, skillID: String) throws {
+        var workspace = try loadWorkspace(workspaceRoot: workspaceRoot)
+        var skills = workspace.skills ?? []
+        guard skills.contains(where: { $0.id == skillID }) else {
+            throw ConfigError("Skill not found", metadata: ["id": skillID])
+        }
+        skills.removeAll { $0.id == skillID }
+        workspace.skills = skills.isEmpty ? nil : skills
+
+        // Cascade: remove assignment from all services
+        for repoIndex in workspace.repos.indices {
+            guard var services = workspace.repos[repoIndex].services else { continue }
+            for serviceIndex in services.indices {
+                services[serviceIndex].skills?.removeAll { $0 == skillID }
+                if services[serviceIndex].skills?.isEmpty == true {
+                    services[serviceIndex].skills = nil
+                }
+            }
+            workspace.repos[repoIndex].services = services
+        }
+
+        try saveWorkspace(workspace, workspaceRoot: workspaceRoot)
+
+        let workspaceSkillsRoot = SkillBundleLoader.workspaceSkillsRootURL(workspaceRoot: workspaceRoot)
+        if SkillBundleLoader.skillExists(id: skillID, rootURL: workspaceSkillsRoot) {
+            try SkillBundleLoader.deleteSkill(id: skillID, rootURL: workspaceSkillsRoot)
+        }
+    }
+
+    /// Assign a skill to an agent service.
+    public static func assignSkill(
+        workspaceRoot: String,
+        skillID: String,
+        namespacedServiceID: String
+    ) throws {
+        var workspace = try loadWorkspace(workspaceRoot: workspaceRoot)
+
+        if !(workspace.skills ?? []).contains(where: { $0.id == skillID }) {
+            guard let sourcePath = findExecutionSkillSourcePath(
+                workspaceRoot: workspaceRoot,
+                workspace: workspace,
+                skillID: skillID
+            ) else {
+                throw ConfigError("Skill not found in workspace. Import it first.", metadata: ["id": skillID])
+            }
+            try importSkillBundle(
+                workspaceRoot: workspaceRoot,
+                skillID: skillID,
+                sourcePath: sourcePath
+            )
+            workspace = try loadWorkspace(workspaceRoot: workspaceRoot)
+        }
+
+        let parts = namespacedServiceID.split(separator: "/", maxSplits: 1).map(String.init)
+        guard parts.count == 2 else {
+            throw ConfigError("Invalid namespaced service ID", metadata: ["id": namespacedServiceID])
+        }
+        let namespace = parts[0]
+        let localID = parts[1]
+
+        guard let repoIndex = workspace.repos.firstIndex(where: { $0.namespace == namespace }),
+              var services = workspace.repos[repoIndex].services,
+              let serviceIndex = services.firstIndex(where: { $0.id == localID })
+        else {
+            throw ConfigError("Service not found", metadata: ["id": namespacedServiceID])
+        }
+
+        var assignedSkills = services[serviceIndex].skills ?? []
+        guard !assignedSkills.contains(skillID) else { return }
+        assignedSkills.append(skillID)
+        services[serviceIndex].skills = assignedSkills
+        workspace.repos[repoIndex].services = services
+
+        try saveWorkspace(workspace, workspaceRoot: workspaceRoot)
+    }
+
+    /// Unassign a skill from an agent service.
+    public static func unassignSkill(
+        workspaceRoot: String,
+        skillID: String,
+        namespacedServiceID: String
+    ) throws {
+        var workspace = try loadWorkspace(workspaceRoot: workspaceRoot)
+
+        let parts = namespacedServiceID.split(separator: "/", maxSplits: 1).map(String.init)
+        guard parts.count == 2 else {
+            throw ConfigError("Invalid namespaced service ID", metadata: ["id": namespacedServiceID])
+        }
+        let namespace = parts[0]
+        let localID = parts[1]
+
+        guard let repoIndex = workspace.repos.firstIndex(where: { $0.namespace == namespace }),
+              var services = workspace.repos[repoIndex].services,
+              let serviceIndex = services.firstIndex(where: { $0.id == localID })
+        else {
+            throw ConfigError("Service not found", metadata: ["id": namespacedServiceID])
+        }
+
+        services[serviceIndex].skills?.removeAll { $0 == skillID }
+        if services[serviceIndex].skills?.isEmpty == true {
+            services[serviceIndex].skills = nil
+        }
+        workspace.repos[repoIndex].services = services
+
+        try saveWorkspace(workspace, workspaceRoot: workspaceRoot)
+    }
+
+    // MARK: - Skill Library (User-level)
+
+    /// List all skills in the user library (`~/.aib/skills/`).
+    public static func listLibrarySkills() throws -> [WorkspaceSkillConfig] {
+        try SkillBundleLoader.listSkills()
+    }
+
+    /// Create a skill in the user library.
+    public static func createLibrarySkill(_ skill: WorkspaceSkillConfig) throws {
+        guard !SkillBundleLoader.skillExists(id: skill.id) else {
+            throw ConfigError("Skill already exists in library", metadata: ["id": skill.id])
+        }
+        try SkillBundleLoader.saveSkill(skill)
+    }
+
+    /// Update a skill in the user library.
+    public static func updateLibrarySkill(_ skill: WorkspaceSkillConfig) throws {
+        guard SkillBundleLoader.skillExists(id: skill.id) else {
+            throw ConfigError("Skill not found in library", metadata: ["id": skill.id])
+        }
+        try SkillBundleLoader.saveSkill(skill)
+    }
+
+    /// Delete a skill from the user library.
+    public static func deleteLibrarySkill(id: String) throws {
+        try SkillBundleLoader.deleteSkill(id: id)
+    }
+
+    // MARK: - Skill Registry (Remote)
+
+    /// List skills available in a remote registry.
+    public static func listRegistrySkills(
+        repo: String = SkillBundleLoader.defaultRegistryRepo,
+        path: String = SkillBundleLoader.defaultRegistryPath
+    ) async throws -> [SkillBundleLoader.RegistryEntry] {
+        try await SkillBundleLoader.listRegistrySkills(repo: repo, path: path)
+    }
+
+    /// Download a skill from a remote registry into the user library.
+    public static func downloadRegistrySkill(
+        id: String,
+        repo: String = SkillBundleLoader.defaultRegistryRepo,
+        path: String = SkillBundleLoader.defaultRegistryPath
+    ) async throws {
+        try await SkillBundleLoader.downloadRegistrySkill(id: id, repo: repo, path: path)
+    }
+
+    private static func appendSkillDefinition(_ skill: WorkspaceSkillConfig, to workspace: inout AIBWorkspaceConfig) {
+        var skills = workspace.skills ?? []
+        skills.append(skill)
+        workspace.skills = skills
+    }
+
+    private static func findExecutionSkillSourcePath(
+        workspaceRoot: String,
+        workspace: AIBWorkspaceConfig,
+        skillID: String
+    ) -> String? {
+        var matches: Set<String> = []
+        let workspaceRootURL = URL(fileURLWithPath: workspaceRoot)
+
+        for repo in workspace.repos where repo.enabled {
+            guard let services = repo.services else { continue }
+            let repoRootURL = URL(fileURLWithPath: repo.path, relativeTo: workspaceRootURL).standardizedFileURL
+
+            for service in services {
+                let executionRootURL: URL
+                if let cwd = service.cwd, !cwd.isEmpty {
+                    executionRootURL = URL(fileURLWithPath: cwd, relativeTo: repoRootURL).standardizedFileURL
+                } else {
+                    executionRootURL = repoRootURL
+                }
+
+                let candidates = [
+                    executionRootURL.appendingPathComponent(".claude/skills/\(skillID)", isDirectory: true),
+                    executionRootURL.appendingPathComponent(".agents/skills/\(skillID)", isDirectory: true),
+                    executionRootURL.appendingPathComponent("skills/\(skillID)", isDirectory: true),
+                ]
+
+                for candidate in candidates where FileManager.default.fileExists(atPath: candidate.path(percentEncoded: false)) {
+                    matches.insert(candidate.path(percentEncoded: false))
+                }
+            }
+        }
+
+        if matches.count > 1 {
+            return matches.sorted().first
+        }
+        return matches.first
+    }
+
     private static func merge(existing: AIBWorkspaceConfig, discovered: [WorkspaceRepo]) -> AIBWorkspaceConfig {
         let existingByPath = Dictionary(uniqueKeysWithValues: existing.repos.map { ($0.path, $0) })
         let mergedRepos = discovered.map { repo -> WorkspaceRepo in
@@ -419,7 +714,8 @@ public enum AIBWorkspaceManager {
             version: existing.version,
             workspaceName: existing.workspaceName,
             gateway: existing.gateway,
-            repos: mergedRepos
+            repos: mergedRepos,
+            skills: existing.skills
         )
     }
 

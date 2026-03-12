@@ -1,6 +1,8 @@
 import AIBCore
 import SwiftFlow
+import SwiftSkill
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct FlowCanvasView: View {
     @Bindable var model: AgentsInBlackAppModel
@@ -55,6 +57,9 @@ struct FlowCanvasView: View {
                     .nodeAccessory(placement: .bottom) { node in
                         nodeAccessoryContent(for: node, canvasSize: geometry.size)
                     }
+                    .dropDestination(for: [.agentSkill]) { phase in
+                        handleSkillDrop(phase)
+                    }
                     .environment(\.flowNodeVisualsByID, nodeVisualsByID)
                     .focusEffectDisabled()
                     .onTapGesture(count: 2) {
@@ -73,6 +78,40 @@ struct FlowCanvasView: View {
             }
         }
         .frame(minHeight: 400)
+    }
+
+    // MARK: - Skill Drop Handling
+
+    private func handleSkillDrop(_ phase: DropPhase) -> Bool {
+        switch phase {
+        case .updated(_, _, let target):
+            guard case .node(let nodeID) = target,
+                  let service = model.service(by: nodeID) else { return false }
+            return service.serviceKind == .agent
+
+        case .performed(let providers, _, let target):
+            guard case .node(let nodeID) = target,
+                  let service = model.service(by: nodeID),
+                  service.serviceKind == .agent else { return false }
+
+            let typeID = UTType.agentSkill.identifier
+            for provider in providers {
+                provider.loadDataRepresentation(forTypeIdentifier: typeID) { data, error in
+                    guard let data else { return }
+                    guard let skill = try? JSONDecoder().decode(Skill.self, from: data) else { return }
+                    Task { @MainActor in
+                        await model.assignSkill(
+                            skillID: skill.name,
+                            namespacedServiceID: service.namespacedID
+                        )
+                    }
+                }
+            }
+            return true
+
+        case .exited:
+            return false
+        }
     }
 
     // MARK: - Node Accessory
@@ -280,7 +319,7 @@ struct FlowCanvasView: View {
             defaultEdgePathType: .bezier,
             backgroundStyle: BackgroundStyle(
                 pattern: .dot,
-                color: (colorScheme == .dark ? Color.white : Color.black).opacity(0.15),
+                color: AIBFlowPalette.canvasGridColor(for: colorScheme),
                 spacing: 24,
                 dotRadius: 1.5
             )
@@ -288,10 +327,10 @@ struct FlowCanvasView: View {
         configuration.minZoom = 0.35
         configuration.maxZoom = 3.0
         configuration.edgeStyle = EdgeStyle(
-            strokeColor: .primary.opacity(0.5),
-            selectedStrokeColor: AIBFlowPalette.mcp,
-            lineWidth: 1.5,
-            selectedLineWidth: 2.5,
+            strokeColor: AIBFlowPalette.edgeStrokeColor(for: colorScheme),
+            selectedStrokeColor: AIBFlowPalette.edgeSelectedStrokeColor(for: colorScheme),
+            lineWidth: 2.0,
+            selectedLineWidth: 3.0,
             animatedDashPattern: [6, 4]
         )
         configuration.connectionValidator = AIBFlowConnectionValidator(nodeKindByID: serviceKinds, existingPairs: existingPairs)
@@ -309,7 +348,27 @@ struct FlowCanvasView: View {
             model.addFlowConnection(sourceServiceID: proposal.sourceNodeID, targetServiceID: proposal.targetNodeID)
         }
 
+        newStore.onEdgesChange = { changes in
+            let connectionsByID = Dictionary(uniqueKeysWithValues: edgeModels.map { ($0.id, $0) })
+            for change in changes {
+                if case .remove(let edgeID) = change,
+                   let connection = connectionsByID[edgeID] {
+                    model.removeFlowConnection(connection)
+                }
+            }
+        }
+
         newStore.onNodesChange = { changes in
+            // Handle node removals (move service to Unconfigured)
+            for change in changes {
+                if case .remove(let nodeID) = change,
+                   let service = model.service(by: nodeID) {
+                    Task {
+                        await model.removeServiceFromFlow(namespacedServiceID: service.namespacedID)
+                    }
+                }
+            }
+
             let selectionChanges = changes.compactMap { change -> (String, Bool)? in
                 if case let .select(nodeID, isSelected) = change {
                     return (nodeID, isSelected)
@@ -593,13 +652,23 @@ private struct FlowServiceNodeContent: View {
     static let handleInset: CGFloat = 5
 
     var body: some View {
-        let visual = visualsByID[node.id] ?? FlowNodeVisual(kind: .unknown, outgoingCount: 0, activityState: .stopped, displayName: nil)
+        let visual = visualsByID[node.id] ?? FlowNodeVisual(
+            kind: .unknown,
+            outgoingCount: 0,
+            activityState: .stopped,
+            displayName: nil
+        )
         let tint = AIBFlowPalette.tint(for: visual.kind)
         let parts = displayParts(namespacedID: node.data, displayName: visual.displayName)
         let inset = Self.handleInset
 
         ZStack {
-            nodeCard(tint: tint, kind: visual.kind, parts: parts, activityState: visual.activityState)
+            nodeCard(
+                tint: tint,
+                kind: visual.kind,
+                parts: parts,
+                activityState: visual.activityState
+            )
                 .padding(inset)
 
             ForEach(node.handles, id: \.id) { handle in
@@ -610,7 +679,12 @@ private struct FlowServiceNodeContent: View {
         .frame(width: node.size.width + inset * 2, height: node.size.height + inset * 2)
     }
 
-    private func nodeCard(tint: Color, kind: AIBServiceKind, parts: (primary: String, secondary: String?), activityState: FlowNodeVisual.ActivityState) -> some View {
+    private func nodeCard(
+        tint: Color,
+        kind: AIBServiceKind,
+        parts: (primary: String, secondary: String?),
+        activityState: FlowNodeVisual.ActivityState
+    ) -> some View {
         HStack(spacing: 6) {
             Image(systemName: AIBFlowPalette.symbol(for: kind))
                 .font(.system(size: 16, weight: .medium))
@@ -637,7 +711,14 @@ private struct FlowServiceNodeContent: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 2)
         .frame(width: node.size.width, height: node.size.height)
-        .background(cardBackground(activityState: activityState), in: RoundedRectangle(cornerRadius: 8))
+        .background {
+            RoundedRectangle(cornerRadius: 8)
+                .fill(AIBFlowPalette.nodeBaseFill(for: colorScheme))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(tint.opacity(cardTintOverlayOpacity(activityState: activityState)))
+                }
+        }
         .overlay {
             RoundedRectangle(cornerRadius: 8)
                 .strokeBorder(cardBorderColor(tint: tint, activityState: activityState), lineWidth: cardBorderWidth(activityState: activityState))
@@ -653,13 +734,25 @@ private struct FlowServiceNodeContent: View {
 
     // MARK: - Card Styling
 
-    private func cardBackground(activityState: FlowNodeVisual.ActivityState) -> some ShapeStyle {
-        colorScheme == .dark
-            ? AnyShapeStyle(Color(white: 0.14))
-            : AnyShapeStyle(Color.white)
+    private func cardTintOverlayOpacity(activityState: FlowNodeVisual.ActivityState) -> Double {
+        switch activityState {
+        case .readyActive:
+            return colorScheme == .dark ? 0.20 : 0.10
+        case .starting:
+            return colorScheme == .dark ? 0.16 : 0.08
+        case .readyIdle:
+            return colorScheme == .dark ? 0.12 : 0.06
+        case .unhealthy:
+            return colorScheme == .dark ? 0.14 : 0.07
+        case .stopped:
+            return colorScheme == .dark ? 0.08 : 0.04
+        }
     }
 
     private func cardBorderColor(tint: Color, activityState: FlowNodeVisual.ActivityState) -> Color {
+        if node.isDropTarget {
+            return .purple
+        }
         if node.isSelected {
             return tint
         }
@@ -669,35 +762,33 @@ private struct FlowServiceNodeContent: View {
         case .unhealthy:
             return Color.red.opacity(0.7)
         case .starting:
-            return tint.opacity(0.5)
+            return tint.opacity(0.7)
         default:
             break
         }
-        if node.isHovered {
-            return colorScheme == .dark
-                ? Color.white.opacity(0.2)
-                : Color.black.opacity(0.12)
-        }
-        return colorScheme == .dark
-            ? Color.white.opacity(0.25)
-            : Color.black.opacity(0.15)
+        return AIBFlowPalette.nodeNeutralBorder(for: colorScheme, isHovered: node.isHovered)
     }
 
     private func cardBorderWidth(activityState: FlowNodeVisual.ActivityState) -> CGFloat {
-        if node.isSelected { return 1.5 }
-        if activityState == .readyActive { return 1.5 }
-        return 1
+        if node.isDropTarget { return 2 }
+        if node.isSelected { return 2 }
+        if activityState == .readyActive { return 1.8 }
+        if activityState == .starting { return 1.5 }
+        return 1.2
     }
 
     private func cardShadowColor(tint: Color, activityState: FlowNodeVisual.ActivityState) -> Color {
+        if node.isDropTarget {
+            return .purple.opacity(0.4)
+        }
         if node.isSelected {
-            return tint.opacity(0.25)
+            return tint.opacity(0.35)
         }
         switch activityState {
         case .readyActive:
-            return tint.opacity(0.3)
+            return tint.opacity(0.4)
         case .unhealthy:
-            return Color.red.opacity(0.25)
+            return Color.red.opacity(0.32)
         default:
             break
         }
@@ -708,6 +799,7 @@ private struct FlowServiceNodeContent: View {
     }
 
     private func cardShadowRadius(activityState: FlowNodeVisual.ActivityState) -> CGFloat {
+        if node.isDropTarget { return 12 }
         if node.isSelected { return 12 }
         switch activityState {
         case .readyActive: return 10
@@ -718,7 +810,8 @@ private struct FlowServiceNodeContent: View {
     }
 
     private var cardShadowY: CGFloat {
-        node.isSelected ? 0 : node.isHovered ? 3 : 2
+        if node.isDropTarget { return 0 }
+        return node.isSelected ? 0 : node.isHovered ? 3 : 2
     }
 
     // MARK: - Helpers

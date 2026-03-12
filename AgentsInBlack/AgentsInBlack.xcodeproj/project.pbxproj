@@ -10,6 +10,7 @@
 		A1B000000000000000000003 /* AIBCore in Frameworks */ = {isa = PBXBuildFile; productRef = A1B000000000000000000002 /* AIBCore */; };
 		A1B000000000000000000006 /* SwiftFlow in Frameworks */ = {isa = PBXBuildFile; productRef = A1B000000000000000000005 /* SwiftFlow */; };
 		A1B000000000000000000009 /* SwiftTerm in Frameworks */ = {isa = PBXBuildFile; productRef = A1B000000000000000000008 /* SwiftTerm */; };
+		A1B00000000000000000000C /* SwiftSkill in Frameworks */ = {isa = PBXBuildFile; productRef = A1B00000000000000000000B /* SwiftSkill */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -35,9 +36,22 @@
 		12BDD1302F501E3300FB156D /* AgentsInBlackUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = AgentsInBlackUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		A1B00000000000000000000D /* Exceptions for "AgentsInBlack" folder in "AgentsInBlack" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = 12BDD1162F501E3200FB156D /* AgentsInBlack */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		12BDD1192F501E3200FB156D /* AgentsInBlack */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				A1B00000000000000000000D /* Exceptions for "AgentsInBlack" folder in "AgentsInBlack" target */,
+			);
 			path = AgentsInBlack;
 			sourceTree = "<group>";
 		};
@@ -61,6 +75,7 @@
 				A1B000000000000000000003 /* AIBCore in Frameworks */,
 				A1B000000000000000000006 /* SwiftFlow in Frameworks */,
 				A1B000000000000000000009 /* SwiftTerm in Frameworks */,
+				A1B00000000000000000000C /* SwiftSkill in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -124,6 +139,7 @@
 				A1B000000000000000000002 /* AIBCore */,
 				A1B000000000000000000005 /* SwiftFlow */,
 				A1B000000000000000000008 /* SwiftTerm */,
+				A1B00000000000000000000B /* SwiftSkill */,
 			);
 			productName = AgentsInBlack;
 			productReference = 12BDD1172F501E3200FB156D /* AgentsInBlack.app */;
@@ -211,6 +227,7 @@
 				A1B000000000000000000001 /* XCLocalSwiftPackageReference ".." */,
 				A1B000000000000000000004 /* XCRemoteSwiftPackageReference "swift-flow" */,
 				A1B000000000000000000007 /* XCRemoteSwiftPackageReference "SwiftTerm" */,
+				A1B00000000000000000000A /* XCRemoteSwiftPackageReference "swift-skills" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 12BDD1182F501E3200FB156D /* Products */;
@@ -420,7 +437,8 @@
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
-				GENERATE_INFOPLIST_FILE = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = AgentsInBlack/Info.plist;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -453,7 +471,8 @@
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
-				GENERATE_INFOPLIST_FILE = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = AgentsInBlack/Info.plist;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -617,6 +636,14 @@
 				minimumVersion = 1.2.0;
 			};
 		};
+		A1B00000000000000000000A /* XCRemoteSwiftPackageReference "swift-skills" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/1amageek/swift-skills.git";
+			requirement = {
+				branch = main;
+				kind = branch;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -634,6 +661,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = A1B000000000000000000007 /* XCRemoteSwiftPackageReference "SwiftTerm" */;
 			productName = SwiftTerm;
+		};
+		A1B00000000000000000000B /* SwiftSkill */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A1B00000000000000000000A /* XCRemoteSwiftPackageReference "swift-skills" */;
+			productName = SwiftSkill;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

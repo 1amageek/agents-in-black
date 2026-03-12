@@ -4,12 +4,12 @@
   ],
   "mcp_servers" : [
     {
-      "resolved_url" : "http:\/\/127.0.0.1:18080\/mcp\/node\/mcp",
+      "resolved_url" : "http:\/\/127.0.0.1:8080\/mcp\/node\/mcp",
       "service_ref" : "mcp-node\/calc",
       "source" : "service_ref"
     },
     {
-      "resolved_url" : "http:\/\/127.0.0.1:18080\/mcp\/web\/mcp",
+      "resolved_url" : "http:\/\/127.0.0.1:8080\/mcp\/web\/mcp",
       "service_ref" : "mcp-web\/scraper",
       "source" : "service_ref"
     }

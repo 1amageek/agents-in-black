@@ -116,6 +116,10 @@ public actor ContainerProcessController: ProcessController {
             .appendingPathComponent("generated/runtime")
             .standardizedFileURL.path
         let runtimeDirExists = FileManager.default.fileExists(atPath: runtimeDir)
+        let runtimeSkillMounts = stagedRuntimeSkillMounts(
+            serviceID: service.id.rawValue,
+            configBaseDirectory: configBaseDirectory
+        )
 
         // Shared runtime state and log writers to capture container stdout/stderr.
         let state = ContainerState()
@@ -168,6 +172,14 @@ public actor ContainerProcessController: ProcessController {
                 config.mounts.append(.share(
                     source: runtimeDir,
                     destination: "/aib-runtime",
+                    options: ["ro"]
+                ))
+            }
+
+            for mount in runtimeSkillMounts {
+                config.mounts.append(.share(
+                    source: mount.source,
+                    destination: mount.destination,
                     options: ["ro"]
                 ))
             }
@@ -726,6 +738,24 @@ public actor ContainerProcessController: ProcessController {
 
     private func sanitizedServiceID(_ value: String) -> String {
         value.replacingOccurrences(of: "/", with: "__")
+    }
+
+    private func stagedRuntimeSkillMounts(
+        serviceID: String,
+        configBaseDirectory: String
+    ) -> [(source: String, destination: String)] {
+        let serviceRoot = URL(fileURLWithPath: configBaseDirectory)
+            .appendingPathComponent("generated/runtime/skills/\(sanitizedServiceID(serviceID))")
+            .standardizedFileURL
+
+        return [
+            (source: serviceRoot.appendingPathComponent(".claude").path, destination: "/app/.claude"),
+            (source: serviceRoot.appendingPathComponent(".agents").path, destination: "/app/.agents"),
+            (source: serviceRoot.appendingPathComponent("skills").path, destination: "/app/skills"),
+        ].filter { mount in
+            var isDirectory: ObjCBool = false
+            return FileManager.default.fileExists(atPath: mount.source, isDirectory: &isDirectory) && isDirectory.boolValue
+        }
     }
 }
 

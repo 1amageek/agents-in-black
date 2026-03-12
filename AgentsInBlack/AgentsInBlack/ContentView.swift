@@ -95,6 +95,12 @@ struct ContentView: View {
         .sheet(isPresented: $model.showCreateServiceSheet) {
             CreateServiceSheet(model: model)
         }
+        .sheet(isPresented: $model.showAddSkillSheet) {
+            AddSkillSheet(model: model)
+        }
+        .sheet(isPresented: $model.showSkillRegistrySheet) {
+            SkillRegistrySheet(model: model)
+        }
         .sheet(isPresented: $model.showCloudSettings, onDismiss: {
             model.onCloudSettingsDismissed()
         }) {

@@ -95,12 +95,10 @@ struct CloudSettingsView: View {
 
     // MARK: - Environment
 
-    /// Ordered check IDs for display (from provider, excluding Docker).
+    /// Ordered check IDs for display.
     private var environmentCheckIDs: [PreflightCheckID] {
         guard let provider = DeploymentProviderRegistry.provider(for: providerID) else { return [] }
-        let dockerRelated: Set<PreflightCheckID> = [.dockerInstalled, .dockerDaemonRunning]
         return provider.preflightCheckers()
-            .filter { !dockerRelated.contains($0.checkID) }
             .map(\.checkID)
     }
 
@@ -447,11 +445,7 @@ struct CloudSettingsView: View {
         isCheckingEnvironment = true
         environmentChecks = [:]
 
-        // Run all provider checks except Docker-related ones (Docker is shown in toolbar indicator)
-        let dockerRelated: Set<PreflightCheckID> = [.dockerInstalled, .dockerDaemonRunning]
-        let checkers: [any PreflightChecker] = provider.preflightCheckers().filter {
-            !dockerRelated.contains($0.checkID)
-        }
+        let checkers: [any PreflightChecker] = provider.preflightCheckers()
         let dependencies = provider.preflightDependencies()
         let runner = PreflightRunner(checkers: checkers, dependencies: dependencies)
 

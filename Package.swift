@@ -21,7 +21,8 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.74.0"),
         .package(url: "https://github.com/swift-server/async-http-client.git", from: "1.25.0"),
         .package(url: "https://github.com/apple/swift-log.git", from: "1.6.0"),
-        .package(url: "https://github.com/jpsim/Yams", from: "6.2.0"),
+        .package(url: "https://github.com/1amageek/swift-yaml.git", from: "1.0.0"),
+        .package(url: "https://github.com/1amageek/swift-skills.git", from: "0.1.0"),
         .package(url: "https://github.com/1amageek/containerization.git", revision: "5d048bb"),
         .package(url: "https://github.com/1amageek/container.git", revision: "0ec965e"),
     ],
@@ -35,7 +36,7 @@ let package = Package(
                 "AIBSupervisor",
                 "AIBRuntimeCore",
                 .product(name: "Logging", package: "swift-log"),
-                .product(name: "Yams", package: "Yams"),
+                .product(name: "YAML", package: "swift-yaml"),
             ]
         ),
         .target(
@@ -81,7 +82,8 @@ let package = Package(
             dependencies: [
                 "AIBRuntimeCore",
                 "AIBConfig",
-                .product(name: "Yams", package: "Yams"),
+                .product(name: "YAML", package: "swift-yaml"),
+                .product(name: "SwiftSkill", package: "swift-skills"),
             ]
         ),
         .executableTarget(
@@ -105,7 +107,7 @@ let package = Package(
         ),
         .testTarget(
             name: "AIBWorkspaceTests",
-            dependencies: ["AIBWorkspace"]
+            dependencies: ["AIBWorkspace", "AIBCore"]
         ),
         .target(
             name: "AIBTestSupport",

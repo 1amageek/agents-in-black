@@ -401,10 +401,7 @@ private struct ChatMessageRow: View {
                     .foregroundStyle(.secondary)
             }
 
-            Text(message.text)
-                .font(.system(.body, design: .monospaced))
-                .foregroundStyle(message.role == .error ? AnyShapeStyle(Color.red) : AnyShapeStyle(.primary))
-                .textSelection(.enabled)
+            ChatMarkdownText(text: message.text, role: message.role)
         }
         .padding(10)
         .background(bubbleBackground, in: RoundedRectangle(cornerRadius: 10, style: .continuous))

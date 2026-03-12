@@ -115,6 +115,8 @@ public struct WorkspaceRepoServiceConfig: Codable, Sendable, Equatable {
     public var ui: WorkspaceRepoUIConfig?
     /// Deployed endpoint URLs keyed by provider ID (e.g., `"gcp-cloudrun": "https://...run.app"`).
     public var endpoints: [String: String]?
+    /// Skill IDs assigned to this service. References workspace-level skill definitions.
+    public var skills: [String]?
 
     public init(
         id: String,
@@ -139,7 +141,8 @@ public struct WorkspaceRepoServiceConfig: Codable, Sendable, Equatable {
         mcp: WorkspaceRepoMCPConfig? = nil,
         a2a: WorkspaceRepoA2AConfig? = nil,
         ui: WorkspaceRepoUIConfig? = nil,
-        endpoints: [String: String]? = nil
+        endpoints: [String: String]? = nil,
+        skills: [String]? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -164,6 +167,7 @@ public struct WorkspaceRepoServiceConfig: Codable, Sendable, Equatable {
         self.a2a = a2a
         self.ui = ui
         self.endpoints = endpoints
+        self.skills = skills
     }
 }
 
@@ -361,17 +365,22 @@ public struct AIBWorkspaceConfig: Codable, Sendable, Equatable {
     public var workspaceName: String
     public var gateway: WorkspaceGatewayDefaults
     public var repos: [WorkspaceRepo]
+    /// Workspace-level skill definitions. Skills are reusable capability packages
+    /// that can be assigned to agent services.
+    public var skills: [WorkspaceSkillConfig]?
 
     public init(
         version: Int = 1,
         workspaceName: String,
         gateway: WorkspaceGatewayDefaults = .init(),
-        repos: [WorkspaceRepo]
+        repos: [WorkspaceRepo],
+        skills: [WorkspaceSkillConfig]? = nil
     ) {
         self.version = version
         self.workspaceName = workspaceName
         self.gateway = gateway
         self.repos = repos
+        self.skills = skills
     }
 }
 
@@ -425,18 +434,22 @@ public struct ServiceDeployMetadata: Sendable, Equatable {
     public var repoPath: String
     /// Relative path to a custom Dockerfile, if one exists (e.g., "agent/Dockerfile.node").
     public var dockerfilePath: String?
+    /// Absolute path of the execution directory that will be mounted as `/app`.
+    public var executionRootPath: String
 
     public init(
         runtime: RuntimeKind,
         packageManager: PackageManagerKind,
         packageName: String,
         repoPath: String,
-        dockerfilePath: String? = nil
+        dockerfilePath: String? = nil,
+        executionRootPath: String
     ) {
         self.runtime = runtime
         self.packageManager = packageManager
         self.packageName = packageName
         self.repoPath = repoPath
         self.dockerfilePath = dockerfilePath
+        self.executionRootPath = executionRootPath
     }
 }

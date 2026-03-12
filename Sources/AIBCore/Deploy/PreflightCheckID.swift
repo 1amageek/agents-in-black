@@ -14,8 +14,6 @@ public struct PreflightCheckID: RawRepresentable, Sendable, Hashable, Identifiab
 // MARK: - Common Check IDs (shared across providers)
 
 extension PreflightCheckID {
-    public static let dockerInstalled = PreflightCheckID(rawValue: "dockerInstalled")
-    public static let dockerDaemonRunning = PreflightCheckID(rawValue: "dockerDaemonRunning")
     public static let buildBackendAvailable = PreflightCheckID(rawValue: "buildBackendAvailable")
 }
 

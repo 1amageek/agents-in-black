@@ -1,5 +1,5 @@
 {
-  "originHash" : "bdcd4944321ea8b3f191a4556f90607c1b8e0d52538f4803a2a0f4865c264a36",
+  "originHash" : "68731543167cf0ff474b5536fcc8fc22c08710c95a61fea73dd1a472db739564",
   "pins" : [
     {
       "identity" : "async-http-client",
@@ -33,8 +33,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/grpc/grpc-swift.git",
       "state" : {
-        "revision" : "956259f65a34c58dd76ae5df4511712e1087726b",
-        "version" : "1.27.3"
+        "revision" : "ac715c584bb1e2e5cdfb7684ccb46fab8dafc641",
+        "version" : "1.27.4"
       }
     },
     {
@@ -94,10 +94,10 @@
     {
       "identity" : "swift-collections",
       "kind" : "remoteSourceControl",
-      "location" : "https://github.com/apple/swift-collections",
+      "location" : "https://github.com/apple/swift-collections.git",
       "state" : {
-        "revision" : "7b847a3b7008b2dc2f47ca3110d8c782fb2e5c7e",
-        "version" : "1.3.0"
+        "revision" : "8d9834a6189db730f6264db7556a7ffb751e99ee",
+        "version" : "1.4.0"
       }
     },
     {
@@ -123,8 +123,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/apple/swift-distributed-tracing.git",
       "state" : {
-        "revision" : "e109d8b5308d0e05201d9a1dd1c475446a946a11",
-        "version" : "1.4.0"
+        "revision" : "dc4030184203ffafbb2ec614352487235d747fe0",
+        "version" : "1.4.1"
       }
     },
     {
@@ -133,7 +133,7 @@
       "location" : "https://github.com/1amageek/swift-flow.git",
       "state" : {
         "branch" : "main",
-        "revision" : "99ddfb6a2615170b1ba90104de972f7b68cd198f"
+        "revision" : "898e443bdf2ee1f5ab47d3653491ecc34f12f73a"
       }
     },
     {
@@ -222,8 +222,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/apple/swift-protobuf.git",
       "state" : {
-        "revision" : "5596511fce902e649c403cd4d6d5da1254f142b7",
-        "version" : "1.35.1"
+        "revision" : "86970144a0b86068c81ff48ee29b3f97cae0b879",
+        "version" : "1.36.0"
       }
     },
     {
@@ -245,6 +245,15 @@
       }
     },
     {
+      "identity" : "swift-skills",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/1amageek/swift-skills.git",
+      "state" : {
+        "branch" : "main",
+        "revision" : "523cdcb839719d957470b9e3a0f073238ae2db47"
+      }
+    },
+    {
       "identity" : "swift-system",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/apple/swift-system",
@@ -254,21 +263,21 @@
       }
     },
     {
+      "identity" : "swift-yaml",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/1amageek/swift-yaml.git",
+      "state" : {
+        "revision" : "8a33d36bca390d9518d5f7e483cbbaa011da5f76",
+        "version" : "1.0.1"
+      }
+    },
+    {
       "identity" : "swiftterm",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/migueldeicaza/SwiftTerm.git",
       "state" : {
         "revision" : "b1262db5b6bea699a8260a8c66999436c508ca56",
         "version" : "1.11.2"
-      }
-    },
-    {
-      "identity" : "yams",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/jpsim/Yams",
-      "state" : {
-        "revision" : "deaf82e867fa2cbd3cd865978b079bfcf384ac28",
-        "version" : "6.2.1"
       }
     },
     {

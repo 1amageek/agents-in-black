@@ -1,5 +1,4 @@
 import Foundation
-import Yams
 
 /// Reads and writes `.aib/targets/{providerID}.yaml`.
 /// Separated from `AIBDeployService` so the App layer can persist cloud settings
@@ -28,35 +27,40 @@ public struct DefaultDeployTargetConfigStore: DeployTargetConfigStore, Sendable 
 
         let filePath = targetsDir.appendingPathComponent("\(config.providerID).yaml")
 
-        // Build structured YAML content
-        var doc: [String: Any] = [
-            "version": 1,
-            "target": config.providerID,
-        ]
-
-        var defaults: [String: Any] = [
-            "region": config.region,
-            "auth": config.defaultAuth.rawValue,
-        ]
-
-        // Resource defaults (only include non-default values)
-        let baseline = AIBDeployTargetConfig(providerID: config.providerID, region: config.region)
-        if config.defaultMemory != baseline.defaultMemory { defaults["memory"] = config.defaultMemory }
-        if config.defaultCPU != baseline.defaultCPU { defaults["cpu"] = config.defaultCPU }
-        if config.defaultMaxInstances != baseline.defaultMaxInstances { defaults["max_instances"] = config.defaultMaxInstances }
-        if config.defaultConcurrency != baseline.defaultConcurrency { defaults["concurrency"] = config.defaultConcurrency }
-        if config.defaultTimeout != baseline.defaultTimeout { defaults["timeout"] = config.defaultTimeout }
-
-        doc["defaults"] = defaults
+        var lines: [String] = []
+        lines.append("version: 1")
+        lines.append("target: \(config.providerID)")
 
         // Provider-specific top-level keys (e.g., gcpProject, artifactRegistryHost)
-        for (key, value) in config.providerConfig {
+        for key in config.providerConfig.keys.sorted() {
             if key != "region" && key != "auth" {
-                doc[key] = value
+                lines.append("\(key): \(config.providerConfig[key]!)")
             }
         }
 
-        let yamlString = try Yams.dump(object: doc, sortKeys: true)
+        lines.append("defaults:")
+        lines.append("  auth: \(config.defaultAuth.rawValue)")
+        lines.append("  region: \(config.region)")
+
+        // Resource defaults (only include non-default values)
+        let baseline = AIBDeployTargetConfig(providerID: config.providerID, region: config.region)
+        if config.defaultConcurrency != baseline.defaultConcurrency {
+            lines.append("  concurrency: \(config.defaultConcurrency)")
+        }
+        if config.defaultCPU != baseline.defaultCPU {
+            lines.append("  cpu: \(config.defaultCPU)")
+        }
+        if config.defaultMaxInstances != baseline.defaultMaxInstances {
+            lines.append("  max_instances: \(config.defaultMaxInstances)")
+        }
+        if config.defaultMemory != baseline.defaultMemory {
+            lines.append("  memory: \(config.defaultMemory)")
+        }
+        if config.defaultTimeout != baseline.defaultTimeout {
+            lines.append("  timeout: \(config.defaultTimeout)")
+        }
+
+        let yamlString = lines.joined(separator: "\n") + "\n"
         try yamlString.write(to: filePath, atomically: true, encoding: .utf8)
     }
 

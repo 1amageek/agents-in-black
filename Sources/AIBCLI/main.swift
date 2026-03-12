@@ -38,6 +38,8 @@ struct AIBDevMain {
             try await handleWorkspace(arguments: Array(arguments.dropFirst()), logger: logger)
         case "emulator":
             try await handleEmulator(arguments: Array(arguments.dropFirst()), logger: logger)
+        case "skill":
+            try await handleSkill(arguments: Array(arguments.dropFirst()), logger: logger)
         case "deploy":
             try await handleDeploy(arguments: Array(arguments.dropFirst()), logger: logger)
         case "run", "validate-config", "print-effective-config":
@@ -298,6 +300,174 @@ struct AIBDevMain {
         }
     }
 
+    private static func handleSkill(arguments: [String], logger: Logger) async throws {
+        guard let subcommand = arguments.first else {
+            throw ConfigError("Missing skill subcommand. Use: list, add, remove, assign, unassign")
+        }
+        let cwd = FileManager.default.currentDirectoryPath
+
+        switch subcommand {
+        case "list":
+            let skills = try AIBWorkspaceCore.listSkills(workspaceRoot: cwd)
+            if skills.isEmpty {
+                print("No skills defined.")
+            } else {
+                for skill in skills {
+                    let tags = skill.tags.joined(separator: ", ")
+                    print("\(skill.id)\t\(skill.name)\ttags=[\(tags)]")
+                    if let desc = skill.description {
+                        print("  \(desc)")
+                    }
+                }
+            }
+            Foundation.exit(Int32(ExitCode.ok))
+
+        case "add":
+            let rest = Array(arguments.dropFirst())
+            var name: String?
+            var description: String?
+            var instructions: String?
+            var tags: [String] = []
+            var i = 0
+            while i < rest.count {
+                switch rest[i] {
+                case "--name":
+                    i += 1
+                    if i < rest.count { name = rest[i] }
+                case "--description":
+                    i += 1
+                    if i < rest.count { description = rest[i] }
+                case "--instructions":
+                    i += 1
+                    if i < rest.count { instructions = rest[i] }
+                case "--tag":
+                    i += 1
+                    if i < rest.count { tags.append(rest[i]) }
+                default:
+                    break
+                }
+                i += 1
+            }
+            guard let skillName = name else {
+                throw ConfigError("Usage: aib skill add --name <name> [--description <desc>] [--instructions <text>] [--tag <tag>]...")
+            }
+            try AIBWorkspaceCore.addSkill(
+                workspaceRoot: cwd,
+                name: skillName,
+                description: description,
+                instructions: instructions,
+                tags: tags
+            )
+            logger.info("Skill added", metadata: ["name": "\(skillName)"])
+            Foundation.exit(Int32(ExitCode.ok))
+
+        case "remove":
+            let rest = Array(arguments.dropFirst())
+            guard let skillID = rest.first else {
+                throw ConfigError("Usage: aib skill remove <id>")
+            }
+            try AIBWorkspaceCore.removeSkill(workspaceRoot: cwd, skillID: skillID)
+            logger.info("Skill removed", metadata: ["id": "\(skillID)"])
+            Foundation.exit(Int32(ExitCode.ok))
+
+        case "assign":
+            let rest = Array(arguments.dropFirst())
+            guard let skillID = rest.first, !skillID.hasPrefix("--") else {
+                throw ConfigError("Usage: aib skill assign <skill-id> --service <namespaced-service-id>")
+            }
+            var serviceID: String?
+            var i = 1
+            while i < rest.count {
+                if rest[i] == "--service" {
+                    i += 1
+                    if i < rest.count { serviceID = rest[i] }
+                }
+                i += 1
+            }
+            guard let namespacedServiceID = serviceID else {
+                throw ConfigError("--service is required for skill assign")
+            }
+            try AIBWorkspaceCore.assignSkill(workspaceRoot: cwd, skillID: skillID, namespacedServiceID: namespacedServiceID)
+            logger.info("Skill assigned", metadata: ["skill": "\(skillID)", "service": "\(namespacedServiceID)"])
+            Foundation.exit(Int32(ExitCode.ok))
+
+        case "unassign":
+            let rest = Array(arguments.dropFirst())
+            guard let skillID = rest.first, !skillID.hasPrefix("--") else {
+                throw ConfigError("Usage: aib skill unassign <skill-id> --service <namespaced-service-id>")
+            }
+            var serviceID: String?
+            var i = 1
+            while i < rest.count {
+                if rest[i] == "--service" {
+                    i += 1
+                    if i < rest.count { serviceID = rest[i] }
+                }
+                i += 1
+            }
+            guard let namespacedServiceID = serviceID else {
+                throw ConfigError("--service is required for skill unassign")
+            }
+            try AIBWorkspaceCore.unassignSkill(workspaceRoot: cwd, skillID: skillID, namespacedServiceID: namespacedServiceID)
+            logger.info("Skill unassigned", metadata: ["skill": "\(skillID)", "service": "\(namespacedServiceID)"])
+            Foundation.exit(Int32(ExitCode.ok))
+
+        case "registry":
+            let registrySubcommand = arguments.dropFirst().first
+            switch registrySubcommand {
+            case "list":
+                let entries = try await AIBWorkspaceCore.listRegistrySkills()
+                if entries.isEmpty {
+                    print("No skills found in registry.")
+                } else {
+                    for entry in entries {
+                        print(entry.id)
+                    }
+                }
+                Foundation.exit(Int32(ExitCode.ok))
+
+            case "download":
+                let skillID = arguments.dropFirst().dropFirst().first
+                guard let skillID else {
+                    throw ConfigError("Usage: aib skill registry download <id>")
+                }
+                try await AIBWorkspaceCore.downloadRegistrySkill(id: skillID)
+                logger.info("Skill downloaded to library", metadata: ["id": "\(skillID)"])
+                Foundation.exit(Int32(ExitCode.ok))
+
+            default:
+                throw ConfigError("Usage: aib skill registry list|download <id>")
+            }
+
+        case "library":
+            let skills = try AIBWorkspaceCore.listLibrarySkills()
+            if skills.isEmpty {
+                print("No skills in library.")
+            } else {
+                for skill in skills {
+                    let tags = skill.tags.joined(separator: ", ")
+                    print("\(skill.id)\t\(skill.name)\ttags=[\(tags)]")
+                    if let desc = skill.description {
+                        print("  \(desc)")
+                    }
+                }
+            }
+            Foundation.exit(Int32(ExitCode.ok))
+
+        case "import":
+            let rest = Array(arguments.dropFirst())
+            guard let skillID = rest.first else {
+                throw ConfigError("Usage: aib skill import <id>")
+            }
+            try AIBWorkspaceCore.importSkill(workspaceRoot: cwd, skillID: skillID)
+            logger.info("Skill imported into workspace", metadata: ["id": "\(skillID)"])
+            Foundation.exit(Int32(ExitCode.ok))
+
+        default:
+            throw ConfigError("Unknown skill subcommand. Use: list, add, remove, assign, unassign, import, library, registry", metadata: ["subcommand": subcommand])
+        }
+    }
+
     private static func parseRuntimeFlags(
         arguments: [String],
         defaultWorkspaceRoot: String,
@@ -398,6 +568,7 @@ struct AIBDevMain {
             Commands:
               aib init [--scan <path>] [--no-scan] [--force]
               aib workspace <list|scan|sync>
+              aib skill <list|add|remove|assign|unassign>
               aib emulator <start|validate|status|stop>
               aib deploy <plan|diff|apply>
 

@@ -1,7 +1,7 @@
 import AIBConfig
 import AIBWorkspace
 import Foundation
-import Yams
+import os
 
 public struct WorkspaceDiscoveryError: Error, LocalizedError, Sendable {
     public var message: String
@@ -21,13 +21,19 @@ public final class WorkspaceDiscoveryService {
 
     public init() {}
 
+    private static let logger = os.Logger(subsystem: "com.aib.core", category: "WorkspaceDiscovery")
+
     public func loadWorkspace(at rootURL: URL) throws -> AIBWorkspaceSnapshot {
         let rootURL = rootURL.standardizedFileURL
+        Self.logger.info("loadWorkspace: rootURL=\(rootURL.path)")
         guard FileManager.default.fileExists(atPath: rootURL.path) else {
+            Self.logger.error("loadWorkspace: path does not exist")
             throw WorkspaceDiscoveryError(message: "Workspace path does not exist")
         }
 
+        Self.logger.info("loadWorkspace: loading workspace config...")
         let workspaceConfig = try loadWorkspaceConfig(at: rootURL)
+        Self.logger.info("loadWorkspace: config loaded, repos=\(workspaceConfig?.repos.count ?? 0)")
 
         // Build lookup from workspace.yaml so configured runtime takes priority
         let configuredReposByPath: [String: WorkspaceRepo]
@@ -61,14 +67,25 @@ public final class WorkspaceDiscoveryService {
         let fileTreesByRepoID = try Dictionary(uniqueKeysWithValues: repos.map { repo in
             (repo.id, try buildFileTree(for: repo))
         })
-        let services = parseAllServices(repos: repos, workspaceConfig: workspaceConfig)
+        let services = parseAllServices(
+            repos: repos,
+            workspaceConfig: workspaceConfig,
+            workspaceRoot: rootURL
+        )
+
+        let skills = discoveredSkills(
+            workspaceConfig: workspaceConfig,
+            services: services,
+            workspaceRoot: rootURL
+        )
 
         return AIBWorkspaceSnapshot(
             rootURL: rootURL,
             displayName: rootURL.lastPathComponent,
             repos: repos.sorted(by: { $0.name.localizedStandardCompare($1.name) == .orderedAscending }),
             fileTreesByRepoID: fileTreesByRepoID,
-            services: services.sorted(by: { $0.namespacedID.localizedStandardCompare($1.namespacedID) == .orderedAscending })
+            services: services.sorted(by: { $0.namespacedID.localizedStandardCompare($1.namespacedID) == .orderedAscending }),
+            skills: skills
         )
     }
 
@@ -145,7 +162,11 @@ public final class WorkspaceDiscoveryService {
         )
     }
 
-    private func parseAllServices(repos: [AIBRepoModel], workspaceConfig: AIBWorkspaceConfig?) -> [AIBServiceModel] {
+    private func parseAllServices(
+        repos: [AIBRepoModel],
+        workspaceConfig: AIBWorkspaceConfig?,
+        workspaceRoot: URL
+    ) -> [AIBServiceModel] {
         guard let workspaceConfig else { return [] }
         var result: [AIBServiceModel] = []
         for wsRepo in workspaceConfig.repos where wsRepo.enabled {
@@ -153,6 +174,8 @@ public final class WorkspaceDiscoveryService {
             let repoID = matchingRepo?.id ?? wsRepo.name
             let repoName = matchingRepo?.name ?? wsRepo.name
             let namespace = wsRepo.servicesNamespace ?? wsRepo.name
+            let repoRootURL = matchingRepo?.rootURL
+                ?? URL(fileURLWithPath: wsRepo.path, relativeTo: workspaceRoot).standardizedFileURL
 
             if let inlineServices = wsRepo.services {
                 // Detect package names per runtime from the repo's manifest
@@ -188,6 +211,18 @@ public final class WorkspaceDiscoveryService {
                         serviceID: service.id,
                         detectionsByRuntime: detectionsByRuntime
                     )
+                    let executionDirectoryURL = resolveExecutionDirectoryURL(
+                        serviceCWD: service.cwd,
+                        repoRootURL: repoRootURL
+                    )
+                    let executionEntries = discoverExecutionEntries(
+                        at: executionDirectoryURL,
+                        serviceID: "\(namespace)/\(service.id)"
+                    )
+                    let nativeSkills = discoverExecutionSkills(
+                        at: executionDirectoryURL,
+                        serviceID: "\(namespace)/\(service.id)"
+                    )
 
                     result.append(AIBServiceModel(
                         repoID: repoID,
@@ -204,7 +239,11 @@ public final class WorkspaceDiscoveryService {
                         a2aProfile: a2aProfile,
                         uiProfile: uiProfile,
                         packageName: packageName,
-                        endpoints: service.endpoints ?? [:]
+                        endpoints: service.endpoints ?? [:],
+                        assignedSkillIDs: service.skills ?? [],
+                        nativeSkillIDs: nativeSkills.map(\.id),
+                        executionDirectoryPath: executionDirectoryURL.path(percentEncoded: false),
+                        executionDirectoryEntries: executionEntries
                     ))
                 }
             } else {
@@ -220,6 +259,127 @@ public final class WorkspaceDiscoveryService {
             }
         }
         return result
+    }
+
+    private func resolveExecutionDirectoryURL(serviceCWD: String?, repoRootURL: URL) -> URL {
+        guard let serviceCWD, !serviceCWD.isEmpty else {
+            return repoRootURL.standardizedFileURL
+        }
+        return URL(fileURLWithPath: serviceCWD, relativeTo: repoRootURL).standardizedFileURL
+    }
+
+    private func discoverExecutionEntries(
+        at executionDirectoryURL: URL,
+        serviceID: String
+    ) -> [AIBExecutionDirectoryEntry] {
+        do {
+            return try AIBExecutionDirectoryInspector.discoverEntries(at: executionDirectoryURL)
+        } catch {
+            Self.logger.warning(
+                "Failed to inspect execution directory for \(serviceID, privacy: .public) at \(executionDirectoryURL.path(percentEncoded: false), privacy: .public): \(error.localizedDescription, privacy: .public)"
+            )
+            return []
+        }
+    }
+
+    private func discoverExecutionSkills(
+        at executionDirectoryURL: URL,
+        serviceID: String
+    ) -> [AIBSkillDefinition] {
+        let roots = [
+            executionDirectoryURL.appendingPathComponent(".claude/skills", isDirectory: true),
+            executionDirectoryURL.appendingPathComponent(".agents/skills", isDirectory: true),
+            executionDirectoryURL.appendingPathComponent("skills", isDirectory: true),
+        ]
+
+        var discovered: [String: AIBSkillDefinition] = [:]
+        for root in roots {
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: root.path(percentEncoded: false), isDirectory: &isDirectory),
+                  isDirectory.boolValue else {
+                continue
+            }
+
+            do {
+                for skill in try SkillBundleLoader.listSkills(rootURL: root) {
+                    let bundleRootPath = SkillBundleLoader.skillURL(id: skill.id, rootURL: root).path(percentEncoded: false)
+                    var entry = discovered[skill.id] ?? AIBSkillDefinition(
+                        id: skill.id,
+                        name: skill.name,
+                        description: skill.description,
+                        instructions: skill.instructions,
+                        allowedTools: skill.allowedTools ?? [],
+                        tags: skill.tags ?? [],
+                        source: .executionDirectory,
+                        isWorkspaceManaged: false,
+                        bundleRootPath: bundleRootPath,
+                        discoveredInServices: []
+                    )
+                    if !entry.discoveredInServices.contains(serviceID) {
+                        entry.discoveredInServices.append(serviceID)
+                        entry.discoveredInServices.sort()
+                    }
+                    if entry.bundleRootPath == nil {
+                        entry.bundleRootPath = bundleRootPath
+                    }
+                    discovered[skill.id] = entry
+                }
+            } catch {
+                Self.logger.warning(
+                    "Failed to inspect execution skills for \(serviceID, privacy: .public) at \(root.path(percentEncoded: false), privacy: .public): \(error.localizedDescription, privacy: .public)"
+                )
+            }
+        }
+
+        return discovered.values.sorted { $0.id.localizedStandardCompare($1.id) == .orderedAscending }
+    }
+
+    private func discoveredSkills(
+        workspaceConfig: AIBWorkspaceConfig?,
+        services: [AIBServiceModel],
+        workspaceRoot: URL
+    ) -> [AIBSkillDefinition] {
+        var skillsByID: [String: AIBSkillDefinition] = [:]
+        let workspaceRootPath = workspaceRoot.path(percentEncoded: false)
+        let workspaceSkillsRoot = SkillBundleLoader.workspaceSkillsRootURL(workspaceRoot: workspaceRootPath)
+
+        for skill in workspaceConfig?.skills ?? [] {
+            skillsByID[skill.id] = AIBSkillDefinition(
+                id: skill.id,
+                name: skill.name,
+                description: skill.description,
+                instructions: skill.instructions,
+                allowedTools: skill.allowedTools ?? [],
+                tags: skill.tags ?? [],
+                source: .workspace,
+                isWorkspaceManaged: true,
+                bundleRootPath: SkillBundleLoader.skillURL(id: skill.id, rootURL: workspaceSkillsRoot).path(percentEncoded: false),
+                discoveredInServices: []
+            )
+        }
+
+        for service in services {
+            guard let executionDirectoryPath = service.executionDirectoryPath else { continue }
+            for discovered in discoverExecutionSkills(
+                at: URL(fileURLWithPath: executionDirectoryPath),
+                serviceID: service.namespacedID
+            ) {
+                if var existing = skillsByID[discovered.id] {
+                    for serviceID in discovered.discoveredInServices where !existing.discoveredInServices.contains(serviceID) {
+                        existing.discoveredInServices.append(serviceID)
+                    }
+                    existing.discoveredInServices.sort()
+                    if existing.bundleRootPath == nil {
+                        existing.bundleRootPath = discovered.bundleRootPath
+                    }
+                    skillsByID[discovered.id] = existing
+                } else {
+                    skillsByID[discovered.id] = discovered
+                }
+            }
+        }
+
+        return skillsByID.values.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
     }
 
     private func generateAutoServices(
@@ -249,6 +409,14 @@ public final class WorkspaceDiscoveryService {
                 default: .unknown
                 }
                 let packageName = detection.serviceNames.count == 1 ? detection.serviceNames.first : nil
+                let executionEntries = discoverExecutionEntries(
+                    at: repoURL,
+                    serviceID: "\(namespace)/\(localID)"
+                )
+                let nativeSkills = discoverExecutionSkills(
+                    at: repoURL,
+                    serviceID: "\(namespace)/\(localID)"
+                )
                 services.append(AIBServiceModel(
                     repoID: repoID,
                     repoName: repoName,
@@ -259,7 +427,10 @@ public final class WorkspaceDiscoveryService {
                     watchMode: defaults.watchMode.rawValue,
                     cwd: repoURL.path,
                     serviceKind: kind,
-                    packageName: packageName
+                    packageName: packageName,
+                    nativeSkillIDs: nativeSkills.map(\.id),
+                    executionDirectoryPath: repoURL.path(percentEncoded: false),
+                    executionDirectoryEntries: executionEntries
                 ))
             }
             return services
@@ -288,6 +459,13 @@ public final class WorkspaceDiscoveryService {
         case .mcp: .mcp
         default: .unknown
         }
+        let executionRootURL = matchingRepo.map { $0.rootURL.standardizedFileURL }
+        let executionEntries = executionRootURL.map {
+            discoverExecutionEntries(at: $0, serviceID: "\(namespace)/main")
+        } ?? []
+        let nativeSkills = executionRootURL.map {
+            discoverExecutionSkills(at: $0, serviceID: "\(namespace)/main")
+        } ?? []
         return [AIBServiceModel(
             repoID: repoID,
             repoName: repoName,
@@ -298,7 +476,10 @@ public final class WorkspaceDiscoveryService {
             watchMode: defaults.watchMode.rawValue,
             cwd: matchingRepo?.rootURL.path,
             serviceKind: kind,
-            packageName: autoPackageName
+            packageName: autoPackageName,
+            nativeSkillIDs: nativeSkills.map(\.id),
+            executionDirectoryPath: executionRootURL?.path(percentEncoded: false),
+            executionDirectoryEntries: executionEntries
         )]
     }
 

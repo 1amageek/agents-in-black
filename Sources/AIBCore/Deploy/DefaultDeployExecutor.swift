@@ -106,28 +106,31 @@ public struct DefaultDeployExecutor: DeployExecuting {
             let buildContext = URL(fileURLWithPath: workspaceRoot)
                 .appendingPathComponent(service.repoPath)
                 .path
+            var copyInstructions: [String] = []
 
-            // Copy MCP connection config into build context and patch Dockerfile to include it
             if let mcpConfig = service.artifacts.mcpConnectionConfig {
                 let connectionsFileName = ".aib-connections.json"
                 let targetPath = URL(fileURLWithPath: buildContext)
                     .appendingPathComponent(connectionsFileName)
-                try mcpConfig.content.write(
-                    toFile: targetPath.path,
-                    atomically: true,
-                    encoding: .utf8
-                )
+                try mcpConfig.content.write(to: targetPath, options: .atomic)
+                copyInstructions.append("COPY \(connectionsFileName) ./")
+            }
 
-                // Append COPY instruction to Dockerfile so the file is available at runtime
-                let originalContent = try String(contentsOfFile: dockerfilePath, encoding: .utf8)
-                if !originalContent.contains(connectionsFileName) {
-                    let patchedPath = URL(fileURLWithPath: buildContext)
-                        .appendingPathComponent("Dockerfile.aib")
-                        .path
-                    let patchedContent = originalContent + "\nCOPY \(connectionsFileName) ./\n"
-                    try patchedContent.write(toFile: patchedPath, atomically: true, encoding: .utf8)
-                    dockerfilePath = patchedPath
-                }
+            let projectedArtifacts = service.artifacts.skillConfigs + service.artifacts.executionDirectoryConfigs
+            if !projectedArtifacts.isEmpty {
+                let stagedRoots = try Self.stageProjectedArtifacts(
+                    projectedArtifacts,
+                    buildContext: buildContext
+                )
+                copyInstructions.append(contentsOf: Self.copyInstructionsForStagedRuntimeRoots(stagedRoots))
+            }
+
+            if !copyInstructions.isEmpty {
+                dockerfilePath = try Self.patchedDockerfilePath(
+                    dockerfilePath: dockerfilePath,
+                    buildContext: buildContext,
+                    copyInstructions: copyInstructions
+                )
             }
 
             // Ensure Artifact Registry repository exists (idempotent)
@@ -450,13 +453,11 @@ public struct DefaultDeployExecutor: DeployExecuting {
                 }
             }
 
-            // Clean up temporary files from build context
-            let connectionsCleanup = URL(fileURLWithPath: buildContext)
-                .appendingPathComponent(".aib-connections.json")
-            try? FileManager.default.removeItem(at: connectionsCleanup)
-            let dockerfileCleanup = URL(fileURLWithPath: buildContext)
-                .appendingPathComponent("Dockerfile.aib")
-            try? FileManager.default.removeItem(at: dockerfileCleanup)
+            cleanupTemporaryArtifacts(
+                buildContext: buildContext,
+                logHandler: logHandler,
+                serviceID: service.id
+            )
 
             if serviceFailed { continue }
         }
@@ -573,6 +574,111 @@ public struct DefaultDeployExecutor: DeployExecuting {
             message: "Command completed in \(elapsedText) (exit \(result.exitCode))"
         ))
         return result
+    }
+
+    private static func stageProjectedArtifacts(
+        _ artifacts: [AIBDeployArtifact],
+        buildContext: String
+    ) throws -> Set<String> {
+        let fm = FileManager.default
+        let buildContextURL = URL(fileURLWithPath: buildContext)
+        var stagedRoots = Set<String>()
+
+        for artifact in artifacts {
+            let destinationURL = buildContextURL.appendingPathComponent(artifact.relativePath)
+            try fm.createDirectory(
+                at: destinationURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try artifact.content.write(to: destinationURL, options: .atomic)
+
+            if let root = Self.stagedRuntimeRoot(for: artifact.relativePath) {
+                stagedRoots.insert(root)
+            }
+        }
+
+        return stagedRoots
+    }
+
+    private static func patchedDockerfilePath(
+        dockerfilePath: String,
+        buildContext: String,
+        copyInstructions: [String]
+    ) throws -> String {
+        let originalContent = try String(contentsOfFile: dockerfilePath, encoding: .utf8)
+        let missingInstructions = copyInstructions.filter { !originalContent.contains($0) }
+        guard !missingInstructions.isEmpty else { return dockerfilePath }
+
+        let patchedPath = URL(fileURLWithPath: buildContext)
+            .appendingPathComponent("Dockerfile.aib")
+            .path(percentEncoded: false)
+        let patchedContent = originalContent + "\n" + missingInstructions.joined(separator: "\n") + "\n"
+        try patchedContent.write(toFile: patchedPath, atomically: true, encoding: .utf8)
+        return patchedPath
+    }
+
+    private static func copyInstructionsForStagedRuntimeRoots(_ roots: Set<String>) -> [String] {
+        var instructions: [String] = []
+        if roots.contains("__aib_deploy/claude") {
+            instructions.append("COPY __aib_deploy/claude/ ./.claude/")
+        }
+        if roots.contains("__aib_deploy/codex") {
+            instructions.append("COPY __aib_deploy/codex/ ./.codex/")
+        }
+        if roots.contains("__aib_deploy/agents") {
+            instructions.append("COPY __aib_deploy/agents/ ./.agents/")
+        }
+        if roots.contains("__aib_deploy/skills") {
+            instructions.append("COPY __aib_deploy/skills/ ./skills/")
+        }
+        if roots.contains("__aib_deploy/root") {
+            instructions.append("COPY __aib_deploy/root/ ./")
+        }
+        return instructions
+    }
+
+    private static func stagedRuntimeRoot(for relativePath: String) -> String? {
+        let prefixes = [
+            "__aib_deploy/claude/",
+            "__aib_deploy/codex/",
+            "__aib_deploy/agents/",
+            "__aib_deploy/skills/",
+            "__aib_deploy/root/",
+        ]
+        for prefix in prefixes where relativePath.hasPrefix(prefix) {
+            return String(prefix.dropLast())
+        }
+        return nil
+    }
+
+    private func cleanupTemporaryArtifacts(
+        buildContext: String,
+        logHandler: @escaping @Sendable (AIBDeployLogEntry) -> Void,
+        serviceID: String
+    ) {
+        let cleanupTargets = [
+            "__aib_deploy",
+            ".aib-connections.json",
+            "Dockerfile.aib",
+        ]
+
+        for relativePath in cleanupTargets {
+            let targetURL = URL(fileURLWithPath: buildContext).appendingPathComponent(relativePath)
+            guard FileManager.default.fileExists(atPath: targetURL.path(percentEncoded: false)) else {
+                continue
+            }
+
+            do {
+                try FileManager.default.removeItem(at: targetURL)
+            } catch {
+                logHandler(AIBDeployLogEntry(
+                    level: .warning,
+                    serviceID: serviceID,
+                    step: .dockerBuild,
+                    message: "Failed to clean temporary deploy artifact \(relativePath): \(error.localizedDescription)"
+                ))
+            }
+        }
     }
 
     private static func detectLogLevel(_ text: String) -> Logger.Level {

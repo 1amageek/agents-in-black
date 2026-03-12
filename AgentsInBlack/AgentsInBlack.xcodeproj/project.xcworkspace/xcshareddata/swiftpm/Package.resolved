@@ -1,5 +1,5 @@
 {
-  "originHash" : "bdcd4944321ea8b3f191a4556f90607c1b8e0d52538f4803a2a0f4865c264a36",
+  "originHash" : "68731543167cf0ff474b5536fcc8fc22c08710c95a61fea73dd1a472db739564",
   "pins" : [
     {
       "identity" : "async-http-client",
@@ -133,7 +133,7 @@
       "location" : "https://github.com/1amageek/swift-flow.git",
       "state" : {
         "branch" : "main",
-        "revision" : "345f0ad12e845720ddd72a7e9a5771df6e8ce64c"
+        "revision" : "eb58e7b7e5171577bfadfb922969e8bc77c5c7f6"
       }
     },
     {
@@ -245,6 +245,15 @@
       }
     },
     {
+      "identity" : "swift-skills",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/1amageek/swift-skills.git",
+      "state" : {
+        "branch" : "main",
+        "revision" : "523cdcb839719d957470b9e3a0f073238ae2db47"
+      }
+    },
+    {
       "identity" : "swift-system",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/apple/swift-system",
@@ -254,21 +263,21 @@
       }
     },
     {
+      "identity" : "swift-yaml",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/1amageek/swift-yaml.git",
+      "state" : {
+        "revision" : "ed909618017e782c11880992f49ace07953f40f3",
+        "version" : "1.0.0"
+      }
+    },
+    {
       "identity" : "swiftterm",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/migueldeicaza/SwiftTerm.git",
       "state" : {
         "revision" : "b1262db5b6bea699a8260a8c66999436c508ca56",
         "version" : "1.11.2"
-      }
-    },
-    {
-      "identity" : "yams",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/jpsim/Yams",
-      "state" : {
-        "revision" : "deaf82e867fa2cbd3cd865978b079bfcf384ac28",
-        "version" : "6.2.1"
       }
     },
     {

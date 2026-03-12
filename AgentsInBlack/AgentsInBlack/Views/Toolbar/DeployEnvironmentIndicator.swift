@@ -1,59 +1,20 @@
 import AIBCore
 import SwiftUI
 
-/// Docker status indicator with runtime selector dropdown.
-/// Shows the selected Docker runtime icon and status color.
-/// Menu lists installed runtimes for selection and a launch action when Docker is not running.
-struct DockerStatusIndicator: View {
+/// Build backend status indicator for apple/container.
+struct BuildBackendStatusIndicator: View {
     @Bindable var model: AgentsInBlackAppModel
 
-    private var result: PreflightCheckResult? { model.dockerCheckResult }
+    private var result: PreflightCheckResult? { model.buildBackendCheckResult }
     private var isChecking: Bool { model.isCheckingEnvironment }
 
-    private var isFailed: Bool {
-        guard let result else { return false }
-        return result.isFailed
-    }
-
     var body: some View {
-        Menu {
-            Section("Docker Runtime") {
-                ForEach(model.installedDockerRuntimes) { runtime in
-                    Button {
-                        model.selectDockerRuntime(runtime)
-                    } label: {
-                        Label {
-                            Text(runtime.name)
-                        } icon: {
-                            if let icon = runtime.icon {
-                                Image(nsImage: icon)
-                            }
-                        }
-                    }
-                }
-            }
-
-            if model.installedDockerRuntimes.isEmpty {
-                Text("No Docker runtime found")
-                    .foregroundStyle(.secondary)
-            }
-        } label: {
-            HStack(spacing: 4) {
-                if let runtime = model.preferredDockerRuntime, let icon = runtime.icon {
-                    Image(nsImage: icon)
-                } else {
-                    Image(systemName: "shippingbox")
-                        .font(.system(size: 13))
-                }
-                statusDot
-            }
-            .symbolEffect(.pulse, isActive: isChecking)
-        } primaryAction: {
-            if isFailed {
-                model.launchDockerRuntime()
-            }
+        HStack(spacing: 4) {
+            Image(systemName: "shippingbox.fill")
+                .font(.system(size: 13))
+            statusDot
         }
-        .menuStyle(.borderlessButton)
+        .symbolEffect(.pulse, isActive: isChecking)
         .fixedSize()
         .help(tooltipText)
     }
@@ -82,11 +43,57 @@ struct DockerStatusIndicator: View {
     // MARK: - Tooltip
 
     private var tooltipText: String {
-        let runtimeName = model.preferredDockerRuntime?.name ?? "Docker"
-        if isChecking { return "\(runtimeName): Checking..." }
-        guard let result else { return runtimeName }
-        if isFailed { return "\(runtimeName): Not Running" }
-        return "\(runtimeName): \(statusLabel(for: result))"
+        let backendName = "apple/container"
+        if isChecking { return "\(backendName): Checking..." }
+        guard let result else { return backendName }
+        return "\(backendName): \(statusLabel(for: result))"
+    }
+}
+
+struct EditorStatusIndicator: View {
+    @Bindable var model: AgentsInBlackAppModel
+
+    var body: some View {
+        Menu {
+            Section("Editor") {
+                ForEach(model.installedEditorApps) { editor in
+                    Button {
+                        model.selectEditorApp(editor)
+                    } label: {
+                        Label {
+                            Text(editor.name)
+                        } icon: {
+                            if let icon = editor.icon {
+                                Image(nsImage: icon)
+                            }
+                        }
+                    }
+                }
+            }
+
+            if model.installedEditorApps.isEmpty {
+                Text("No editor found")
+                    .foregroundStyle(.secondary)
+            }
+        } label: {
+            if let editor = model.preferredEditorApp,
+               let icon = editor.icon {
+                Image(nsImage: icon)
+            } else {
+                Image(systemName: "square.and.pencil")
+                    .font(.system(size: 13))
+            }
+        } primaryAction: {
+            model.launchEditorApp()
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help(tooltipText)
+    }
+
+    private var tooltipText: String {
+        let editorName = model.preferredEditorApp?.name ?? "Editor"
+        return "Open with \(editorName)"
     }
 }
 

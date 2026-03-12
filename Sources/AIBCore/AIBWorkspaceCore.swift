@@ -128,6 +128,154 @@ public enum AIBWorkspaceCore {
         )
     }
 
+    // MARK: - Skill Management
+
+    /// List all skill definitions in the workspace (for deployment).
+    public static func listSkills(workspaceRoot: String) throws -> [AIBSkillDefinition] {
+        try AIBWorkspaceManager.listSkills(workspaceRoot: workspaceRoot).map(Self.mapSkill)
+    }
+
+    /// Add a new skill definition to the workspace.
+    /// If `id` is nil, it is auto-generated from `name` via slugification.
+    public static func addSkill(
+        workspaceRoot: String,
+        id: String? = nil,
+        name: String,
+        description: String? = nil,
+        instructions: String? = nil,
+        allowedTools: [String] = [],
+        tags: [String] = []
+    ) throws {
+        let resolvedID = id ?? WorkspaceSkillConfig.slugify(name)
+        let skill = WorkspaceSkillConfig(
+            id: resolvedID,
+            name: name,
+            description: description,
+            instructions: instructions,
+            allowedTools: allowedTools.isEmpty ? nil : allowedTools,
+            tags: tags.isEmpty ? nil : tags
+        )
+        try AIBWorkspaceManager.addSkill(workspaceRoot: workspaceRoot, skill: skill)
+    }
+
+    /// Remove a skill definition and all its assignments from services.
+    public static func removeSkill(workspaceRoot: String, skillID: String) throws {
+        try AIBWorkspaceManager.removeSkill(workspaceRoot: workspaceRoot, skillID: skillID)
+    }
+
+    /// Assign a skill to an agent service.
+    public static func assignSkill(
+        workspaceRoot: String,
+        skillID: String,
+        namespacedServiceID: String
+    ) throws {
+        try AIBWorkspaceManager.assignSkill(
+            workspaceRoot: workspaceRoot,
+            skillID: skillID,
+            namespacedServiceID: namespacedServiceID
+        )
+    }
+
+    /// Unassign a skill from an agent service.
+    public static func unassignSkill(
+        workspaceRoot: String,
+        skillID: String,
+        namespacedServiceID: String
+    ) throws {
+        try AIBWorkspaceManager.unassignSkill(
+            workspaceRoot: workspaceRoot,
+            skillID: skillID,
+            namespacedServiceID: namespacedServiceID
+        )
+    }
+
+    /// Import a skill from the user library into the workspace.
+    public static func importSkill(workspaceRoot: String, skillID: String) throws {
+        try AIBWorkspaceManager.importSkill(workspaceRoot: workspaceRoot, skillID: skillID)
+    }
+
+    /// Import a skill bundle from an execution directory into the workspace.
+    public static func importSkillBundle(
+        workspaceRoot: String,
+        skillID: String,
+        sourcePath: String
+    ) throws {
+        try AIBWorkspaceManager.importSkillBundle(
+            workspaceRoot: workspaceRoot,
+            skillID: skillID,
+            sourcePath: sourcePath
+        )
+    }
+
+    // MARK: - Skill Library (User-level)
+
+    /// List all skills in the user library (`~/.aib/skills/`).
+    public static func listLibrarySkills() throws -> [AIBSkillDefinition] {
+        try AIBWorkspaceManager.listLibrarySkills().map(Self.mapSkill)
+    }
+
+    /// Create a skill in the user library.
+    public static func createLibrarySkill(
+        id: String? = nil,
+        name: String,
+        description: String? = nil,
+        instructions: String? = nil,
+        allowedTools: [String] = [],
+        tags: [String] = []
+    ) throws {
+        let resolvedID = id ?? WorkspaceSkillConfig.slugify(name)
+        let skill = WorkspaceSkillConfig(
+            id: resolvedID,
+            name: name,
+            description: description,
+            instructions: instructions,
+            allowedTools: allowedTools.isEmpty ? nil : allowedTools,
+            tags: tags.isEmpty ? nil : tags
+        )
+        try AIBWorkspaceManager.createLibrarySkill(skill)
+    }
+
+    /// Delete a skill from the user library.
+    public static func deleteLibrarySkill(id: String) throws {
+        try AIBWorkspaceManager.deleteLibrarySkill(id: id)
+    }
+
+    // MARK: - Skill Registry (Remote)
+
+    /// A skill available in a remote registry.
+    public struct RegistrySkillEntry: Identifiable, Sendable {
+        public let id: String
+        public let name: String
+        public let description: String?
+        public let tags: [String]
+    }
+
+    /// List skills available in the default remote registry.
+    public static func listRegistrySkills() async throws -> [RegistrySkillEntry] {
+        let entries = try await AIBWorkspaceManager.listRegistrySkills()
+        return entries.map {
+            RegistrySkillEntry(id: $0.id, name: $0.name, description: $0.description, tags: $0.tags)
+        }
+    }
+
+    /// Download a skill from the remote registry into the user library.
+    public static func downloadRegistrySkill(id: String) async throws {
+        try await AIBWorkspaceManager.downloadRegistrySkill(id: id)
+    }
+
+    private static func mapSkill(_ skill: WorkspaceSkillConfig) -> AIBSkillDefinition {
+        AIBSkillDefinition(
+            id: skill.id,
+            name: skill.name,
+            description: skill.description,
+            instructions: skill.instructions,
+            allowedTools: skill.allowedTools ?? [],
+            tags: skill.tags ?? [],
+            source: .workspace,
+            isWorkspaceManaged: true
+        )
+    }
+
     public static func updateServiceConnections(
         workspaceRoot: String,
         connectionsByNamespacedServiceID: [String: AIBServiceConnections]

@@ -2,6 +2,7 @@ import AIBCore
 import AIBRuntimeCore
 import AIBWorkspace
 import os
+import SwiftSkill
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -18,6 +19,9 @@ struct WorkspaceSidebarView: View {
                 issuesSection
             }
             workspaceSection
+            if model.workspace != nil {
+                skillsSection(model.workspace?.skills ?? [])
+            }
         }
         .onDrop(of: [.fileURL], isTargeted: $isDropTargeted) { providers in
             sidebarDropLogger.info("[DROP] onDrop called, providers=\(providers.count), workspace=\(model.workspace != nil)")
@@ -370,6 +374,81 @@ struct WorkspaceSidebarView: View {
             Button("Open in Editor") {
                 model.select(.repo(repo.id))
                 model.openInEditor()
+            }
+        }
+    }
+
+    // MARK: - Skills Section
+
+    private func skillsSection(_ skills: [AIBSkillDefinition]) -> some View {
+        Section {
+            if skills.isEmpty {
+                Text("No skills defined")
+                    .foregroundStyle(.secondary)
+                    .font(.callout)
+            } else {
+                ForEach(skills, id: \.id) { skill in
+                    skillRow(skill)
+                }
+            }
+        } header: {
+            HStack(spacing: 8) {
+                Text("Skills")
+                Spacer()
+                Menu {
+                    Button("New Skill") {
+                        model.showAddSkillSheet = true
+                    }
+                    Button("Browse Registry…") {
+                        model.showSkillRegistrySheet = true
+                    }
+                } label: {
+                    Label("Add", systemImage: "plus")
+                        .labelStyle(.iconOnly)
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .frame(width: 16)
+                .help("Add Skill")
+                .disabled(model.workspace == nil)
+            }
+            .padding(.trailing, 8)
+        }
+    }
+
+    private func skillRow(_ skill: AIBSkillDefinition) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "puzzlepiece.extension.fill")
+                .foregroundStyle(.purple)
+                .frame(width: 16)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(skill.name)
+                if let desc = skill.description {
+                    Text(desc)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                } else if skill.source == .executionDirectory {
+                    Text("Discovered from execution directory")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
+        }
+        .tag(SelectionTarget.skill(skill.id))
+        .draggable(Skill(
+            name: skill.id,
+            description: skill.description ?? "",
+            allowedTools: skill.allowedTools.isEmpty ? nil : skill.allowedTools,
+            body: skill.instructions ?? ""
+        ))
+        .contextMenu {
+            if skill.isWorkspaceManaged {
+                Button("Remove from Workspace", role: .destructive) {
+                    Task { await model.removeSkillFromWorkspace(skillID: skill.id) }
+                }
             }
         }
     }

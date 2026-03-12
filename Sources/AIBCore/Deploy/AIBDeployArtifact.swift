@@ -5,15 +5,23 @@ public struct AIBDeployArtifactSet: Sendable, Equatable {
     public var dockerfile: AIBDeployArtifact
     public var deployConfig: AIBDeployArtifact
     public var mcpConnectionConfig: AIBDeployArtifact?
+    /// Skill bundle files projected into runtime-specific skill directories.
+    public var skillConfigs: [AIBDeployArtifact]
+    /// Execution-directory agent files projected into `/app`.
+    public var executionDirectoryConfigs: [AIBDeployArtifact]
 
     public init(
         dockerfile: AIBDeployArtifact,
         deployConfig: AIBDeployArtifact,
-        mcpConnectionConfig: AIBDeployArtifact? = nil
+        mcpConnectionConfig: AIBDeployArtifact? = nil,
+        skillConfigs: [AIBDeployArtifact] = [],
+        executionDirectoryConfigs: [AIBDeployArtifact] = []
     ) {
         self.dockerfile = dockerfile
         self.deployConfig = deployConfig
         self.mcpConnectionConfig = mcpConnectionConfig
+        self.skillConfigs = skillConfigs
+        self.executionDirectoryConfigs = executionDirectoryConfigs
     }
 }
 
@@ -21,7 +29,7 @@ public struct AIBDeployArtifactSet: Sendable, Equatable {
 public struct AIBDeployArtifact: Sendable, Equatable, Identifiable {
     public let id: UUID
     public var relativePath: String
-    public var content: String
+    public var content: Data
     public var source: AIBDeployArtifactSource
 
     public init(
@@ -30,10 +38,28 @@ public struct AIBDeployArtifact: Sendable, Equatable, Identifiable {
         content: String,
         source: AIBDeployArtifactSource
     ) {
+        self.init(
+            id: id,
+            relativePath: relativePath,
+            content: Data(content.utf8),
+            source: source
+        )
+    }
+
+    public init(
+        id: UUID = UUID(),
+        relativePath: String,
+        content: Data,
+        source: AIBDeployArtifactSource
+    ) {
         self.id = id
         self.relativePath = relativePath
         self.content = content
         self.source = source
+    }
+
+    public var utf8String: String? {
+        String(data: content, encoding: .utf8)
     }
 }
 

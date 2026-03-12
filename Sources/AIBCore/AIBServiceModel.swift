@@ -20,6 +20,14 @@ public struct AIBServiceModel: Identifiable, Hashable, Sendable {
     public var packageName: String?
     /// Deployed endpoint URLs keyed by provider ID (e.g., `"gcp-cloudrun": "https://...run.app"`).
     public var endpoints: [String: String]
+    /// Skill IDs assigned to this service. References workspace-level skill definitions.
+    public var assignedSkillIDs: [String]
+    /// Skill IDs discovered directly under the execution directory (e.g. `.claude/skills`).
+    public var nativeSkillIDs: [String]
+    /// Absolute path of the execution directory mounted as `/app` for local runtime.
+    public var executionDirectoryPath: String?
+    /// Relevant agent-runtime files discovered under the execution directory.
+    public var executionDirectoryEntries: [AIBExecutionDirectoryEntry]
 
     public init(
         repoID: String,
@@ -36,7 +44,11 @@ public struct AIBServiceModel: Identifiable, Hashable, Sendable {
         a2aProfile: AIBA2AProfile? = nil,
         uiProfile: AIBServiceUIProfile? = nil,
         packageName: String? = nil,
-        endpoints: [String: String] = [:]
+        endpoints: [String: String] = [:],
+        assignedSkillIDs: [String] = [],
+        nativeSkillIDs: [String] = [],
+        executionDirectoryPath: String? = nil,
+        executionDirectoryEntries: [AIBExecutionDirectoryEntry] = []
     ) {
         self.repoID = repoID
         self.repoName = repoName
@@ -54,5 +66,9 @@ public struct AIBServiceModel: Identifiable, Hashable, Sendable {
         self.uiProfile = uiProfile
         self.packageName = packageName
         self.endpoints = endpoints
+        self.assignedSkillIDs = assignedSkillIDs
+        self.nativeSkillIDs = nativeSkillIDs
+        self.executionDirectoryPath = executionDirectoryPath
+        self.executionDirectoryEntries = executionDirectoryEntries
     }
 }

@@ -1,13 +1,36 @@
 import AIBRuntimeCore
 import Foundation
-import Yams
+import os
+import YAML
 
 public enum WorkspaceYAMLCodec {
+    private static let logger = os.Logger(subsystem: "com.aib.workspace", category: "YAMLCodec")
+
     public static func loadWorkspace(at path: String) throws -> AIBWorkspaceConfig {
         do {
-            let yaml = try String(contentsOfFile: path, encoding: .utf8)
-            return try YAMLDecoder().decode(WorkspaceFileDTO.self, from: yaml).toModel()
+            logger.info("loadWorkspace: reading \(path)")
+            let yamlString = try String(contentsOfFile: path, encoding: .utf8)
+            logger.info("loadWorkspace: YAML length=\(yamlString.count)")
+            guard let node = try compose(yaml: yamlString) else {
+                throw ConfigError("Empty workspace config", metadata: ["path": path])
+            }
+            logger.info("loadWorkspace: YAML parsed successfully")
+            let anyDict = YAMLUtility.nodeToAny(node)
+            let jsonData = try JSONSerialization.data(withJSONObject: anyDict, options: [])
+            logger.info("loadWorkspace: JSON data size=\(jsonData.count)")
+            if let jsonStr = String(data: jsonData, encoding: .utf8) {
+                logger.info("loadWorkspace: JSON=\(jsonStr)")
+            }
+            let dto = try JSONDecoder().decode(WorkspaceFileDTO.self, from: jsonData)
+            logger.info("loadWorkspace: DTO decoded, repos=\(dto.repos.count)")
+            let model = try dto.toModel()
+            logger.info("loadWorkspace: model created, repos=\(model.repos.count)")
+            return model
+        } catch let e as ConfigError {
+            logger.error("loadWorkspace: ConfigError: \(e.message)")
+            throw e
         } catch {
+            logger.error("loadWorkspace: error: \(error)")
             throw ConfigError("Failed to load workspace config", metadata: ["path": path, "underlying_error": "\(error)"])
         }
     }
@@ -15,7 +38,9 @@ public enum WorkspaceYAMLCodec {
     public static func saveWorkspace(_ config: AIBWorkspaceConfig, to path: String) throws {
         do {
             let dto = WorkspaceFileDTO(config)
-            let yaml = try YAMLEncoder().encode(dto)
+            let jsonData = try JSONEncoder().encode(dto)
+            let anyObj = try JSONSerialization.jsonObject(with: jsonData, options: [])
+            let yaml = YAMLUtility.emitYAML(anyObj) + "\n"
             try yaml.write(toFile: path, atomically: true, encoding: .utf8)
         } catch {
             throw ConfigError("Failed to save workspace config", metadata: ["path": path, "underlying_error": "\(error)"])
@@ -28,12 +53,28 @@ private struct WorkspaceFileDTO: Codable {
     var workspaceName: String
     var gateway: Gateway
     var repos: [Repo]
+    var skills: [SkillDTO]?
 
     enum CodingKeys: String, CodingKey {
         case version
         case workspaceName = "workspace_name"
         case gateway
         case repos
+        case skills
+    }
+
+    struct SkillDTO: Codable {
+        var id: String
+        var name: String
+        var description: String?
+        var instructions: String?
+        var allowedTools: [String]?
+        var tags: [String]?
+
+        enum CodingKeys: String, CodingKey {
+            case id, name, description, instructions, tags
+            case allowedTools = "allowed_tools"
+        }
     }
 
     struct Gateway: Codable {
@@ -99,9 +140,10 @@ private struct WorkspaceFileDTO: Codable {
         var a2a: A2ADTO?
         var ui: UIDTO?
         var endpoints: [String: String]?
+        var skills: [String]?
 
         enum CodingKeys: String, CodingKey {
-            case id, kind, port, cwd, run, build, install, env, health, restart, concurrency, auth, connections, mcp, a2a, ui, endpoints
+            case id, kind, port, cwd, run, build, install, env, health, restart, concurrency, auth, connections, mcp, a2a, ui, endpoints, skills
             case mountPath = "mount_path"
             case watchMode = "watch_mode"
             case watchPaths = "watch_paths"
@@ -240,6 +282,16 @@ private struct WorkspaceFileDTO: Codable {
                 services: repo.services.map { $0.map(Self.serviceDTO) }
             )
         }
+        self.skills = config.skills.map { $0.map { skill in
+            SkillDTO(
+                id: skill.id,
+                name: skill.name,
+                description: skill.description,
+                instructions: skill.instructions,
+                allowedTools: skill.allowedTools,
+                tags: skill.tags
+            )
+        }}
     }
 
     private static func serviceDTO(from s: WorkspaceRepoServiceConfig) -> ServiceDTO {
@@ -266,7 +318,8 @@ private struct WorkspaceFileDTO: Codable {
             mcp: s.mcp.map { MCPDTO(transport: $0.transport, path: $0.path) },
             a2a: s.a2a.map { A2ADTO(cardPath: $0.cardPath, rpcPath: $0.rpcPath) },
             ui: s.ui.map { UIDTO(primaryMode: $0.primaryMode, chat: $0.chat.map { UIChatDTO(method: $0.method, path: $0.path, requestContentType: $0.requestContentType, requestMessageJSONPath: $0.requestMessageJSONPath, requestContextJSONPath: $0.requestContextJSONPath, responseMessageJSONPath: $0.responseMessageJSONPath, streaming: $0.streaming) }) },
-            endpoints: s.endpoints
+            endpoints: s.endpoints,
+            skills: s.skills
         )
     }
 
@@ -302,11 +355,22 @@ private struct WorkspaceFileDTO: Codable {
                 services: repo.services?.map(Self.serviceConfigFromDTO)
             )
         }
+        let parsedSkills = skills?.map { skill in
+            WorkspaceSkillConfig(
+                id: skill.id,
+                name: skill.name,
+                description: skill.description,
+                instructions: skill.instructions,
+                allowedTools: skill.allowedTools,
+                tags: skill.tags
+            )
+        }
         return AIBWorkspaceConfig(
             version: version,
             workspaceName: workspaceName,
             gateway: .init(port: gateway.port),
-            repos: repos
+            repos: repos,
+            skills: parsedSkills
         )
     }
 
@@ -334,7 +398,8 @@ private struct WorkspaceFileDTO: Codable {
             mcp: s.mcp.map { WorkspaceRepoMCPConfig(transport: $0.transport, path: $0.path) },
             a2a: s.a2a.map { WorkspaceRepoA2AConfig(cardPath: $0.cardPath, rpcPath: $0.rpcPath) },
             ui: s.ui.map { WorkspaceRepoUIConfig(primaryMode: $0.primaryMode, chat: $0.chat.map { WorkspaceRepoUIChatConfig(method: $0.method, path: $0.path, requestContentType: $0.requestContentType, requestMessageJSONPath: $0.requestMessageJSONPath, requestContextJSONPath: $0.requestContextJSONPath, responseMessageJSONPath: $0.responseMessageJSONPath, streaming: $0.streaming) }) },
-            endpoints: s.endpoints
+            endpoints: s.endpoints,
+            skills: s.skills
         )
     }
 }

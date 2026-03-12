@@ -51,7 +51,7 @@ struct SelectionInspectorView: View {
         if model.detailSurfaceMode == .topology {
             return model.selectedChatMessage != nil || model.selectedFlowNode() != nil
         } else {
-            return model.selectedRepo() != nil || model.selectedService() != nil || model.selectedFileURL() != nil
+            return model.selectedRepo() != nil || model.selectedService() != nil || model.selectedFileURL() != nil || model.selectedSkill() != nil
         }
     }
 
@@ -66,7 +66,9 @@ struct SelectionInspectorView: View {
                 FlowNodeInspectorSection(model: model, service: flowNode)
             }
         } else {
-            if let repo = model.selectedRepo(), model.selectedService() == nil, model.selectedFileURL() == nil {
+            if let skill = model.selectedSkill() {
+                SkillDetailInspectorSection(model: model, skill: skill)
+            } else if let repo = model.selectedRepo(), model.selectedService() == nil, model.selectedFileURL() == nil {
                 RepoInspectorSection(model: model, repo: repo, services: repoServices(for: repo.id))
             } else if let service = model.selectedService() {
                 ServiceInspectorSection(model: model, service: service, runtime: model.serviceSnapshot(for: service))
@@ -112,6 +114,8 @@ private struct FlowNodeInspectorSection: View {
                 MCPConfigSection(model: model, service: service)
                     .id(service.id)
             } else if service.serviceKind == .agent {
+                ExecutionDirectoryInspectorSection(model: model, service: service)
+                SkillsInspectorSection(model: model, service: service)
                 agentConnectionsSection
                 if !service.runCommand.isEmpty {
                     InspectorKV(label: "Run", value: service.runCommand.joined(separator: " "))
@@ -405,6 +409,10 @@ private struct ServiceInspectorSection: View {
             InspectorKV(label: "Watch", value: service.watchMode ?? "(unspecified)")
             InspectorKV(label: "CWD", value: service.cwd ?? "(repo root)")
             InspectorKV(label: "Run", value: service.runCommand.isEmpty ? "(none)" : service.runCommand.joined(separator: " "))
+            if service.serviceKind == .agent {
+                ExecutionDirectoryInspectorSection(model: model, service: service)
+                SkillsInspectorSection(model: model, service: service)
+            }
             Divider()
             Text("Runtime")
                 .font(.headline)
@@ -434,6 +442,106 @@ private struct ServiceInspectorSection: View {
                 }
             }
         )
+    }
+}
+
+private struct ExecutionDirectoryInspectorSection: View {
+    @Bindable var model: AgentsInBlackAppModel
+    var service: AIBServiceModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Divider()
+            Text("Execution Directory")
+                .font(.headline)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Root")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if let rootPath = service.executionDirectoryPath {
+                    Button {
+                        model.openExecutionDirectoryRoot(for: service)
+                    } label: {
+                        openablePathLabel(
+                            rootPath,
+                            isSecondary: false
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .help(rootPath)
+                } else {
+                    Text(service.cwd ?? "(repo root)")
+                        .font(.callout)
+                        .textSelection(.enabled)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            let markers = AIBExecutionDirectoryInspector.topLevelMarkers(for: service.executionDirectoryEntries)
+            if !markers.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Agent Files")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 6) {
+                            ForEach(markers, id: \.self) { marker in
+                                Text(marker)
+                                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                                    .padding(.horizontal, 7)
+                                    .padding(.vertical, 4)
+                                    .background(Color.secondary.opacity(0.12), in: Capsule())
+                            }
+                        }
+                    }
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Entries")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if service.executionDirectoryEntries.isEmpty {
+                    Text("(none)")
+                        .font(.callout)
+                        .foregroundStyle(.tertiary)
+                } else {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 2) {
+                            ForEach(service.executionDirectoryEntries, id: \.relativePath) { entry in
+                                Button {
+                                    model.openExecutionDirectoryEntry(entry, for: service)
+                                } label: {
+                                    openablePathLabel(
+                                        entry.relativePath,
+                                        isSecondary: entry.kind == .directory
+                                    )
+                                }
+                                .buttonStyle(.plain)
+                                .help(entry.relativePath)
+                            }
+                        }
+                    }
+                    .frame(maxHeight: 160)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func openablePathLabel(_ text: String, isSecondary: Bool) -> some View {
+        HStack(spacing: 6) {
+            Text(text)
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(isSecondary ? .secondary : .primary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .multilineTextAlignment(.leading)
+            Image(systemName: "arrow.up.forward.app")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+        }
+        .contentShape(Rectangle())
     }
 }
 
@@ -646,6 +754,226 @@ private struct InspectorKV: View {
                 .truncationMode(.middle)
                 .fixedSize(horizontal: false, vertical: true)
                 .help(value)
+        }
+    }
+}
+
+// MARK: - Skills Inspector
+
+private struct SkillsInspectorSection: View {
+    @Bindable var model: AgentsInBlackAppModel
+    var service: AIBServiceModel
+
+    @State private var showAddSkill = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Divider()
+
+            HStack {
+                Text("Skills")
+                    .font(.headline)
+                Spacer()
+                let unassigned = model.unassignedSkills(for: service)
+                if !unassigned.isEmpty {
+                    Menu {
+                        ForEach(unassigned, id: \.id) { skill in
+                            Button {
+                                Task {
+                                    await model.assignSkill(
+                                        skillID: skill.id,
+                                        namespacedServiceID: service.namespacedID
+                                    )
+                                }
+                            } label: {
+                                VStack {
+                                    Text(skill.name)
+                                    if let desc = skill.description {
+                                        Text(desc)
+                                    }
+                                }
+                            }
+                        }
+                    } label: {
+                        Image(systemName: "plus")
+                            .font(.caption2.weight(.semibold))
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                    .help("Assign Skill")
+                }
+            }
+
+            let assigned = model.assignedSkills(for: service)
+            if assigned.isEmpty {
+                Text("No skills assigned")
+                    .font(.callout)
+                    .foregroundStyle(.tertiary)
+            } else {
+                ForEach(assigned, id: \.id) { skill in
+                    skillRow(skill)
+                }
+            }
+        }
+    }
+
+    private func skillRow(_ skill: AIBSkillDefinition) -> some View {
+        let isExplicitlyAssigned = model.isExplicitlyAssigned(skillID: skill.id, to: service)
+        let isNativelyAvailable = model.isNativelyAvailable(skillID: skill.id, for: service)
+        return HStack(spacing: 6) {
+            Image(systemName: "puzzlepiece.extension.fill")
+                .font(.caption)
+                .foregroundStyle(.purple)
+                .frame(width: 14)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(skill.name)
+                    .font(.callout.weight(.medium))
+                    .lineLimit(1)
+
+                if let desc = skill.description {
+                    Text(desc)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+            }
+
+            Spacer(minLength: 4)
+
+            if isNativelyAvailable && !isExplicitlyAssigned {
+                Text("Bundled")
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(.secondary)
+            } else {
+                Button {
+                    Task {
+                        await model.unassignSkill(
+                            skillID: skill.id,
+                            namespacedServiceID: service.namespacedID
+                        )
+                    }
+                } label: {
+                    Image(systemName: "minus.circle")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Unassign \(skill.name)")
+            }
+        }
+        .padding(.vertical, 2)
+    }
+}
+
+// MARK: - Skill Detail Inspector (sidebar selection)
+
+private struct SkillDetailInspectorSection: View {
+    @Bindable var model: AgentsInBlackAppModel
+    var skill: AIBSkillDefinition
+
+    var body: some View {
+        Group {
+            HStack(spacing: 8) {
+                Image(systemName: "puzzlepiece.extension.fill")
+                    .foregroundStyle(.purple)
+                    .font(.title2)
+                Text(skill.name)
+                    .font(.title3).bold()
+            }
+
+            Text(skill.id)
+                .font(.caption.monospaced())
+                .foregroundStyle(.secondary)
+
+            Text(skill.isWorkspaceManaged ? "Workspace Skill" : "Discovered in Execution Directory")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            if let description = skill.description {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Description")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(description)
+                        .font(.callout)
+                }
+            }
+
+            if !skill.allowedTools.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Allowed Tools")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    ForEach(skill.allowedTools, id: \.self) { tool in
+                        Text(tool)
+                            .font(.callout.monospaced())
+                    }
+                }
+            }
+
+            if !skill.tags.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Tags")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    HStack(spacing: 4) {
+                        ForEach(skill.tags, id: \.self) { tag in
+                            Text(tag)
+                                .font(.caption2)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(.quaternary, in: Capsule())
+                        }
+                    }
+                }
+            }
+
+            if let instructions = skill.instructions, !instructions.isEmpty {
+                Divider()
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Instructions")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(instructions)
+                        .font(.caption)
+                        .foregroundStyle(.primary)
+                        .textSelection(.enabled)
+                }
+            }
+
+            assignedAgentsSection
+
+            if skill.isWorkspaceManaged {
+                Divider()
+                Button("Remove from Workspace", role: .destructive) {
+                    Task { await model.removeSkillFromWorkspace(skillID: skill.id) }
+                }
+            }
+        }
+    }
+
+    private var assignedAgentsSection: some View {
+        let agents = model.servicesWithSkill(skill.id)
+        return Group {
+            Divider()
+            Text("Assigned Agents")
+                .font(.headline)
+            if agents.isEmpty {
+                Text("Not assigned to any agent")
+                    .font(.callout)
+                    .foregroundStyle(.tertiary)
+            } else {
+                ForEach(agents, id: \.id) { agent in
+                    HStack(spacing: 6) {
+                        Image(systemName: "person.fill")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Text(agent.packageName ?? agent.localID)
+                            .font(.callout)
+                    }
+                }
+            }
         }
     }
 }

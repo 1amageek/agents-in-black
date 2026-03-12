@@ -15,10 +15,7 @@ struct CompactChatMessageRow: View {
             VStack(alignment: isUser ? .trailing : .leading, spacing: 3) {
                 // Bubble
                 VStack(alignment: isUser ? .trailing : .leading, spacing: 4) {
-                    Text(message.text)
-                        .font(.body)
-                        .foregroundStyle(textColor)
-                        .textSelection(.enabled)
+                    ChatMarkdownText(text: message.text, role: message.role)
 
                     metadata
                 }
@@ -64,13 +61,6 @@ struct CompactChatMessageRow: View {
     }
 
     // MARK: - Styling
-
-    private var textColor: some ShapeStyle {
-        if isError { return AnyShapeStyle(Color.red) }
-        if isUser { return AnyShapeStyle(Color.white) }
-        return AnyShapeStyle(.primary)
-    }
-
     private var metadataColor: some ShapeStyle {
         if isUser { return AnyShapeStyle(Color.white.opacity(0.6)) }
         return AnyShapeStyle(.tertiary)

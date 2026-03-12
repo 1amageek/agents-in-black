@@ -1,149 +1,149 @@
-version: 1
-workspace_name: demo
 gateway:
   port: 8080
 repos:
-- name: agent-py
-  path: agent-py
-  runtime: python
-  framework: plain
-  package_manager: pip
-  status: unresolved
-  detection_confidence: low
-  command_candidates: []
-  services_namespace: agent-py
-  enabled: true
-  services:
-  - id: app
-    kind: agent
-    port: 0
-    cwd: .
-    run:
-    - python3
-    - server.py
-    connections:
-      mcp_servers:
-      - service_ref: mcp-node/calc
-      - service_ref: mcp-web/scraper
-    ui:
-      primary_mode: chat
-      chat:
-        method: POST
-        path: /
-        streaming: false
-        request_content_type: application/json
-        request_message_json_path: message
-        response_message_json_path: body
-    mount_path: /agents/py
-    watch_mode: internal
-    watch_paths:
-    - server.py
-    - pyproject.toml
-- name: agent-swift
-  path: agent-swift
-  runtime: swift
-  framework: hummingbird
-  package_manager: swiftpm
-  status: discoverable
-  detection_confidence: medium
-  command_candidates:
-  - argv:
-    - swift
-    - run
-    reason: SwiftPM repository
-  selected_command:
-  - swift
-  - run
-  services_namespace: agent-swift
-  enabled: true
-  services:
-  - id: app
-    kind: agent
-    port: 0
-    cwd: .
-    run:
-    - .build/debug/AgentSwift
-    build:
-    - swift
-    - build
-    health:
-      startup_ready_timeout: 120s
-    connections:
-      mcp_servers:
-      - service_ref: mcp-node/calc
-      - service_ref: mcp-web/scraper
-    ui:
-      primary_mode: chat
-      chat:
-        method: POST
-        path: /
-        streaming: false
-        request_content_type: application/json
-        request_message_json_path: message
-        response_message_json_path: body
-    mount_path: /agents/swift
-    watch_mode: external
-    watch_paths:
-    - Sources/Server.swift
-    - Package.swift
-- name: mcp-node
-  path: mcp-node
-  runtime: node
-  framework: plain
-  package_manager: npm
-  status: discoverable
-  detection_confidence: medium
-  command_candidates:
-  - argv:
-    - npm
-    - run
-    - dev
-    reason: package.json scripts.dev
-  selected_command:
-  - npm
-  - run
-  - dev
-  services_namespace: mcp-node
-  enabled: true
-  services:
-  - id: calc
-    kind: mcp
-    port: 0
-    cwd: .
-    run:
-    - node
-    - server.js
-    mcp:
-      transport: streamable_http
-      path: /mcp
-    mount_path: /mcp/node
-    watch_mode: internal
-    watch_paths:
-    - server.js
-    - package.json
-- name: mcp-web
-  path: mcp-web
-  runtime: python
-  framework: plain
-  package_manager: pip
-  status: unresolved
-  detection_confidence: low
-  command_candidates: []
-  services_namespace: mcp-web
-  enabled: true
-  services:
-  - id: scraper
-    kind: mcp
-    port: 0
-    cwd: .
-    run:
-    - python3
-    - server.py
-    mcp:
-      transport: streamable_http
-      path: /mcp
-    mount_path: /mcp/web
-    watch_mode: internal
-    watch_paths:
-    - server.py
-    - pyproject.toml
+  - command_candidates: []
+    detection_confidence: low
+    enabled: true
+    framework: plain
+    name: agent-py
+    package_manager: pip
+    path: agent-py
+    runtime: python
+    services:
+      - connections:
+          mcp_servers:
+            - service_ref: mcp-node/calc
+            - service_ref: mcp-web/scraper
+        cwd: .
+        id: app
+        kind: agent
+        mount_path: /agents/py
+        port: 0
+        run:
+          - python3
+          - server.py
+        ui:
+          chat:
+            method: POST
+            path: /
+            request_content_type: application/json
+            request_message_json_path: message
+            response_message_json_path: body
+            streaming: false
+          primary_mode: chat
+        watch_mode: internal
+        watch_paths:
+          - server.py
+          - pyproject.toml
+    services_namespace: agent-py
+    status: unresolved
+  - command_candidates:
+      - argv:
+          - swift
+          - run
+        reason: SwiftPM repository
+    detection_confidence: medium
+    enabled: true
+    framework: hummingbird
+    name: agent-swift
+    package_manager: swiftpm
+    path: agent-swift
+    runtime: swift
+    selected_command:
+      - swift
+      - run
+    services:
+      - build:
+          - swift
+          - build
+        connections:
+          mcp_servers:
+            - service_ref: mcp-node/calc
+            - service_ref: mcp-web/scraper
+        cwd: .
+        health:
+          startup_ready_timeout: 120s
+        id: app
+        kind: agent
+        mount_path: /agents/swift
+        port: 0
+        run:
+          - .build/debug/AgentSwift
+        ui:
+          chat:
+            method: POST
+            path: /
+            request_content_type: application/json
+            request_message_json_path: message
+            response_message_json_path: body
+            streaming: false
+          primary_mode: chat
+        watch_mode: external
+        watch_paths:
+          - Sources/Server.swift
+          - Package.swift
+    services_namespace: agent-swift
+    status: discoverable
+  - command_candidates:
+      - argv:
+          - npm
+          - run
+          - dev
+        reason: package.json scripts.dev
+    detection_confidence: medium
+    enabled: true
+    framework: plain
+    name: mcp-node
+    package_manager: npm
+    path: mcp-node
+    runtime: node
+    selected_command:
+      - npm
+      - run
+      - dev
+    services:
+      - cwd: .
+        id: calc
+        kind: mcp
+        mcp:
+          path: /mcp
+          transport: streamable_http
+        mount_path: /mcp/node
+        port: 0
+        run:
+          - node
+          - server.js
+        watch_mode: internal
+        watch_paths:
+          - server.js
+          - package.json
+    services_namespace: mcp-node
+    status: discoverable
+  - command_candidates: []
+    detection_confidence: low
+    enabled: true
+    framework: plain
+    name: mcp-web
+    package_manager: pip
+    path: mcp-web
+    runtime: python
+    services:
+      - cwd: .
+        id: scraper
+        kind: mcp
+        mcp:
+          path: /mcp
+          transport: streamable_http
+        mount_path: /mcp/web
+        port: 0
+        run:
+          - python3
+          - server.py
+        watch_mode: internal
+        watch_paths:
+          - server.py
+          - pyproject.toml
+    services_namespace: mcp-web
+    status: unresolved
+version: 1
+workspace_name: demo

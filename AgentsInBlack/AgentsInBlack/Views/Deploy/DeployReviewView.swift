@@ -233,7 +233,7 @@ struct DeployReviewView: View {
                     .foregroundStyle(.secondary)
             }
             ScrollView(.horizontal, showsIndicators: false) {
-                Text(artifact.content)
+                Text(artifactDisplayText(artifact))
                     .font(.system(.caption, design: .monospaced))
                     .textSelection(.enabled)
                     .padding(8)
@@ -241,6 +241,13 @@ struct DeployReviewView: View {
             .background(Color(.textBackgroundColor))
             .clipShape(RoundedRectangle(cornerRadius: 6))
         }
+    }
+
+    private func artifactDisplayText(_ artifact: AIBDeployArtifact) -> String {
+        if let text = artifact.utf8String {
+            return text
+        }
+        return "Binary artifact (\(artifact.content.count) bytes)"
     }
 
     // MARK: - Warnings
