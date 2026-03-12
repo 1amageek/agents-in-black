@@ -276,6 +276,9 @@ jobs:
           prerelease: ${{ contains(github.ref_name, '-') }}
           generate_release_notes: true
           body: |
+            ## System Requirements
+            - macOS 26.0 or later (Apple Silicon)
+
             ## Installation
 
             ### macOS App
