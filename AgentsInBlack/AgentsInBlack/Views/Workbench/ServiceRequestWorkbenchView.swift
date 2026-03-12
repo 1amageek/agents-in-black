@@ -401,7 +401,7 @@ private struct ChatMessageRow: View {
                     .foregroundStyle(.secondary)
             }
 
-            ChatMarkdownText(text: message.text, role: message.role)
+            MarkdownView(markdown: message.text, style: markdownStyle)
         }
         .padding(10)
         .background(bubbleBackground, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
@@ -432,6 +432,50 @@ private struct ChatMessageRow: View {
             return AnyShapeStyle(.bar)
         case .error:
             return AnyShapeStyle(Color.orange.opacity(0.10))
+        }
+    }
+
+    private var markdownStyle: MarkdownView.Style {
+        switch message.role {
+        case .user:
+            return .standard.chatBubble(
+                textColor: AnyShapeStyle(.primary),
+                secondaryTextColor: AnyShapeStyle(.secondary),
+                headingColor: AnyShapeStyle(.primary),
+                codeTextColor: AnyShapeStyle(.primary),
+                codeBackground: Color.primary.opacity(0.05),
+                quoteBackground: Color.primary.opacity(0.04),
+                ruleColor: Color.primary.opacity(0.16),
+                tableBorderColor: Color.primary.opacity(0.12),
+                tableHeaderBackground: Color.primary.opacity(0.06),
+                tableCellBackground: Color.clear
+            )
+        case .assistant, .system, .info:
+            return .standard.chatBubble(
+                textColor: AnyShapeStyle(.primary),
+                secondaryTextColor: AnyShapeStyle(.secondary),
+                headingColor: AnyShapeStyle(.primary),
+                codeTextColor: AnyShapeStyle(.primary),
+                codeBackground: Color.primary.opacity(0.05),
+                quoteBackground: Color.primary.opacity(0.04),
+                ruleColor: Color.primary.opacity(0.16),
+                tableBorderColor: Color.primary.opacity(0.12),
+                tableHeaderBackground: Color.primary.opacity(0.06),
+                tableCellBackground: Color.clear
+            )
+        case .error:
+            return .standard.chatBubble(
+                textColor: AnyShapeStyle(.primary),
+                secondaryTextColor: AnyShapeStyle(.secondary),
+                headingColor: AnyShapeStyle(.primary),
+                codeTextColor: AnyShapeStyle(.primary),
+                codeBackground: Color.orange.opacity(0.08),
+                quoteBackground: Color.orange.opacity(0.05),
+                ruleColor: Color.orange.opacity(0.16),
+                tableBorderColor: Color.orange.opacity(0.12),
+                tableHeaderBackground: Color.orange.opacity(0.07),
+                tableCellBackground: Color.clear
+            )
         }
     }
 }

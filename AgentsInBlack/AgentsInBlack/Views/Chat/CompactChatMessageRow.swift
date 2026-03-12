@@ -15,7 +15,7 @@ struct CompactChatMessageRow: View {
             VStack(alignment: isUser ? .trailing : .leading, spacing: 3) {
                 // Bubble
                 VStack(alignment: isUser ? .trailing : .leading, spacing: 4) {
-                    ChatMarkdownText(text: message.text, role: message.role)
+                    MarkdownView(markdown: message.text, style: markdownStyle)
 
                     metadata
                 }
@@ -64,6 +64,63 @@ struct CompactChatMessageRow: View {
     private var metadataColor: some ShapeStyle {
         if isUser { return AnyShapeStyle(Color.white.opacity(0.6)) }
         return AnyShapeStyle(.tertiary)
+    }
+
+    private var markdownStyle: MarkdownView.Style {
+        switch message.role {
+        case .user:
+            return .standard.chatBubble(
+                textColor: AnyShapeStyle(.white),
+                secondaryTextColor: AnyShapeStyle(Color.white.opacity(0.72)),
+                headingColor: AnyShapeStyle(.white),
+                codeTextColor: AnyShapeStyle(.white),
+                codeBackground: Color.white.opacity(0.12),
+                quoteBackground: Color.white.opacity(0.08),
+                ruleColor: Color.white.opacity(0.22),
+                tableBorderColor: Color.white.opacity(0.16),
+                tableHeaderBackground: Color.white.opacity(0.12),
+                tableCellBackground: Color.white.opacity(0.04)
+            )
+        case .assistant:
+            return .standard.chatBubble(
+                textColor: AnyShapeStyle(.primary),
+                secondaryTextColor: AnyShapeStyle(.secondary),
+                headingColor: AnyShapeStyle(.primary),
+                codeTextColor: AnyShapeStyle(.primary),
+                codeBackground: Color.primary.opacity(0.05),
+                quoteBackground: Color.primary.opacity(0.04),
+                ruleColor: Color.primary.opacity(0.16),
+                tableBorderColor: Color.primary.opacity(0.12),
+                tableHeaderBackground: Color.primary.opacity(0.06),
+                tableCellBackground: Color.clear
+            )
+        case .error:
+            return .standard.chatBubble(
+                textColor: AnyShapeStyle(.primary),
+                secondaryTextColor: AnyShapeStyle(.secondary),
+                headingColor: AnyShapeStyle(.primary),
+                codeTextColor: AnyShapeStyle(.primary),
+                codeBackground: Color.red.opacity(0.08),
+                quoteBackground: Color.red.opacity(0.05),
+                ruleColor: Color.red.opacity(0.18),
+                tableBorderColor: Color.red.opacity(0.14),
+                tableHeaderBackground: Color.red.opacity(0.08),
+                tableCellBackground: Color.clear
+            )
+        case .system, .info:
+            return .standard.chatBubble(
+                textColor: AnyShapeStyle(.primary),
+                secondaryTextColor: AnyShapeStyle(.secondary),
+                headingColor: AnyShapeStyle(.primary),
+                codeTextColor: AnyShapeStyle(.primary),
+                codeBackground: Color.primary.opacity(0.05),
+                quoteBackground: Color.primary.opacity(0.04),
+                ruleColor: Color.primary.opacity(0.16),
+                tableBorderColor: Color.primary.opacity(0.12),
+                tableHeaderBackground: Color.primary.opacity(0.06),
+                tableCellBackground: Color.clear
+            )
+        }
     }
 
     private var bubbleBackground: some ShapeStyle {
