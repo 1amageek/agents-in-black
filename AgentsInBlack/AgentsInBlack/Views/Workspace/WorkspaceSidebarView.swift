@@ -106,16 +106,26 @@ struct WorkspaceSidebarView: View {
                 Text("Workspace")
                 Spacer()
                 Menu {
+                    Button("New Workspace…", systemImage: "folder.badge.plus") {
+                        model.createWorkspacePicker()
+                    }
+                    Button("Open Workspace…", systemImage: "folder") {
+                        model.openWorkspacePicker()
+                    }
+                    Divider()
                     Button("Clone Repository…", systemImage: "square.and.arrow.down") {
                         model.showCloneSheet = true
                     }
+                    .disabled(model.workspace == nil)
                     Button("Create New Service…", systemImage: "plus.rectangle.on.folder") {
                         model.showCreateServiceSheet = true
                     }
+                    .disabled(model.workspace == nil)
                     Divider()
                     Button("Add Directory…", systemImage: "folder.badge.plus") {
                         model.addDirectoryPicker()
                     }
+                    .disabled(model.workspace == nil)
                 } label: {
                     Label("Add", systemImage: "plus")
                         .labelStyle(.titleAndIcon)
@@ -123,8 +133,7 @@ struct WorkspaceSidebarView: View {
                 .menuStyle(.borderlessButton)
                 .controlSize(.small)
                 .fixedSize()
-                .help("Add Directory to Workspace")
-                .disabled(model.workspace == nil)
+                .help(model.workspace == nil ? "Create or open a workspace" : "Add Directory to Workspace")
             }
             .padding(.trailing, 8)
         }

@@ -1,8 +1,10 @@
 import AIBCore
 import SwiftUI
+import TipKit
 
 struct ContentView: View {
     @Bindable var model: AgentsInBlackAppModel
+    private let runEmulatorTip = RunEmulatorTip()
 
     var body: some View {
         NavigationSplitView(columnVisibility: $model.splitViewVisibility) {
@@ -30,6 +32,13 @@ struct ContentView: View {
                 }
         } detail: {
             detailContent
+                .overlay(alignment: .top) {
+                    if model.workspace != nil, !model.emulatorState.isRunning {
+                        TipView(runEmulatorTip, arrowEdge: .top)
+                            .padding(.horizontal, 20)
+                            .padding(.top, 8)
+                    }
+                }
                 .navigationTitle(windowHeaderTitle)
                 .toolbarTitleDisplayMode(.inline)
         }
@@ -137,10 +146,17 @@ struct ContentView: View {
                     systemImage: "folder.badge.gear",
                     description: Text("Choose a workspace root that contains multiple Agent/MCP repositories.")
                 )
-                Button("Open Workspace…") {
-                    model.openWorkspacePicker()
+                HStack(spacing: 12) {
+                    Button("New Workspace…") {
+                        model.createWorkspacePicker()
+                    }
+                    .buttonStyle(.borderedProminent)
+
+                    Button("Open Workspace…") {
+                        model.openWorkspacePicker()
+                    }
+                    .buttonStyle(.bordered)
                 }
-                .buttonStyle(.borderedProminent)
             }
         } else {
             CollapsibleSplitView(isExpanded: $model.showUtilityPanel) {

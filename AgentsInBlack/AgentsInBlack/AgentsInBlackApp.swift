@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import TipKit
 
 @main
 struct AgentsInBlackApp: App {
@@ -10,6 +11,9 @@ struct AgentsInBlackApp: App {
         WindowGroup {
             ContentView(model: model)
                 .task {
+                    try? Tips.configure([
+                        .displayFrequency(.immediate),
+                    ])
                     appDelegate.setOpenHandler { [weak model] urls in
                         guard let model else { return }
                         model.openIncomingURLs(urls)

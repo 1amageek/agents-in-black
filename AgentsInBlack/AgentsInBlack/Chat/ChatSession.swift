@@ -80,6 +80,12 @@ final class ChatSession: Identifiable {
         }
     }
 
+    /// Show the user's message followed by a guidance info message (no network request).
+    func appendGuide(userText: String, message: String) {
+        appendMessage(.user(userText))
+        appendMessage(.info(message))
+    }
+
     func reset() {
         messages = []
         composerText = ""

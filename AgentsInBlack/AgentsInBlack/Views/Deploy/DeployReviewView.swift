@@ -9,6 +9,7 @@ struct DeployReviewView: View {
         VStack(spacing: 0) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
+                    googleCloudSection
                     servicesSection
                     secretsInfoSection
                     connectionsSection
@@ -21,6 +22,9 @@ struct DeployReviewView: View {
             }
             Divider()
             bottomBar
+        }
+        .task(id: plan.id) {
+            model.refreshGCloudDeployContext()
         }
     }
 
@@ -52,6 +56,139 @@ struct DeployReviewView: View {
     }
 
     // MARK: - Services
+
+    @ViewBuilder
+    private var googleCloudSection: some View {
+        if plan.targetConfig.providerID == "gcp-cloudrun" {
+            VStack(alignment: .leading, spacing: 8) {
+                sectionHeader("Google Cloud")
+
+                cardBackground {
+                    contextRow(
+                        title: "Account",
+                        value: model.activeGCloudAccount ?? "No active Google account"
+                    ) {
+                        Menu("Switch") {
+                            ForEach(model.gcloudAccounts) { account in
+                                Button {
+                                    Task {
+                                        await model.switchGCloudAccount(to: account.account)
+                                    }
+                                } label: {
+                                    if account.account == model.activeGCloudAccount {
+                                        Label(account.account, systemImage: "checkmark")
+                                    } else {
+                                        Text(account.account)
+                                    }
+                                }
+                            }
+                        }
+                        .disabled(
+                            !model.canSwitchDeployGCloudContext
+                                || model.isRefreshingGCloudContext
+                                || model.isSwitchingDeployGCloudContext
+                                || model.gcloudAccounts.isEmpty
+                        )
+                    }
+
+                    Divider().padding(.leading, 12)
+
+                    contextRow(
+                        title: "Project",
+                        value: model.displayDeployGCloudProject ?? "No project selected",
+                        detail: activeProjectDetail
+                    ) {
+                        Menu("Switch") {
+                            ForEach(model.gcloudProjects) { project in
+                                Button {
+                                    Task {
+                                        await model.switchGCloudProject(to: project.projectID)
+                                    }
+                                } label: {
+                                    let label = project.name ?? project.projectID
+                                    if project.projectID == model.displayDeployGCloudProject {
+                                        Label("\(label) (\(project.projectID))", systemImage: "checkmark")
+                                    } else {
+                                        Text("\(label) (\(project.projectID))")
+                                    }
+                                }
+                            }
+                        }
+                        .disabled(
+                            !model.canSwitchDeployGCloudContext
+                                || model.isRefreshingGCloudContext
+                                || model.isSwitchingDeployGCloudContext
+                                || model.gcloudProjects.isEmpty
+                        )
+                    }
+
+                    Divider().padding(.leading, 12)
+
+                    contextRow(title: "Region", value: plan.targetConfig.region) {
+                        Button("Refresh") {
+                            model.refreshGCloudDeployContext()
+                        }
+                        .buttonStyle(.borderless)
+                        .disabled(model.isRefreshingGCloudContext || model.isSwitchingDeployGCloudContext)
+                    }
+                }
+
+                if model.isRefreshingGCloudContext {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("Refreshing Google Cloud context...")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                } else {
+                    Text("Changing account or project refreshes the deploy plan before deployment.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                if let gcloudContextErrorMessage = model.gcloudContextErrorMessage {
+                    Text(gcloudContextErrorMessage)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    private var activeProjectDetail: String? {
+        guard let activeProject = model.activeGCloudProject else { return nil }
+        guard activeProject != model.displayDeployGCloudProject else { return nil }
+        return "gcloud active project: \(activeProject)"
+    }
+
+    private func contextRow<Control: View>(
+        title: String,
+        value: String,
+        detail: String? = nil,
+        @ViewBuilder control: () -> Control
+    ) -> some View {
+        HStack(alignment: .center, spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text(value)
+                    .font(.system(.callout, design: .monospaced))
+                if let detail {
+                    Text(detail)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Spacer(minLength: 8)
+
+            control()
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+    }
 
     private var servicesSection: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -361,6 +498,7 @@ struct DeployReviewView: View {
             }
             .keyboardShortcut(.defaultAction)
             .buttonStyle(.borderedProminent)
+            .disabled(model.isSwitchingDeployGCloudContext)
         }
         .padding()
     }

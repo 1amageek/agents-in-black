@@ -18,6 +18,17 @@ struct CloudSettingsView: View {
     @State private var appleContainerInstallMessage: String?
     @State private var appleContainerInstallFailed: Bool = false
 
+    // MARK: - GCloud Context State
+
+    @State private var gcloudAccounts: [GCloudAccount] = []
+    @State private var gcloudProjects: [GCloudProject] = []
+    @State private var activeGCloudAccount: String?
+    @State private var activeGCloudProject: String?
+    @State private var isRefreshingGCloudContext: Bool = false
+    @State private var isSwitchingGCloudAccount: Bool = false
+    @State private var isSwitchingGCloudProject: Bool = false
+    @State private var gcloudContextErrorMessage: String?
+
     // MARK: - Config State
 
     @State private var providerID: String = "gcp-cloudrun"
@@ -35,6 +46,7 @@ struct CloudSettingsView: View {
     @State private var hasLoadedInitial: Bool = false
 
     private let configStore: DeployTargetConfigStore = DefaultDeployTargetConfigStore()
+    private let gcloudContextService = GCloudContextService()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -55,7 +67,9 @@ struct CloudSettingsView: View {
         .frame(width: 560, height: 640)
         .task {
             loadConfig()
-            await runEnvironmentChecks()
+            async let checks: Void = runEnvironmentChecks()
+            async let context: Void = refreshGCloudContext()
+            _ = await (checks, context)
         }
     }
 
@@ -317,16 +331,72 @@ struct CloudSettingsView: View {
                 Text("Configuration")
                     .font(.subheadline.weight(.medium))
 
-                LabeledContent("Project") {
-                    TextField("my-gcp-project", text: $gcpProject)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(maxWidth: 260)
-                }
+                VStack(spacing: 0) {
+                    configContextRow(
+                        title: "Account",
+                        value: activeGCloudAccount ?? "No active Google account"
+                    ) {
+                        Menu("Switch") {
+                            ForEach(gcloudAccounts) { account in
+                                Button {
+                                    Task { await switchAccount(to: account.account) }
+                                } label: {
+                                    if account.account == activeGCloudAccount {
+                                        Label(account.account, systemImage: "checkmark")
+                                    } else {
+                                        Text(account.account)
+                                    }
+                                }
+                            }
+                        }
+                        .disabled(
+                            isRefreshingGCloudContext
+                            || isSwitchingGCloudAccount
+                            || isSwitchingGCloudProject
+                            || gcloudAccounts.isEmpty
+                        )
+                    }
 
-                LabeledContent("Region") {
-                    TextField("us-central1", text: $region)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(maxWidth: 260)
+                    Divider().padding(.leading, 12)
+
+                    configContextRow(
+                        title: "Project",
+                        value: gcpProject.isEmpty ? "No project selected" : gcpProject
+                    ) {
+                        Menu("Switch") {
+                            ForEach(gcloudProjects) { project in
+                                Button {
+                                    Task { await switchProject(to: project.projectID) }
+                                } label: {
+                                    let label = project.name ?? project.projectID
+                                    if project.projectID == gcpProject {
+                                        Label("\(label) (\(project.projectID))", systemImage: "checkmark")
+                                    } else {
+                                        Text("\(label) (\(project.projectID))")
+                                    }
+                                }
+                            }
+                        }
+                        .disabled(
+                            isRefreshingGCloudContext
+                            || isSwitchingGCloudAccount
+                            || isSwitchingGCloudProject
+                            || gcloudProjects.isEmpty
+                        )
+                    }
+
+                    Divider().padding(.leading, 12)
+
+                    configContextRow(title: "Region", value: region) {
+                        EmptyView()
+                    }
+                }
+                .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
+
+                if let gcloudContextErrorMessage {
+                    Text(gcloudContextErrorMessage)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
 
                 LabeledContent("Default Auth") {
@@ -346,6 +416,28 @@ struct CloudSettingsView: View {
                 }
             }
         }
+    }
+
+    private func configContextRow<Control: View>(
+        title: String,
+        value: String,
+        @ViewBuilder control: () -> Control
+    ) -> some View {
+        HStack(alignment: .center, spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text(value)
+                    .font(.system(.callout, design: .monospaced))
+            }
+
+            Spacer(minLength: 8)
+
+            control()
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
     }
 
     // MARK: - Resource Defaults
@@ -527,6 +619,55 @@ struct CloudSettingsView: View {
         }
 
         isStartingBuilder = false
+    }
+
+    private func refreshGCloudContext() async {
+        guard providerID == "gcp-cloudrun" else { return }
+        isRefreshingGCloudContext = true
+        gcloudContextErrorMessage = nil
+        defer { isRefreshingGCloudContext = false }
+
+        do {
+            let context = try await gcloudContextService.fetchContext()
+            gcloudAccounts = context.accounts
+            gcloudProjects = context.projects
+            activeGCloudAccount = context.activeAccount
+            activeGCloudProject = context.activeProject
+            if gcpProject.isEmpty, let active = context.activeProject {
+                gcpProject = active
+            }
+        } catch {
+            gcloudContextErrorMessage = error.localizedDescription
+        }
+    }
+
+    private func switchAccount(to account: String) async {
+        guard activeGCloudAccount != account else { return }
+        isSwitchingGCloudAccount = true
+        gcloudContextErrorMessage = nil
+        defer { isSwitchingGCloudAccount = false }
+
+        do {
+            try await gcloudContextService.switchAccount(to: account)
+            await refreshGCloudContext()
+        } catch {
+            gcloudContextErrorMessage = "Failed to switch account: \(error.localizedDescription)"
+        }
+    }
+
+    private func switchProject(to projectID: String) async {
+        guard gcpProject != projectID else { return }
+        isSwitchingGCloudProject = true
+        gcloudContextErrorMessage = nil
+        defer { isSwitchingGCloudProject = false }
+
+        do {
+            try await gcloudContextService.switchProject(to: projectID)
+            gcpProject = projectID
+            await refreshGCloudContext()
+        } catch {
+            gcloudContextErrorMessage = "Failed to switch project: \(error.localizedDescription)"
+        }
     }
 
     @MainActor

@@ -35,6 +35,36 @@ public enum AIBWorkspaceCore {
         try AIBWorkspaceManager.addRepo(workspaceRoot: workspaceRoot, repoURL: repoURL)
     }
 
+    /// Scaffold a default agent in the workspace using a template from the registry.
+    @discardableResult
+    public static func scaffoldDefaultAgent(
+        workspaceRoot: String,
+        serviceName: String = "claude-code-agent",
+        runtime: RuntimeKind = .node,
+        framework: FrameworkKind = .hono
+    ) throws -> WorkspaceInitResult {
+        guard let template = ProjectTemplateRegistry.template(for: runtime, framework: framework) else {
+            throw ConfigError("No template found", metadata: ["runtime": runtime.rawValue, "framework": framework.rawValue])
+        }
+        let rootURL = URL(fileURLWithPath: workspaceRoot).standardizedFileURL
+        let serviceDir = rootURL.appendingPathComponent(serviceName)
+
+        guard !FileManager.default.fileExists(atPath: serviceDir.path) else {
+            throw ConfigError("Directory already exists", metadata: ["path": serviceName])
+        }
+
+        try template.scaffold(at: serviceDir, serviceName: serviceName)
+        let result = try addRepo(workspaceRoot: workspaceRoot, repoURL: serviceDir)
+
+        // Configure the service so it appears as an active agent, not just "discoverable"
+        let repoPath = result.workspaceConfig.repos.first { $0.path == serviceName }?.path ?? serviceName
+        return try AIBWorkspaceManager.configureServices(
+            workspaceRoot: workspaceRoot,
+            path: repoPath,
+            runtimes: [runtime]
+        )
+    }
+
     public static func rescanWorkspace(workspaceRoot: String) throws -> WorkspaceInitResult {
         try AIBWorkspaceManager.rescanWorkspace(workspaceRoot: workspaceRoot)
     }

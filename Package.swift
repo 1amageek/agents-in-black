@@ -106,6 +106,10 @@ let package = Package(
             dependencies: ["AIBSupervisor", "AIBTestSupport"]
         ),
         .testTarget(
+            name: "AIBCoreTests",
+            dependencies: ["AIBCore"]
+        ),
+        .testTarget(
             name: "AIBWorkspaceTests",
             dependencies: ["AIBWorkspace", "AIBCore"]
         ),

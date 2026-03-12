@@ -122,6 +122,21 @@ struct FlowCanvasView: View {
             let hasCloud = model.deployedURL(for: service) != nil
             let isCloud = useCloudEndpoint && hasCloud
             NodeAccessoryInputBar(service: service, isCloudMode: isCloud) { text in
+                let isEmulatorRunning = model.emulatorState.isRunning
+
+                // No endpoint available — show guidance instead of sending
+                if !isEmulatorRunning && !hasCloud {
+                    let chatSession = model.createSession(for: service, activate: true)
+                    chatSession.composerText = ""
+                    store.clearSelection()
+                    model.openPiPChat(serviceID: service.id, sessionID: chatSession.id)
+                    chatSession.appendGuide(
+                        userText: text,
+                        message: "No endpoint available. Start the emulator or deploy to Cloud Run first."
+                    )
+                    return
+                }
+
                 let chatSession: ChatSession
                 if isCloud, let deployedURL = model.deployedURL(for: service) {
                     chatSession = model.createRemoteSession(for: service, deployedURL: deployedURL, activate: true)

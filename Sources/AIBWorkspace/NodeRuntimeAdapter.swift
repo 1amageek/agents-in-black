@@ -55,7 +55,7 @@ public struct NodeRuntimeAdapter: RuntimeAdapter, Sendable {
         let serviceNames = packageName.map { [$0] } ?? []
 
         // Infer service kind from MCP SDK dependency
-        let mcpPackages = ["@modelcontextprotocol/sdk", "mcp-framework", "@anthropic-ai/sdk"]
+        let mcpPackages: Set<String> = ["@modelcontextprotocol/sdk", "mcp-framework"]
         let serviceKind: ServiceKind = deps.contains(where: { mcpPackages.contains($0) }) ? .mcp : .agent
 
         return RuntimeDetectionResult(
