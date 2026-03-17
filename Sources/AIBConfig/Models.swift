@@ -124,12 +124,6 @@ public struct ServiceConfig: Sendable, Codable, Equatable {
     }
 }
 
-public enum ServiceKind: String, Sendable, Codable, Equatable {
-    case agent
-    case mcp
-    case unknown
-}
-
 public struct ServiceConnectionsConfig: Sendable, Codable, Equatable {
     public var mcpServers: [ServiceConnectionTarget]
     public var a2aAgents: [ServiceConnectionTarget]

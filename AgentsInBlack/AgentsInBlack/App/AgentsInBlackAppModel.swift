@@ -40,6 +40,7 @@ final class AgentsInBlackAppModel {
     var selection: SelectionTarget? = .topology
     var selectedRepoIDForFiles: String?
     var detailSurfaceMode: DetailSurfaceMode = .topology
+    var sharedContextSchema: SharedContextSchema = .empty
     var hasUnsavedFlowChanges: Bool = false
     var flowConnectionSourceServiceID: String?
     var flowConnectionTargetServiceID: String?

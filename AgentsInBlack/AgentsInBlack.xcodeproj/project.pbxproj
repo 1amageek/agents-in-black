@@ -11,6 +11,7 @@
 		A1B000000000000000000006 /* SwiftFlow in Frameworks */ = {isa = PBXBuildFile; productRef = A1B000000000000000000005 /* SwiftFlow */; };
 		A1B000000000000000000009 /* SwiftTerm in Frameworks */ = {isa = PBXBuildFile; productRef = A1B000000000000000000008 /* SwiftTerm */; };
 		A1B00000000000000000000C /* SwiftSkill in Frameworks */ = {isa = PBXBuildFile; productRef = A1B00000000000000000000B /* SwiftSkill */; };
+		A1B00000000000000000000F /* JSONSchema in Frameworks */ = {isa = PBXBuildFile; productRef = A1B00000000000000000000E /* JSONSchema */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -76,6 +77,7 @@
 				A1B000000000000000000006 /* SwiftFlow in Frameworks */,
 				A1B000000000000000000009 /* SwiftTerm in Frameworks */,
 				A1B00000000000000000000C /* SwiftSkill in Frameworks */,
+				A1B00000000000000000000F /* JSONSchema in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -140,6 +142,7 @@
 				A1B000000000000000000005 /* SwiftFlow */,
 				A1B000000000000000000008 /* SwiftTerm */,
 				A1B00000000000000000000B /* SwiftSkill */,
+				A1B00000000000000000000E /* JSONSchema */,
 			);
 			productName = AgentsInBlack;
 			productReference = 12BDD1172F501E3200FB156D /* AgentsInBlack.app */;
@@ -666,6 +669,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = A1B00000000000000000000A /* XCRemoteSwiftPackageReference "swift-skills" */;
 			productName = SwiftSkill;
+		};
+		A1B00000000000000000000E /* JSONSchema */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A1B000000000000000000001 /* XCLocalSwiftPackageReference ".." */;
+			productName = JSONSchema;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

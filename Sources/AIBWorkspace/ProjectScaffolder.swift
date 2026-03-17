@@ -97,6 +97,7 @@ struct SwiftHummingbirdTemplate: ProjectTemplate {
 
         let main = """
         import Hummingbird
+        import Foundation
 
         @main
         struct App {
@@ -104,12 +105,22 @@ struct SwiftHummingbirdTemplate: ProjectTemplate {
                 let port = ProcessInfo.processInfo.environment["PORT"].flatMap(Int.init) ?? 8080
                 let router = Router()
 
+                // Context middleware — extracts "context" from body, invisible to handlers.
+                router.add(middleware: AIBContextMiddleware())
+
                 router.get("/") { _, _ in
                     "Hello from \\(serviceName)!"
                 }
 
                 router.get("/health") { _, _ in
                     "ok"
+                }
+
+                router.post("/chat") { request, _ -> Response in
+                    // Handler receives cleaned body (no "context").
+                    // Use aibFetch() for MCP calls — X-Context is injected automatically.
+                    let body = try await request.body.collect(upTo: 1_048_576)
+                    return Response(status: .ok, body: .init(byteBuffer: body))
                 }
 
                 let app = Application(router: router, configuration: .init(address: .hostname("0.0.0.0", port: port)))
@@ -120,6 +131,7 @@ struct SwiftHummingbirdTemplate: ProjectTemplate {
 
         try writeFile(at: directory.appendingPathComponent("Package.swift"), content: packageSwift)
         try writeFile(at: directory.appendingPathComponent("Sources/App.swift"), content: main)
+        try writeFile(at: directory.appendingPathComponent("Sources/AIBContext.swift"), content: ContextMiddlewareSnippets.swift)
         try writeFile(at: directory.appendingPathComponent(".gitignore"), content: swiftGitignore)
     }
 }
@@ -287,12 +299,21 @@ struct NodeHonoTemplate: ProjectTemplate {
         let index = """
         import { Hono } from "hono";
         import { serve } from "@hono/node-server";
+        import { aibContext, getCleanBody } from "./aib-context.js";
 
         const app = new Hono();
+
+        // Context middleware — extracts "context" from body, invisible to handlers.
+        app.use("*", aibContext());
 
         app.get("/", (c) => c.text("Hello from \(serviceName)!"));
 
         app.get("/health", (c) => c.text("ok"));
+
+        app.post("/chat", async (c) => {
+          const body = await getCleanBody(c);
+          return c.json({ message: "received", body });
+        });
 
         const port = Number(process.env.PORT) || 8080;
         console.log(`Starting \(serviceName) on port ${port}`);
@@ -302,6 +323,7 @@ struct NodeHonoTemplate: ProjectTemplate {
         try writeFile(at: directory.appendingPathComponent("package.json"), content: packageJSON)
         try writeFile(at: directory.appendingPathComponent("tsconfig.json"), content: tsconfig)
         try writeFile(at: directory.appendingPathComponent("src/index.ts"), content: index)
+        try writeFile(at: directory.appendingPathComponent("src/aib-context.ts"), content: ContextMiddlewareSnippets.nodeTS)
         try writeFile(at: directory.appendingPathComponent(".gitignore"), content: nodeGitignore)
     }
 }
@@ -475,14 +497,19 @@ struct PythonFastAPITemplate: ProjectTemplate {
         dependencies = [
             "fastapi>=0.115.0",
             "uvicorn[standard]>=0.30.0",
+            "httpx>=0.27.0",
         ]
         """
 
         let main = """
         import os
-        from fastapi import FastAPI
+        from fastapi import FastAPI, Request
+        from aib_context import aib_context_middleware, get_context
 
         app = FastAPI()
+
+        # Context middleware — extracts "context" from body, invisible to handlers.
+        aib_context_middleware(app)
 
         @app.get("/")
         async def root():
@@ -492,6 +519,11 @@ struct PythonFastAPITemplate: ProjectTemplate {
         async def health():
             return "ok"
 
+        @app.post("/chat")
+        async def chat(request: Request):
+            body = getattr(request.state, "aib_clean_body", await request.json())
+            return {"message": "received", "body": body}
+
         if __name__ == "__main__":
             import uvicorn
             port = int(os.environ.get("PORT", "8080"))
@@ -500,6 +532,7 @@ struct PythonFastAPITemplate: ProjectTemplate {
 
         try writeFile(at: directory.appendingPathComponent("pyproject.toml"), content: pyproject)
         try writeFile(at: directory.appendingPathComponent("main.py"), content: main)
+        try writeFile(at: directory.appendingPathComponent("aib_context.py"), content: ContextMiddlewareSnippets.python)
         try writeFile(at: directory.appendingPathComponent(".gitignore"), content: pythonGitignore)
     }
 }
@@ -626,12 +659,21 @@ struct DenoHonoTemplate: ProjectTemplate {
 
         let main = """
         import { Hono } from "hono";
+        import { aibContext, getCleanBody } from "./aib-context.ts";
 
         const app = new Hono();
+
+        // Context middleware — extracts "context" from body, invisible to handlers.
+        app.use("*", aibContext());
 
         app.get("/", (c) => c.text("Hello from \(serviceName)!"));
 
         app.get("/health", (c) => c.text("ok"));
+
+        app.post("/chat", async (c) => {
+          const body = await getCleanBody(c);
+          return c.json({ message: "received", body });
+        });
 
         const port = Number(Deno.env.get("PORT")) || 8080;
         console.log(`Starting \(serviceName) on port ${port}`);
@@ -640,6 +682,7 @@ struct DenoHonoTemplate: ProjectTemplate {
 
         try writeFile(at: directory.appendingPathComponent("deno.json"), content: denoJSON)
         try writeFile(at: directory.appendingPathComponent("main.ts"), content: main)
+        try writeFile(at: directory.appendingPathComponent("aib-context.ts"), content: ContextMiddlewareSnippets.denoTS)
         try writeFile(at: directory.appendingPathComponent(".gitignore"), content: denoGitignore)
     }
 }

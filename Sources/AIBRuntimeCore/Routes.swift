@@ -2,6 +2,7 @@ import Foundation
 
 public struct RouteEntry: Sendable, Hashable {
     public let serviceID: ServiceID
+    public let kind: ServiceKind
     public let mountPath: String
     public let backend: BackendEndpoint
     public let pathRewrite: PathRewriteMode
@@ -10,6 +11,7 @@ public struct RouteEntry: Sendable, Hashable {
 
     public init(
         serviceID: ServiceID,
+        kind: ServiceKind = .unknown,
         mountPath: String,
         backend: BackendEndpoint,
         pathRewrite: PathRewriteMode,
@@ -17,6 +19,7 @@ public struct RouteEntry: Sendable, Hashable {
         maxInflight: Int
     ) {
         self.serviceID = serviceID
+        self.kind = kind
         self.mountPath = mountPath
         self.backend = backend
         self.pathRewrite = pathRewrite

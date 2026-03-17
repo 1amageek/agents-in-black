@@ -1,5 +1,5 @@
 {
-  "originHash" : "ac17715cf2104ef20ec3af73714f846ed1f38eaff7cbd2dd2783a3afb955ac23",
+  "originHash" : "a5b2492b4cd21454e90a2a8d2c6ff172c066871e47c1c4dd88fc122c5a8a17b0",
   "pins" : [
     {
       "identity" : "async-http-client",
@@ -35,6 +35,15 @@
       "state" : {
         "revision" : "956259f65a34c58dd76ae5df4511712e1087726b",
         "version" : "1.27.3"
+      }
+    },
+    {
+      "identity" : "jsonschema",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/mattt/JSONSchema.git",
+      "state" : {
+        "revision" : "4c6f2467d5bc72b062c7a9b7e4cd77a09635ea8b",
+        "version" : "1.3.1"
       }
     },
     {

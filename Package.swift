@@ -25,6 +25,8 @@ let package = Package(
         .package(url: "https://github.com/1amageek/swift-skills.git", from: "0.1.0"),
         .package(url: "https://github.com/1amageek/containerization.git", revision: "5d048bb"),
         .package(url: "https://github.com/1amageek/container.git", revision: "0ec965e"),
+        .package(url: "https://github.com/mattt/JSONSchema.git", from: "1.3.0"),
+        .package(url: "https://github.com/apple/swift-collections.git", from: "1.1.0"),
     ],
     targets: [
         .target(
@@ -37,6 +39,8 @@ let package = Package(
                 "AIBRuntimeCore",
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "YAML", package: "swift-yaml"),
+                .product(name: "JSONSchema", package: "JSONSchema"),
+                .product(name: "OrderedCollections", package: "swift-collections"),
             ]
         ),
         .target(

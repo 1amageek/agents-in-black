@@ -68,3 +68,9 @@ public enum TimeoutKind: String, Sendable, Codable {
     case idle
     case request
 }
+
+public enum ServiceKind: String, Sendable, Codable, Equatable {
+    case agent
+    case mcp
+    case unknown
+}

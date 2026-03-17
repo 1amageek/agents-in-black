@@ -73,6 +73,7 @@ public actor GatewayControl {
             guard entry.serviceID == serviceID else { return entry }
             return RouteEntry(
                 serviceID: entry.serviceID,
+                kind: entry.kind,
                 mountPath: entry.mountPath,
                 backend: endpoint,
                 pathRewrite: entry.pathRewrite,
@@ -131,6 +132,7 @@ public extension RouteSnapshot {
         let entries = config.services.map { service in
             RouteEntry(
                 serviceID: service.id,
+                kind: service.kind,
                 mountPath: service.mountPath,
                 backend: backends[service.id] ?? BackendEndpoint(port: service.port),
                 pathRewrite: service.pathRewrite,

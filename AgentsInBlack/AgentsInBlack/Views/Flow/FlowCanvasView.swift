@@ -74,6 +74,8 @@ struct FlowCanvasView: View {
 
                 canvasHUD
 
+                contextSchemaHUD
+
                 pipChatOverlay(canvasSize: geometry.size)
             }
         }
@@ -149,6 +151,19 @@ struct FlowCanvasView: View {
                 Task { await chatSession.send() }
             }
         }
+    }
+
+    // MARK: - Context Schema Overlay
+
+    private var contextSchemaHUD: some View {
+        VStack {
+            HStack {
+                Spacer()
+                ContextSchemaOverlay(contextSchema: $model.sharedContextSchema)
+            }
+            Spacer()
+        }
+        .padding(12)
     }
 
     // MARK: - HUD Overlay
