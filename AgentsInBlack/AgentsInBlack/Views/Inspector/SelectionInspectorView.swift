@@ -114,6 +114,7 @@ private struct FlowNodeInspectorSection: View {
                 MCPConfigSection(model: model, service: service)
                     .id(service.id)
             } else if service.serviceKind == .agent {
+                AgentModelSection(model: model, service: service)
                 ExecutionDirectoryInspectorSection(model: model, service: service)
                 SkillsInspectorSection(model: model, service: service)
                 agentConnectionsSection
@@ -121,6 +122,8 @@ private struct FlowNodeInspectorSection: View {
                     InspectorKV(label: "Run", value: service.runCommand.joined(separator: " "))
                 }
             }
+
+            DeployResourcesInspectorSection(kind: service.serviceKind)
         }
     }
 
@@ -410,9 +413,13 @@ private struct ServiceInspectorSection: View {
             InspectorKV(label: "CWD", value: service.cwd ?? "(repo root)")
             InspectorKV(label: "Run", value: service.runCommand.isEmpty ? "(none)" : service.runCommand.joined(separator: " "))
             if service.serviceKind == .agent {
+                AgentModelSection(model: model, service: service)
                 ExecutionDirectoryInspectorSection(model: model, service: service)
                 SkillsInspectorSection(model: model, service: service)
             }
+
+            DeployResourcesInspectorSection(kind: service.serviceKind)
+
             Divider()
             Text("Runtime")
                 .font(.headline)
@@ -734,6 +741,108 @@ private struct AgentSessionsSection: View {
         .onTapGesture {
             model.activateSession(session.id, for: service)
             openPiPChat(sessionID: session.id)
+        }
+    }
+}
+
+// MARK: - Agent Model
+
+private struct AgentModelSection: View {
+    @Bindable var model: AgentsInBlackAppModel
+    var service: AIBServiceModel
+
+    @State private var editModel: String = ""
+    @State private var hasAppeared = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Divider()
+            Text("Model")
+                .font(.headline)
+
+            TextField("e.g. claude-sonnet-4-6", text: $editModel)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(.callout, design: .monospaced))
+
+            if hasChanges {
+                Button("Save") {
+                    Task {
+                        await model.updateServiceModel(
+                            namespacedServiceID: service.namespacedID,
+                            model: editModel
+                        )
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+            }
+        }
+        .onAppear {
+            guard !hasAppeared else { return }
+            hasAppeared = true
+            editModel = service.configuredModel ?? ""
+        }
+        .onChange(of: service.configuredModel) { _, newValue in
+            editModel = newValue ?? ""
+        }
+    }
+
+    private var hasChanges: Bool {
+        let current = service.configuredModel ?? ""
+        return editModel != current
+    }
+}
+
+// MARK: - Deploy Resources
+
+private struct DeployResourcesInspectorSection: View {
+    var kind: AIBServiceKind
+
+    var body: some View {
+        let config = AIBDeployResourceConfig.defaults(for: kind)
+
+        VStack(alignment: .leading, spacing: 10) {
+            Divider()
+            Text("Deploy Resources")
+                .font(.headline)
+
+            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 6) {
+                GridRow {
+                    Text("Memory")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(config.memory)
+                        .font(.callout.monospaced())
+                }
+                GridRow {
+                    Text("CPU")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(config.cpu)
+                        .font(.callout.monospaced())
+                }
+                GridRow {
+                    Text("Timeout")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(config.timeout)
+                        .font(.callout.monospaced())
+                }
+                GridRow {
+                    Text("Concurrency")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text("\(config.concurrency)")
+                        .font(.callout.monospaced())
+                }
+                GridRow {
+                    Text("Max Instances")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text("\(config.maxInstances)")
+                        .font(.callout.monospaced())
+                }
+            }
         }
     }
 }

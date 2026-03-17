@@ -243,7 +243,8 @@ public final class WorkspaceDiscoveryService {
                         assignedSkillIDs: service.skills ?? [],
                         nativeSkillIDs: nativeSkills.map(\.id),
                         executionDirectoryPath: executionDirectoryURL.path(percentEncoded: false),
-                        executionDirectoryEntries: executionEntries
+                        executionDirectoryEntries: executionEntries,
+                        model: service.model
                     ))
                 }
             } else {

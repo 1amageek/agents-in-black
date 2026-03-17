@@ -42,22 +42,21 @@ public struct DefaultDeployTargetConfigStore: DeployTargetConfigStore, Sendable 
         lines.append("  auth: \(config.defaultAuth.rawValue)")
         lines.append("  region: \(config.region)")
 
-        // Resource defaults (only include non-default values)
-        let baseline = AIBDeployTargetConfig(providerID: config.providerID, region: config.region)
-        if config.defaultConcurrency != baseline.defaultConcurrency {
-            lines.append("  concurrency: \(config.defaultConcurrency)")
-        }
-        if config.defaultCPU != baseline.defaultCPU {
-            lines.append("  cpu: \(config.defaultCPU)")
-        }
-        if config.defaultMaxInstances != baseline.defaultMaxInstances {
-            lines.append("  max_instances: \(config.defaultMaxInstances)")
-        }
-        if config.defaultMemory != baseline.defaultMemory {
-            lines.append("  memory: \(config.defaultMemory)")
-        }
-        if config.defaultTimeout != baseline.defaultTimeout {
-            lines.append("  timeout: \(config.defaultTimeout)")
+        // Per-kind resource overrides (only include kinds that differ from smart defaults)
+        let kindEntries: [(yamlKey: String, kind: AIBServiceKind)] = [
+            ("agent", .agent), ("mcp", .mcp), ("other", .unknown),
+        ]
+        for (yamlKey, kind) in kindEntries {
+            guard let override = config.kindDefaults[kind] else { continue }
+            let baseline = AIBDeployResourceConfig.defaults(for: kind)
+            guard override != baseline else { continue }
+            lines.append("  \(yamlKey):")
+            lines.append("    memory: \(override.memory)")
+            lines.append("    cpu: \(override.cpu)")
+            lines.append("    max_instances: \(override.maxInstances)")
+            lines.append("    min_instances: \(override.minInstances)")
+            lines.append("    concurrency: \(override.concurrency)")
+            lines.append("    timeout: \(override.timeout)")
         }
 
         let yamlString = lines.joined(separator: "\n") + "\n"

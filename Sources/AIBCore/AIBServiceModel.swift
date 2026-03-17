@@ -28,6 +28,18 @@ public struct AIBServiceModel: Identifiable, Hashable, Sendable {
     public var executionDirectoryPath: String?
     /// Relevant agent-runtime files discovered under the execution directory.
     public var executionDirectoryEntries: [AIBExecutionDirectoryEntry]
+    /// LLM model identifier for agent services (e.g., "claude-sonnet-4-6").
+    /// Returns the configured model, or the default for agent services.
+    public var model: String? {
+        if let configuredModel { return configuredModel }
+        if serviceKind == .agent { return Self.defaultAgentModel }
+        return nil
+    }
+    /// Explicitly configured model (nil = use default).
+    public var configuredModel: String?
+
+    /// Default LLM model for agent services.
+    public static let defaultAgentModel = "claude-sonnet-4-6"
 
     public init(
         repoID: String,
@@ -48,7 +60,8 @@ public struct AIBServiceModel: Identifiable, Hashable, Sendable {
         assignedSkillIDs: [String] = [],
         nativeSkillIDs: [String] = [],
         executionDirectoryPath: String? = nil,
-        executionDirectoryEntries: [AIBExecutionDirectoryEntry] = []
+        executionDirectoryEntries: [AIBExecutionDirectoryEntry] = [],
+        model: String? = nil
     ) {
         self.repoID = repoID
         self.repoName = repoName
@@ -70,5 +83,6 @@ public struct AIBServiceModel: Identifiable, Hashable, Sendable {
         self.nativeSkillIDs = nativeSkillIDs
         self.executionDirectoryPath = executionDirectoryPath
         self.executionDirectoryEntries = executionDirectoryEntries
+        self.configuredModel = model
     }
 }

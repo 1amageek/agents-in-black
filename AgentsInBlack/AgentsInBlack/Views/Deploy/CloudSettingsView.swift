@@ -35,11 +35,8 @@ struct CloudSettingsView: View {
     @State private var gcpProject: String = ""
     @State private var region: String = "us-central1"
     @State private var authMode: AIBDeployAuthMode = .private
-    @State private var memory: String = "512Mi"
-    @State private var cpu: String = "1"
-    @State private var maxInstances: Int = 10
-    @State private var concurrency: Int = 80
-    @State private var timeout: String = "300s"
+    @State private var kindDefaults: [AIBServiceKind: AIBDeployResourceConfig] = [:]
+    @State private var selectedKind: AIBServiceKind = .agent
     @State private var artifactRegistryHost: String = ""
 
     @State private var errorMessage: String?
@@ -442,39 +439,73 @@ struct CloudSettingsView: View {
 
     // MARK: - Resource Defaults
 
+    private func resourceConfigBinding(for kind: AIBServiceKind) -> AIBDeployResourceConfig {
+        kindDefaults[kind] ?? .defaults(for: kind)
+    }
+
+    private func updateResourceField(for kind: AIBServiceKind, _ update: (inout AIBDeployResourceConfig) -> Void) {
+        var config = kindDefaults[kind] ?? .defaults(for: kind)
+        update(&config)
+        kindDefaults[kind] = config
+    }
+
     private var resourceDefaultsSection: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Resource Defaults")
                 .font(.subheadline.weight(.medium))
 
+            Picker("Service Kind", selection: $selectedKind) {
+                Text("Agent").tag(AIBServiceKind.agent)
+                Text("MCP").tag(AIBServiceKind.mcp)
+                Text("Other").tag(AIBServiceKind.unknown)
+            }
+            .pickerStyle(.segmented)
+
+            let config = resourceConfigBinding(for: selectedKind)
+
             LabeledContent("Memory") {
-                TextField("512Mi", text: $memory)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(maxWidth: 120)
+                TextField("512Mi", text: Binding(
+                    get: { config.memory },
+                    set: { newValue in updateResourceField(for: selectedKind) { $0.memory = newValue } }
+                ))
+                .textFieldStyle(.roundedBorder)
+                .frame(maxWidth: 120)
             }
 
             LabeledContent("CPU") {
-                TextField("1", text: $cpu)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(maxWidth: 120)
+                TextField("1", text: Binding(
+                    get: { config.cpu },
+                    set: { newValue in updateResourceField(for: selectedKind) { $0.cpu = newValue } }
+                ))
+                .textFieldStyle(.roundedBorder)
+                .frame(maxWidth: 120)
             }
 
             LabeledContent("Max Instances") {
-                TextField("10", value: $maxInstances, format: .number)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(maxWidth: 120)
+                TextField("10", value: Binding(
+                    get: { config.maxInstances },
+                    set: { newValue in updateResourceField(for: selectedKind) { $0.maxInstances = newValue } }
+                ), format: .number)
+                .textFieldStyle(.roundedBorder)
+                .frame(maxWidth: 120)
             }
 
             LabeledContent("Concurrency") {
-                TextField("80", value: $concurrency, format: .number)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(maxWidth: 120)
+                TextField("80", value: Binding(
+                    get: { config.concurrency },
+                    set: { newValue in updateResourceField(for: selectedKind) { $0.concurrency = newValue } }
+                ), format: .number)
+                .textFieldStyle(.roundedBorder)
+                .frame(maxWidth: 120)
             }
 
             LabeledContent("Timeout") {
-                TextField("300s", text: $timeout)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(maxWidth: 120)
+                TextField("300s", text: Binding(
+                    get: { config.timeout },
+                    set: { newValue in updateResourceField(for: selectedKind) { $0.timeout = newValue } }
+                ))
+                .textFieldStyle(.roundedBorder)
+                .frame(maxWidth: 120)
             }
         }
     }
@@ -519,11 +550,7 @@ struct CloudSettingsView: View {
             let config = try configStore.load(workspaceRoot: workspaceRootPath, providerID: providerID)
             region = config.region
             authMode = config.defaultAuth
-            memory = config.defaultMemory
-            cpu = config.defaultCPU
-            maxInstances = config.defaultMaxInstances
-            concurrency = config.defaultConcurrency
-            timeout = config.defaultTimeout
+            kindDefaults = config.kindDefaults
             gcpProject = config.providerConfig["gcpProject"] ?? ""
             artifactRegistryHost = config.providerConfig["artifactRegistryHost"] ?? ""
         } catch {
@@ -581,11 +608,7 @@ struct CloudSettingsView: View {
             providerID: providerID,
             region: region,
             defaultAuth: authMode,
-            defaultMemory: memory,
-            defaultCPU: cpu,
-            defaultMaxInstances: maxInstances,
-            defaultConcurrency: concurrency,
-            defaultTimeout: timeout,
+            kindDefaults: kindDefaults,
             providerConfig: providerConfig
         )
 

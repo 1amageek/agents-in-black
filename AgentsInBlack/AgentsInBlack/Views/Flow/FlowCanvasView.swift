@@ -432,10 +432,10 @@ struct FlowCanvasView: View {
 
     private func makeFlowNodes(from nodes: [FlowNodeModel]) -> [FlowNode<String>] {
         nodes.map { node in
-            FlowNode(
+            return FlowNode(
                 id: node.id,
                 position: node.position,
-                size: CGSize(width: 130, height: 44),
+                size: CGSize(width: 170, height: 58),
                 data: node.namespacedID,
                 handles: handles(for: node.serviceKind)
             )
@@ -605,7 +605,8 @@ struct FlowCanvasView: View {
                         kind: node.serviceKind,
                         outgoingCount: outgoingCounts[node.id, default: 0],
                         activityState: activityState,
-                        displayName: node.displayName
+                        displayName: node.displayName,
+                        model: node.model
                     )
                 )
             }
@@ -671,7 +672,8 @@ private struct FlowServiceNodeContent: View {
             kind: .unknown,
             outgoingCount: 0,
             activityState: .stopped,
-            displayName: nil
+            displayName: nil,
+            model: nil
         )
         let tint = AIBFlowPalette.tint(for: visual.kind)
         let parts = displayParts(namespacedID: node.data, displayName: visual.displayName)
@@ -682,7 +684,8 @@ private struct FlowServiceNodeContent: View {
                 tint: tint,
                 kind: visual.kind,
                 parts: parts,
-                activityState: visual.activityState
+                activityState: visual.activityState,
+                model: visual.model
             )
                 .padding(inset)
 
@@ -698,7 +701,8 @@ private struct FlowServiceNodeContent: View {
         tint: Color,
         kind: AIBServiceKind,
         parts: (primary: String, secondary: String?),
-        activityState: FlowNodeVisual.ActivityState
+        activityState: FlowNodeVisual.ActivityState,
+        model: String? = nil
     ) -> some View {
         HStack(spacing: 6) {
             Image(systemName: AIBFlowPalette.symbol(for: kind))
@@ -718,6 +722,14 @@ private struct FlowServiceNodeContent: View {
                         .font(.system(size: 9))
                         .foregroundStyle(.tertiary)
                         .lineLimit(1)
+                }
+
+                if let model {
+                    Text(model)
+                        .font(.system(size: 8, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
                 }
             }
 
@@ -921,6 +933,8 @@ private struct FlowNodeVisual: Equatable {
     let activityState: ActivityState
     /// Package manifest name for display (e.g., package.json "name", executableTarget name).
     let displayName: String?
+    /// LLM model identifier for agent services.
+    let model: String?
 
     enum ActivityState: Equatable {
         case stopped

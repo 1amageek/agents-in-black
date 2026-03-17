@@ -141,9 +141,10 @@ private struct WorkspaceFileDTO: Codable {
         var ui: UIDTO?
         var endpoints: [String: String]?
         var skills: [String]?
+        var model: String?
 
         enum CodingKeys: String, CodingKey {
-            case id, kind, port, cwd, run, build, install, env, health, restart, concurrency, auth, connections, mcp, a2a, ui, endpoints, skills
+            case id, kind, port, cwd, run, build, install, env, health, restart, concurrency, auth, connections, mcp, a2a, ui, endpoints, skills, model
             case mountPath = "mount_path"
             case watchMode = "watch_mode"
             case watchPaths = "watch_paths"
@@ -399,7 +400,8 @@ private struct WorkspaceFileDTO: Codable {
             a2a: s.a2a.map { WorkspaceRepoA2AConfig(cardPath: $0.cardPath, rpcPath: $0.rpcPath) },
             ui: s.ui.map { WorkspaceRepoUIConfig(primaryMode: $0.primaryMode, chat: $0.chat.map { WorkspaceRepoUIChatConfig(method: $0.method, path: $0.path, requestContentType: $0.requestContentType, requestMessageJSONPath: $0.requestMessageJSONPath, requestContextJSONPath: $0.requestContextJSONPath, responseMessageJSONPath: $0.responseMessageJSONPath, streaming: $0.streaming) }) },
             endpoints: s.endpoints,
-            skills: s.skills
+            skills: s.skills,
+            model: s.model
         )
     }
 }

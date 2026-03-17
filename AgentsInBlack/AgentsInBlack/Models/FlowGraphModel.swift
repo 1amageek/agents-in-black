@@ -20,6 +20,8 @@ struct FlowNodeModel: Identifiable, Hashable {
     let displayName: String?
     let serviceKind: AIBServiceKind
     let position: CGPoint
+    /// LLM model identifier for agent services.
+    let model: String?
 }
 
 struct FlowConnectionModel: Identifiable, Hashable {

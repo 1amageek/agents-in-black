@@ -428,7 +428,7 @@ public enum WorkspaceSyncer {
             restartAffects: (inline.restartAffects ?? []).map { ServiceID($0) },
             pathRewrite: pathRewrite,
             cookiePathRewrite: inline.cookiePathRewrite ?? true,
-            env: inline.env ?? [:],
+            env: Self.mergeModelEnv(base: inline.env ?? [:], model: inline.model, kind: resolvedKind),
             health: .init(
                 livenessPath: inline.health?.livenessPath ?? "/health/live",
                 readinessPath: inline.health?.readinessPath ?? "/health/ready",
@@ -452,6 +452,23 @@ public enum WorkspaceSyncer {
             mcp: mcpConfig,
             a2a: a2aConfig
         )
+    }
+
+    /// Default LLM model for agent services when none is explicitly configured.
+    static let defaultAgentModel = "claude-sonnet-4-6"
+
+    /// Merge the dedicated `model` field into the env dict as `MODEL`.
+    /// Uses `defaultAgentModel` when no model is specified for agent services.
+    /// Explicit env["MODEL"] takes precedence.
+    private static func mergeModelEnv(base: [String: String], model: String?, kind: ServiceKind) -> [String: String] {
+        var env = base
+        guard env["MODEL"] == nil else { return env }
+        if let model, !model.isEmpty {
+            env["MODEL"] = model
+        } else if kind == .agent {
+            env["MODEL"] = defaultAgentModel
+        }
+        return env
     }
 
     private static func inferServiceKind(from mountPath: String) -> ServiceKind {

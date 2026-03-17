@@ -219,12 +219,27 @@ struct DeployReviewView: View {
 
             Spacer(minLength: 8)
 
-            Text(service.resourceConfig.memory)
-                .font(.system(.caption, design: .monospaced))
-                .foregroundStyle(.tertiary)
+            HStack(spacing: 4) {
+                resourceTag(service.resourceConfig.memory, icon: "memorychip")
+                resourceTag(service.resourceConfig.cpu + " CPU", icon: "cpu")
+                resourceTag(service.resourceConfig.timeout, icon: "clock")
+            }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
+    }
+
+    private func resourceTag(_ text: String, icon: String) -> some View {
+        HStack(spacing: 3) {
+            Image(systemName: icon)
+                .font(.system(size: 8))
+            Text(text)
+                .font(.caption2.monospacedDigit())
+        }
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 3)
+        .background(.quaternary, in: RoundedRectangle(cornerRadius: 4))
     }
 
     private func kindBadge(_ kind: AIBServiceKind) -> some View {

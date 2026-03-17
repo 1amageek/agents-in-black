@@ -139,7 +139,6 @@ public struct GCPCloudRunProvider: DeploymentProvider, Sendable {
     public func registryAuthCommands(targetConfig: AIBDeployTargetConfig) -> [DeployCommand] {
         let host = targetConfig.providerConfig["artifactRegistryHost"]
             ?? "\(targetConfig.region)-docker.pkg.dev"
-        let hostForShell = shellQuote(host)
         let script = """
         set -euo pipefail
         if ! command -v container >/dev/null 2>&1; then
@@ -150,21 +149,16 @@ public struct GCPCloudRunProvider: DeploymentProvider, Sendable {
           echo "gcloud CLI is not installed."
           exit 127
         fi
-        if container registry list 2>/dev/null | awk 'NR>1 {print $1}' | grep -Fx -- \(hostForShell) >/dev/null 2>&1; then
-          echo "container registry login already configured for \(host)"
-          exit 0
-        fi
         access_token="$(gcloud auth print-access-token)"
         if [ -z "$access_token" ]; then
           echo "Failed to get gcloud access token."
           exit 1
         fi
-        printf '%s' "$access_token" | container registry login --username oauth2accesstoken --password-stdin \(hostForShell)
-        echo "container registry login completed for \(host)"
+        echo "Registry auth validated for \(host) (env-var mode)"
         """
         return [
             DeployCommand(
-                label: "Configuring apple/container authentication for Artifact Registry",
+                label: "Validating registry authentication for Artifact Registry",
                 arguments: ["bash", "-lc", script],
                 stepID: AIBDeployStep.dockerAuth.rawValue
             ),
@@ -353,14 +347,26 @@ public struct GCPCloudRunProvider: DeploymentProvider, Sendable {
           echo "gcloud CLI is not installed."
           exit 127
         fi
+        export REGISTRY_HOST=\(imageHostForShell)
+        export REGISTRY_USERNAME="oauth2accesstoken"
+        export REGISTRY_TOKEN="$(gcloud auth print-access-token)"
+        if [ -z "$REGISTRY_TOKEN" ]; then
+          echo "Failed to get gcloud access token."
+          exit 1
+        fi
+        registry_login() {
+          echo "$REGISTRY_TOKEN" | container registry login --username "$REGISTRY_USERNAME" --password-stdin "$REGISTRY_HOST"
+        }
         refresh_registry_auth() {
-          access_token="$(gcloud auth print-access-token)"
-          if [ -z "$access_token" ]; then
+          REGISTRY_TOKEN="$(gcloud auth print-access-token)"
+          export REGISTRY_TOKEN
+          if [ -z "$REGISTRY_TOKEN" ]; then
             echo "Failed to get gcloud access token."
             return 1
           fi
-          printf '%s' "$access_token" | container registry login --username oauth2accesstoken --password-stdin \(imageHostForShell)
+          registry_login
         }
+        registry_login
         if ! container builder status >/dev/null 2>&1; then
           set +e
           builder_start_output="$(container builder start 2>&1)"

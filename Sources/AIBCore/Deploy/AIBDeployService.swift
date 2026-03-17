@@ -59,6 +59,7 @@ public enum AIBDeployService {
         var region = overrides["region"] ?? "us-central1"
         var auth: AIBDeployAuthMode = .private
         var providerConfig: [String: String] = overrides
+        var kindDefaults: [AIBServiceKind: AIBDeployResourceConfig] = [:]
 
         if FileManager.default.fileExists(atPath: targetPath) {
             let content = try String(contentsOfFile: targetPath, encoding: .utf8)
@@ -70,10 +71,20 @@ public enum AIBDeployService {
                     if let a = defaults["auth"]?.scalar?.string {
                         auth = AIBDeployAuthMode(rawValue: a) ?? .private
                     }
-                    // Merge any additional keys from YAML into providerConfig
+
+                    // Parse per-kind resource overrides
+                    let kindKeys: [String: AIBServiceKind] = ["agent": .agent, "mcp": .mcp, "other": .unknown]
+                    for (yamlKey, kind) in kindKeys {
+                        if let kindNode = defaults[yamlKey]?.mapping {
+                            kindDefaults[kind] = parseResourceConfig(from: kindNode, kind: kind)
+                        }
+                    }
+
+                    // Merge remaining scalar keys into providerConfig (skip kind subsections)
+                    let reservedKeys: Set<String> = ["region", "auth", "agent", "mcp", "other"]
                     for (key, value) in defaults {
                         guard let keyStr = key.scalar?.string else { continue }
-                        if keyStr != "region" && keyStr != "auth",
+                        if !reservedKeys.contains(keyStr),
                            let strVal = value.scalar?.string,
                            providerConfig[keyStr] == nil {
                             providerConfig[keyStr] = strVal
@@ -94,7 +105,30 @@ public enum AIBDeployService {
             providerID: providerID,
             region: region,
             defaultAuth: auth,
+            kindDefaults: kindDefaults,
             providerConfig: providerConfig
+        )
+    }
+
+    /// Parse a YAML mapping into AIBDeployResourceConfig, using kind defaults as baseline.
+    private static func parseResourceConfig(
+        from mapping: Node.Mapping,
+        kind: AIBServiceKind
+    ) -> AIBDeployResourceConfig {
+        let baseline = AIBDeployResourceConfig.defaults(for: kind)
+        let memory = mapping["memory"]?.scalar?.string ?? baseline.memory
+        let cpu = mapping["cpu"]?.scalar?.string ?? baseline.cpu
+        let maxInstances = (mapping["max_instances"]?.scalar?.string).flatMap { Int($0) } ?? baseline.maxInstances
+        let minInstances = (mapping["min_instances"]?.scalar?.string).flatMap { Int($0) } ?? baseline.minInstances
+        let concurrency = (mapping["concurrency"]?.scalar?.string).flatMap { Int($0) } ?? baseline.concurrency
+        let timeout = mapping["timeout"]?.scalar?.string ?? baseline.timeout
+        return AIBDeployResourceConfig(
+            memory: memory,
+            cpu: cpu,
+            maxInstances: maxInstances,
+            minInstances: minInstances,
+            concurrency: concurrency,
+            timeout: timeout
         )
     }
 
@@ -299,13 +333,8 @@ public enum AIBDeployService {
                 "Environment variable '\($0)' referenced in source but not configured in workspace.yaml env."
             }
 
-            let resourceConfig = AIBDeployResourceConfig(
-                memory: targetConfig.defaultMemory,
-                cpu: targetConfig.defaultCPU,
-                maxInstances: targetConfig.defaultMaxInstances,
-                concurrency: targetConfig.defaultConcurrency,
-                timeout: targetConfig.defaultTimeout
-            )
+            let serviceKind = AIBServiceKind(from: service.kind)
+            let resourceConfig = targetConfig.resourceConfig(for: serviceKind)
             let isPublic = targetConfig.defaultAuth == .public
 
             // Generate MCP connection config for agents

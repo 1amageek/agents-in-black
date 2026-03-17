@@ -97,6 +97,18 @@ public enum AIBWorkspaceCore {
         )
     }
 
+    public static func updateServiceModel(
+        workspaceRoot: String,
+        namespacedServiceID: String,
+        model: String?
+    ) throws {
+        try AIBWorkspaceManager.updateServiceModel(
+            workspaceRoot: workspaceRoot,
+            namespacedServiceID: namespacedServiceID,
+            model: model
+        )
+    }
+
     public static func updateServiceConnections(
         workspaceRoot: String,
         connectionsByNamespacedServiceID: [String: ServiceConnectionsConfig]

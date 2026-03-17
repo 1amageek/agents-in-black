@@ -1143,6 +1143,22 @@ final class AgentsInBlackAppModel {
         }
     }
 
+    func updateServiceModel(namespacedServiceID: String, model: String?) async {
+        guard let workspace else { return }
+        do {
+            try AIBWorkspaceCore.updateServiceModel(
+                workspaceRoot: workspace.rootURL.path,
+                namespacedServiceID: namespacedServiceID,
+                model: model
+            )
+            _ = try AIBWorkspaceCore.syncWorkspace(workspaceRoot: workspace.rootURL.path)
+            await loadWorkspace(at: workspace.rootURL)
+            lastErrorMessage = nil
+        } catch {
+            setError("Failed to update model: \(error.localizedDescription)")
+        }
+    }
+
     // MARK: - Skill Management (Workspace)
 
     /// Import a skill from the user library into the workspace and sync.
@@ -1797,7 +1813,8 @@ final class AgentsInBlackAppModel {
                 namespacedID: service.namespacedID,
                 displayName: service.packageName,
                 serviceKind: service.serviceKind,
-                position: CGPoint(x: x, y: CGFloat(60 + index * 80))
+                position: CGPoint(x: x, y: CGFloat(60 + index * 80)),
+                model: service.model
             )
         }
     }

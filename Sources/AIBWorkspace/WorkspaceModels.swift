@@ -117,6 +117,9 @@ public struct WorkspaceRepoServiceConfig: Codable, Sendable, Equatable {
     public var endpoints: [String: String]?
     /// Skill IDs assigned to this service. References workspace-level skill definitions.
     public var skills: [String]?
+    /// LLM model identifier for agent services (e.g., "claude-sonnet-4-6").
+    /// Injected as `MODEL` environment variable at runtime.
+    public var model: String?
 
     public init(
         id: String,
@@ -142,7 +145,8 @@ public struct WorkspaceRepoServiceConfig: Codable, Sendable, Equatable {
         a2a: WorkspaceRepoA2AConfig? = nil,
         ui: WorkspaceRepoUIConfig? = nil,
         endpoints: [String: String]? = nil,
-        skills: [String]? = nil
+        skills: [String]? = nil,
+        model: String? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -168,6 +172,7 @@ public struct WorkspaceRepoServiceConfig: Codable, Sendable, Equatable {
         self.ui = ui
         self.endpoints = endpoints
         self.skills = skills
+        self.model = model
     }
 }
 
