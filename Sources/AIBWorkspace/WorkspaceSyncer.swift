@@ -339,9 +339,11 @@ public enum WorkspaceSyncer {
             // Single runtime: use selectedCommand with "main" ID (original behavior)
             guard let selected = repo.selectedCommand, !selected.isEmpty else { return [] }
             let defaults = RuntimeAdapterRegistry.defaults(for: repo.runtime, packageManager: repo.packageManager)
+            let detectedKind = allDetections.first?.suggestedServiceKind
+            let resolvedKind = (detectedKind != nil && detectedKind != .unknown) ? detectedKind! : defaults.serviceKind
             return [ServiceConfig(
                 id: ServiceID("\(repo.namespace)/main"),
-                kind: defaults.serviceKind,
+                kind: resolvedKind,
                 mountPath: "/\(repo.namespace)",
                 port: 0,
                 cwd: repoRoot,
@@ -366,10 +368,11 @@ public enum WorkspaceSyncer {
         for detection in allDetections {
             guard let command = detection.candidates.first?.argv, !command.isEmpty else { continue }
             let defaults = RuntimeAdapterRegistry.defaults(for: detection.runtime, packageManager: detection.packageManager)
+            let resolvedKind = detection.suggestedServiceKind != .unknown ? detection.suggestedServiceKind : defaults.serviceKind
             let localID = detection.runtime.rawValue
             services.append(ServiceConfig(
                 id: ServiceID("\(repo.namespace)/\(localID)"),
-                kind: defaults.serviceKind,
+                kind: resolvedKind,
                 mountPath: "/\(repo.namespace)/\(localID)",
                 port: 0,
                 cwd: repoRoot,

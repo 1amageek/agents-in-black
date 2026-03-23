@@ -47,7 +47,7 @@ public struct GatewayConfig: Sendable, Codable, Equatable {
     public var timeouts: Timeouts
     public var websocket: WebSocket
 
-    public init(port: Int = 8080, timeouts: Timeouts = .init(), websocket: WebSocket = .init()) {
+    public init(port: Int = 9090, timeouts: Timeouts = .init(), websocket: WebSocket = .init()) {
         self.port = port
         self.timeouts = timeouts
         self.websocket = websocket

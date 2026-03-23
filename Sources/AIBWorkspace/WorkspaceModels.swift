@@ -362,7 +362,7 @@ public struct WorkspaceRepo: Codable, Sendable, Equatable {
 
 public struct WorkspaceGatewayDefaults: Codable, Sendable, Equatable {
     public var port: Int
-    public init(port: Int = 8080) { self.port = port }
+    public init(port: Int = 9090) { self.port = port }
 }
 
 public struct AIBWorkspaceConfig: Codable, Sendable, Equatable {

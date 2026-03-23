@@ -86,7 +86,8 @@ public final class WorkspaceDiscoveryService {
             repos: repos.sorted(by: { $0.name.localizedStandardCompare($1.name) == .orderedAscending }),
             fileTreesByRepoID: fileTreesByRepoID,
             services: services.sorted(by: { $0.namespacedID.localizedStandardCompare($1.namespacedID) == .orderedAscending }),
-            skills: skills
+            skills: skills,
+            gatewayPort: workspaceConfig?.gateway.port ?? 9090
         )
     }
 

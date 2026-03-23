@@ -246,6 +246,7 @@ final class AgentsInBlackAppModel {
             let snapshot = try workspaceDiscovery.loadWorkspace(at: url)
             logger.info("loadWorkspace: loaded \(snapshot.repos.count) repos, \(snapshot.services.count) services")
             workspace = snapshot
+            gatewayPort = snapshot.gatewayPort
             runtimeIssues = []
             mcpConnectionStatusByConnectionID = [:]
             showIssuesInSidebar = false

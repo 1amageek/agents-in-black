@@ -193,8 +193,23 @@ public struct GCPCloudRunProvider: DeploymentProvider, Sendable {
         free_gib="$((free_kb / 1024 / 1024))"
         echo "Free disk before build prep: ${free_gib}GiB (threshold: ${threshold_gib}GiB)"
 
+        # Ensure builder VM has working DNS for package installs during image build.
+        # The default gateway DNS (192.168.x.1) may not resolve external hosts.
+        ensure_builder_dns() {
+          if container builder status >/dev/null 2>&1; then
+            set +e
+            dns_test="$(container exec buildkit nslookup registry.npmjs.org 2>&1)"
+            set -e
+            if echo "$dns_test" | grep -qi "timed out\\|no servers\\|SERVFAIL"; then
+              echo "Builder VM DNS is not resolving external hosts. Configuring Google Public DNS..."
+              container exec buildkit sh -c 'echo "nameserver 8.8.8.8" > /etc/resolv.conf'
+            fi
+          fi
+        }
+
         if [ "$free_kb" -gt "$threshold_kb" ]; then
           echo "Disk space is sufficient. Skipping apple/container cleanup."
+          ensure_builder_dns
           exit 0
         fi
 
@@ -269,6 +284,8 @@ public struct GCPCloudRunProvider: DeploymentProvider, Sendable {
           echo "Disk space is still below ${threshold_gib}GiB after cleanup. Free more disk and retry."
           exit 1
         fi
+
+        ensure_builder_dns
         """
         return [
             DeployCommand(
