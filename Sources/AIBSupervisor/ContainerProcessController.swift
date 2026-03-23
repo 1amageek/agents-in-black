@@ -296,6 +296,10 @@ public actor ContainerProcessController: ProcessController {
             containers.removeValue(forKey: handle.containerID)
             cleanupArtifacts(handle)
             cleanupManager(id: handle.containerID)
+            logger.info("Container stopped gracefully", metadata: [
+                "container_id": .string(handle.containerID),
+                "service_id": .string(handle.serviceID.rawValue),
+            ])
             return TerminationResult(terminatedGracefully: true, exitCode: 0)
         } catch {
             logger.warning("Container graceful stop failed", metadata: [
@@ -320,12 +324,26 @@ public actor ContainerProcessController: ProcessController {
             } catch {
                 // Best-effort — VM may already be dead
             }
+            // container.stop() releases the VM's internal EventLoopGroup and gRPC connections.
+            // Without this call, NIO threads leak and crash on stale fds during next start.
+            do {
+                try await container.stop()
+            } catch {
+                logger.debug("Container stop after kill completed with error (expected if VM already exited)", metadata: [
+                    "container_id": .string(handle.containerID),
+                    "error": .string("\(error)"),
+                ])
+            }
         }
         handle.containerState.isAlive.withLock { $0 = false }
         handle.monitorTask?.cancel()
         containers.removeValue(forKey: handle.containerID)
         cleanupArtifacts(handle)
         cleanupManager(id: handle.containerID)
+        logger.info("Container killed and cleaned up", metadata: [
+            "container_id": .string(handle.containerID),
+            "service_id": .string(handle.serviceID.rawValue),
+        ])
     }
 
     // MARK: - Manager Lifecycle
@@ -429,6 +447,36 @@ public actor ContainerProcessController: ProcessController {
         if let scriptDir = handle.scriptDir {
             EntrypointGenerator.cleanup(directory: scriptDir)
         }
+    }
+
+    public func stopAll() async {
+        // Stop all forwarders
+        for containerID in forwarders.keys {
+            await stopForwarder(containerID: containerID)
+        }
+        // Stop all containers (releases their EventLoopGroups)
+        for (containerID, container) in containers {
+            do {
+                try await container.stop()
+            } catch {
+                logger.debug("Container stop during stopAll failed", metadata: [
+                    "container_id": .string(containerID),
+                    "error": .string("\(error)"),
+                ])
+            }
+        }
+        containers.removeAll()
+        // Keep manager alive — vmnet network persists for reuse on next start.
+        logger.info("ProcessController stopAll complete", metadata: [
+            "manager_alive": .stringConvertible(manager != nil),
+        ])
+    }
+
+    public func teardown() async {
+        await stopAll()
+        // Release the container manager and its vmnet network.
+        manager = nil
+        logger.info("ProcessController teardown complete — vmnet network released")
     }
 
     private func cleanupManager(id: String) {

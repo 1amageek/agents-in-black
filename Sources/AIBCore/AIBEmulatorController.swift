@@ -86,6 +86,10 @@ private struct AIBClosureLogHandler: LogHandler {
 public final class AIBEmulatorController {
     private var gateway: DevGateway?
     private var supervisor: DevSupervisor?
+    /// Long-lived process controller reused across start/stop cycles.
+    /// Keeps the ContainerManager (and its vmnet network) alive to avoid
+    /// leaking vmnet_network_ref resources that the OS cannot reclaim.
+    private var processController: ContainerProcessController?
     private var state: State = .stopped
     private var eventContinuations: [UUID: AsyncStream<AIBEmulatorEvent>.Continuation] = [:]
     private var serviceSnapshotPollTask: Task<Void, Never>?
@@ -130,6 +134,8 @@ public final class AIBEmulatorController {
         supervisor?.forceTerminateAll()
         supervisor = nil
         gateway = nil
+        // Release the process controller and its vmnet network on app termination.
+        processController = nil
         state = .stopped
     }
 
@@ -183,8 +189,18 @@ public final class AIBEmulatorController {
                     gatewayPort: gatewayPort
                 )
             }
-            let processController = ContainerProcessController(logger: logger)
-            emit(.kernelDownloadStarted(processController.setupProgress))
+            // Reuse the existing process controller (and its vmnet network) across restarts.
+            // Create a new one only on first start or after explicit teardown.
+            let pc: ContainerProcessController
+            if let existing = self.processController {
+                pc = existing
+                logger.info("Reusing existing ContainerProcessController (vmnet network preserved)")
+            } else {
+                pc = ContainerProcessController(logger: logger)
+                self.processController = pc
+                logger.info("Created new ContainerProcessController")
+            }
+            emit(.kernelDownloadStarted(pc.setupProgress))
 
             let supervisor = DevSupervisor(
                 gatewayControl: gatewayControl,
@@ -193,7 +209,7 @@ public final class AIBEmulatorController {
                 gatewayPort: loaded.config.gateway.port,
                 reloadEnabled: true,
                 additionalEnvironment: additionalEnvironment,
-                processController: processController,
+                processController: pc,
                 logger: logger
             )
             try await supervisor.startAll()

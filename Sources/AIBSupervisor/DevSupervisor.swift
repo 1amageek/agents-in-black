@@ -112,6 +112,8 @@ public actor DevSupervisor {
         } catch {
             logger.error("Failed to clear routes", metadata: ["error": "\(error)"])
         }
+        // Release containers and forwarders but keep vmnet network alive for reuse.
+        await processController.stopAll()
     }
 
     public func serviceStatusSnapshots() -> [SupervisorServiceStatusSnapshot] {
@@ -223,6 +225,12 @@ public actor DevSupervisor {
         var service = runtime.service
         for (key, value) in additionalEnvironment where service.env[key] == nil {
             service.env[key] = value
+        }
+
+        // Log API key prefixes for debugging
+        for (key, value) in service.env where key.contains("API_KEY") || key.contains("APIKEY") {
+            let prefix = String(value.prefix(20))
+            logger.info("Env \(key)=\(prefix)…", metadata: ["service_id": .string(id.rawValue)])
         }
 
         try materializeConnectionArtifactsIfNeeded(for: service)

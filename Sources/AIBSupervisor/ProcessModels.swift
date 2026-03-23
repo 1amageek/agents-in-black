@@ -95,6 +95,12 @@ public protocol ProcessController: Sendable {
     func spawn(service: ServiceConfig, resolvedPort: Int, gatewayPort: Int, configBaseDirectory: String) async throws -> ChildHandle
     func terminateGroup(_ handle: ChildHandle, grace: Duration) async -> TerminationResult
     func killGroup(_ handle: ChildHandle) async
+    /// Release all containers and forwarders but keep the container manager
+    /// (and its vmnet network) alive for reuse on next start cycle.
+    func stopAll() async
+    /// Permanently tear down the container manager and vmnet network.
+    /// Called only on app termination.
+    func teardown() async
 }
 
 public protocol HealthProbeClient: Sendable {
