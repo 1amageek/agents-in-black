@@ -10,7 +10,7 @@ struct DeploySheet: View {
             Divider()
             content
         }
-        .frame(minWidth: 700, minHeight: 500)
+        .frame(minWidth: 700, minHeight: 500, maxHeight: 800)
     }
 
     @ViewBuilder

@@ -62,6 +62,14 @@ struct FlowCanvasView: View {
                     }
                     .environment(\.flowNodeVisualsByID, nodeVisualsByID)
                     .focusEffectDisabled()
+                    .onDeleteCommand {
+                        guard let selectedID = model.selectedFlowNodeID,
+                              let service = model.service(by: selectedID) else { return }
+                        model.requestRemoveService(
+                            namespacedServiceID: service.namespacedID,
+                            displayName: service.packageName ?? service.localID
+                        )
+                    }
                     .onTapGesture(count: 2) {
                         fitToContent()
                     }
@@ -389,13 +397,16 @@ struct FlowCanvasView: View {
         }
 
         newStore.onNodesChange = { changes in
-            // Handle node removals (move service to Unconfigured)
+            // Handle node removals — show confirmation, then re-sync to restore until approved
             for change in changes {
                 if case .remove(let nodeID) = change,
                    let service = model.service(by: nodeID) {
-                    Task {
-                        await model.removeServiceFromFlow(namespacedServiceID: service.namespacedID)
-                    }
+                    model.requestRemoveService(
+                        namespacedServiceID: service.namespacedID,
+                        displayName: service.packageName ?? service.localID
+                    )
+                    synchronizeStoreFromModel(resetViewport: false)
+                    return
                 }
             }
 
