@@ -93,6 +93,15 @@ struct WorkspaceSidebarView: View {
         }
     }
 
+    private var hasMissingDirectories: Bool {
+        !(model.workspace?.missingDirectories.isEmpty ?? true)
+    }
+
+    private func isDirectoryMissing(for service: AIBServiceModel) -> Bool {
+        guard let dirs = model.workspace?.missingDirectories else { return false }
+        return dirs.contains { $0.name == service.repoName }
+    }
+
     private var workspaceSection: some View {
         Section {
             if let workspace = model.workspace {
@@ -104,28 +113,24 @@ struct WorkspaceSidebarView: View {
         } header: {
             HStack(spacing: 8) {
                 Text("Workspace")
+                if hasMissingDirectories {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.yellow)
+                        .help("Some referenced directories are missing")
+                }
                 Spacer()
                 Menu {
-                    Button("New Workspace…", systemImage: "folder.badge.plus") {
-                        model.createWorkspacePicker()
-                    }
-                    Button("Open Workspace…", systemImage: "folder") {
-                        model.openWorkspacePicker()
-                    }
-                    Divider()
                     Button("Clone Repository…", systemImage: "square.and.arrow.down") {
                         model.showCloneSheet = true
                     }
-                    .disabled(model.workspace == nil)
                     Button("Create New Service…", systemImage: "plus.rectangle.on.folder") {
                         model.showCreateServiceSheet = true
                     }
-                    .disabled(model.workspace == nil)
                     Divider()
                     Button("Add Directory…", systemImage: "folder.badge.plus") {
                         model.addDirectoryPicker()
                     }
-                    .disabled(model.workspace == nil)
                 } label: {
                     Label("Add", systemImage: "plus")
                         .labelStyle(.titleAndIcon)
@@ -133,7 +138,8 @@ struct WorkspaceSidebarView: View {
                 .menuStyle(.borderlessButton)
                 .controlSize(.small)
                 .fixedSize()
-                .help(model.workspace == nil ? "Create or open a workspace" : "Add Directory to Workspace")
+                .disabled(model.workspace == nil)
+                .help("Add to Workspace")
             }
             .padding(.trailing, 8)
         }
@@ -289,37 +295,56 @@ struct WorkspaceSidebarView: View {
     private func serviceRow(_ service: AIBServiceModel) -> some View {
         let parentRepo = parentRepo(of: service)
         let runtime = parentRepo?.runtime ?? "unknown"
+        let missing = isDirectoryMissing(for: service)
         return HStack(spacing: 8) {
-            Image(systemName: iconName(for: runtime))
-                .foregroundStyle(.secondary)
+            Image(systemName: missing ? "exclamationmark.triangle.fill" : iconName(for: runtime))
+                .foregroundStyle(missing ? .yellow : .secondary)
                 .frame(width: 16)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(service.packageName ?? service.localID)
-                Text(service.namespacedID)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                if missing {
+                    Text("Directory not found")
+                        .font(.caption)
+                        .foregroundStyle(.yellow)
+                } else {
+                    Text(service.namespacedID)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
 
             Spacer(minLength: 8)
 
-            if model.sidebarServiceStatus(for: service) == .starting {
-                ProgressView()
-                    .controlSize(.mini)
-                    .help("Service status: starting")
-            } else if let badge = serviceStatusBadge(for: service) {
-                StatusBadgeButton(badge: badge)
-            }
+            if missing {
+                Button {
+                    model.relocateMissingDirectory(name: service.repoName)
+                } label: {
+                    Text("Locate")
+                        .font(.caption2.weight(.medium))
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.mini)
+                .help("Select the new location for this directory")
+            } else {
+                if model.sidebarServiceStatus(for: service) == .starting {
+                    ProgressView()
+                        .controlSize(.mini)
+                        .help("Service status: starting")
+                } else if let badge = serviceStatusBadge(for: service) {
+                    StatusBadgeButton(badge: badge)
+                }
 
-            Button {
-                model.select(.service(service.id))
-                model.openInEditor()
-            } label: {
-                Image(systemName: "arrow.up.forward.app")
-                    .foregroundStyle(.secondary)
+                Button {
+                    model.select(.service(service.id))
+                    model.openInEditor()
+                } label: {
+                    Image(systemName: "arrow.up.forward.app")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Open \(service.repoName) in Editor")
             }
-            .buttonStyle(.plain)
-            .help("Open \(service.repoName) in Editor")
         }
         .contentShape(Rectangle())
         .onTapGesture {

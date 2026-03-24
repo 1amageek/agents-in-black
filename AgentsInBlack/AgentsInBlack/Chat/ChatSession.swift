@@ -1,11 +1,13 @@
 import AIBCore
 import Foundation
 
-/// A single chat conversation session with an agent service via A2A protocol.
+/// A single chat conversation session with an agent service.
 ///
-/// Each instance manages one conversation against one A2A-compliant agent.
-/// It is independent of `AgentsInBlackAppModel` and can be used in any context
-/// (PiP panel, workbench, inspector, etc.).
+/// Supports two execution modes:
+/// - **A2A**: sends messages via HTTP/JSON-RPC to a running agent container or deployed service.
+/// - **Claude Code**: runs Claude Code CLI locally using subscription auth (no API cost).
+///
+/// The mode is determined by the `AgentRunner` injected at creation time.
 @MainActor
 @Observable
 final class ChatSession: Identifiable {
@@ -19,15 +21,18 @@ final class ChatSession: Identifiable {
     private(set) var isSending: Bool = false
     var selectedMessageID: UUID?
 
-    private let a2aClient: A2AClient
+    private let runner: any AgentRunner
+    private var runnerContext: AgentRunnerContext
     private(set) var agentCard: A2AAgentCard?
-    private var contextId: String?
+
+    /// Streaming text buffer for the current assistant response.
+    private(set) var streamingText: String?
 
     init(
         id: UUID = UUID(),
         serviceID: String,
-        baseURL: URL,
-        rpcPath: String = "/a2a",
+        runner: any AgentRunner,
+        context: AgentRunnerContext,
         agentCard: A2AAgentCard? = nil,
         title: String = "New Chat"
     ) {
@@ -35,7 +40,8 @@ final class ChatSession: Identifiable {
         self.serviceID = serviceID
         self.createdAt = Date()
         self.title = title
-        self.a2aClient = A2AClient(baseURL: baseURL, rpcPath: rpcPath)
+        self.runner = runner
+        self.runnerContext = context
         self.agentCard = agentCard
     }
 
@@ -57,24 +63,48 @@ final class ChatSession: Identifiable {
         appendMessage(.user(text))
         composerText = ""
         isSending = true
+        streamingText = ""
 
-        defer { isSending = false }
+        defer {
+            isSending = false
+            streamingText = nil
+        }
 
         let startedAt = Date()
-        do {
-            let result = try await a2aClient.sendMessage(text: text, contextId: contextId)
-            let latency = Int(Date().timeIntervalSince(startedAt) * 1000)
+        var completeText: String?
+        var latestResult: AgentRunnerResult?
 
-            // Maintain conversation context
-            if let newContextId = result.contextId {
-                contextId = newContextId
+        do {
+            for try await event in runner.send(message: text, context: runnerContext) {
+                switch event {
+                case .textDelta(let delta):
+                    streamingText = (streamingText ?? "") + delta
+
+                case .textComplete(let fullText):
+                    completeText = fullText
+
+                case .toolUse(let name):
+                    appendMessage(.info("Using tool: \(name)"))
+
+                case .sessionID(let sid):
+                    runnerContext.conversationID = sid
+
+                case .done(let result):
+                    latestResult = result
+                    if let cid = result.conversationID {
+                        runnerContext.conversationID = cid
+                    }
+
+                case .error(let message):
+                    appendMessage(.error(message))
+                }
             }
 
-            appendMessage(
-                .assistant(result.responseText),
-                latencyMs: latency,
-                rawResponseBody: result.rawResponseBody
-            )
+            let latency = Int(Date().timeIntervalSince(startedAt) * 1000)
+            let responseText = completeText ?? streamingText ?? ""
+            if !responseText.isEmpty {
+                appendMessage(.assistant(responseText), latencyMs: latency)
+            }
         } catch {
             appendMessage(.error(error.localizedDescription))
         }
@@ -91,7 +121,8 @@ final class ChatSession: Identifiable {
         composerText = ""
         isSending = false
         selectedMessageID = nil
-        contextId = nil
+        runnerContext.conversationID = nil
+        streamingText = nil
     }
 
     // MARK: - Selection

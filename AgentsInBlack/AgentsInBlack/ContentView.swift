@@ -63,6 +63,20 @@ struct ContentView: View {
                     .frame(minWidth: 480)
             }
 
+            if !(model.workspace?.missingDirectories.isEmpty ?? true) {
+                ToolbarItem(placement: .principal) {
+                    Button {
+                        if model.splitViewVisibility != .all {
+                            model.toggleSidebarVisibility()
+                        }
+                    } label: {
+                        Label("Missing Directories", systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.yellow)
+                    }
+                    .help("Some directories are missing — click to show sidebar")
+                }
+            }
+
             ToolbarItem(placement: .principal) {
                 Button {
                     model.startDeploy()

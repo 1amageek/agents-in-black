@@ -10,8 +10,21 @@ public struct AIBWorkspaceSnapshot: Sendable {
     public var skills: [AIBSkillDefinition]
     /// Gateway port configured in workspace.yaml.
     public var gatewayPort: Int
+    /// Directories referenced in workspace.yaml that do not exist on disk.
+    public var missingDirectories: [MissingDirectory]
 
-    public init(rootURL: URL, displayName: String, repos: [AIBRepoModel], fileTreesByRepoID: [String: [AIBFileNode]], services: [AIBServiceModel], skills: [AIBSkillDefinition] = [], gatewayPort: Int = 9090) {
+    public struct MissingDirectory: Sendable, Identifiable {
+        public var id: String { path }
+        public var name: String
+        public var path: String
+
+        public init(name: String, path: String) {
+            self.name = name
+            self.path = path
+        }
+    }
+
+    public init(rootURL: URL, displayName: String, repos: [AIBRepoModel], fileTreesByRepoID: [String: [AIBFileNode]], services: [AIBServiceModel], skills: [AIBSkillDefinition] = [], gatewayPort: Int = 9090, missingDirectories: [MissingDirectory] = []) {
         self.rootURL = rootURL
         self.displayName = displayName
         self.repos = repos
@@ -19,5 +32,6 @@ public struct AIBWorkspaceSnapshot: Sendable {
         self.services = services
         self.skills = skills
         self.gatewayPort = gatewayPort
+        self.missingDirectories = missingDirectories
     }
 }

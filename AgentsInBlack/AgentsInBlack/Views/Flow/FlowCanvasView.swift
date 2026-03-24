@@ -625,6 +625,10 @@ struct FlowCanvasView: View {
                         activityState = .stopped
                     }
                 }
+                let runnerLabel: String? = node.serviceKind == .agent
+                    && model.emulatorState.isRunning
+                    && ClaudeCodeConfiguration().isInstalled
+                    ? "Claude Code" : nil
                 return (
                     node.id,
                     FlowNodeVisual(
@@ -632,7 +636,8 @@ struct FlowCanvasView: View {
                         outgoingCount: outgoingCounts[node.id, default: 0],
                         activityState: activityState,
                         displayName: node.displayName,
-                        model: node.model
+                        model: node.model,
+                        localRunner: runnerLabel
                     )
                 )
             }
@@ -699,7 +704,8 @@ private struct FlowServiceNodeContent: View {
             outgoingCount: 0,
             activityState: .stopped,
             displayName: nil,
-            model: nil
+            model: nil,
+            localRunner: nil
         )
         let tint = AIBFlowPalette.tint(for: visual.kind)
         let parts = displayParts(namespacedID: node.data, displayName: visual.displayName)
@@ -711,7 +717,8 @@ private struct FlowServiceNodeContent: View {
                 kind: visual.kind,
                 parts: parts,
                 activityState: visual.activityState,
-                model: visual.model
+                model: visual.model,
+                localRunner: visual.localRunner
             )
                 .padding(inset)
 
@@ -728,7 +735,8 @@ private struct FlowServiceNodeContent: View {
         kind: AIBServiceKind,
         parts: (primary: String, secondary: String?),
         activityState: FlowNodeVisual.ActivityState,
-        model: String? = nil
+        model: String? = nil,
+        localRunner: String? = nil
     ) -> some View {
         HStack(spacing: 6) {
             Image(systemName: AIBFlowPalette.symbol(for: kind))
@@ -751,11 +759,22 @@ private struct FlowServiceNodeContent: View {
                 }
 
                 if let model {
-                    Text(model)
-                        .font(.system(size: 8, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
+                    HStack(spacing: 3) {
+                        Text(model)
+                            .font(.system(size: 8, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+
+                        if let localRunner {
+                            Text(localRunner)
+                                .font(.system(size: 7, weight: .medium))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 4)
+                                .padding(.vertical, 1)
+                                .background(.green.opacity(0.8), in: Capsule())
+                        }
+                    }
                 }
             }
 
@@ -961,6 +980,9 @@ private struct FlowNodeVisual: Equatable {
     let displayName: String?
     /// LLM model identifier for agent services.
     let model: String?
+    /// Local runner type used for this agent (e.g., "Claude Code").
+    /// nil for non-agent services or when using A2A container runner.
+    let localRunner: String?
 
     enum ActivityState: Equatable {
         case stopped

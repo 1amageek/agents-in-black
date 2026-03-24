@@ -101,6 +101,34 @@ public enum AIBWorkspaceManager {
         return WorkspaceInitResult(workspaceConfig: workspace, generatedServices: syncResult.serviceCount, warnings: syncResult.warnings)
     }
 
+    /// Update the path of an existing repo in workspace.yaml.
+    /// Used to fix broken references when a directory has been moved.
+    public static func relocateRepo(
+        workspaceRoot: String,
+        repoName: String,
+        newURL: URL
+    ) throws -> WorkspaceInitResult {
+        let rootURL = URL(fileURLWithPath: workspaceRoot).standardizedFileURL
+        let newStandardized = newURL.standardizedFileURL
+
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: newStandardized.path, isDirectory: &isDir), isDir.boolValue else {
+            throw ConfigError("Path is not a directory", metadata: ["path": newStandardized.path])
+        }
+
+        var workspace = try loadWorkspace(workspaceRoot: workspaceRoot)
+        guard let repoIndex = workspace.repos.firstIndex(where: { $0.name == repoName }) else {
+            throw ConfigError("Repository not found in workspace", metadata: ["name": repoName])
+        }
+
+        let newRelPath = WorkspaceDiscovery.relativePath(from: rootURL, to: newStandardized)
+        workspace.repos[repoIndex].path = newRelPath
+
+        try saveWorkspace(workspace, workspaceRoot: workspaceRoot)
+        let syncResult = try WorkspaceSyncer.sync(workspaceRoot: workspaceRoot, workspace: workspace)
+        return WorkspaceInitResult(workspaceConfig: workspace, generatedServices: syncResult.serviceCount, warnings: syncResult.warnings)
+    }
+
     public static func updateRepoRuntime(
         workspaceRoot: String,
         repoPath: String,

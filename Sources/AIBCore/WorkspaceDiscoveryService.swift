@@ -52,16 +52,20 @@ public final class WorkspaceDiscoveryService {
         var repos = try discoverRepos(in: rootURL, configuredReposByPath: configuredReposByPath)
 
         // Include repos from workspace.yaml that were not found by filesystem scan
-        // (e.g. external references with ../ paths)
+        // (e.g. external references with ../ paths).
+        // Track directories that are referenced but missing on disk.
+        var missingDirectories: [AIBWorkspaceSnapshot.MissingDirectory] = []
         if let workspaceConfig {
             let discoveredPaths = Set(repos.map { $0.rootURL.standardizedFileURL.path })
             for wsRepo in workspaceConfig.repos where wsRepo.enabled {
                 let resolvedURL = URL(fileURLWithPath: wsRepo.path, relativeTo: rootURL).standardizedFileURL
-                guard !discoveredPaths.contains(resolvedURL.path),
-                      FileManager.default.fileExists(atPath: resolvedURL.path) else {
-                    continue
+                guard !discoveredPaths.contains(resolvedURL.path) else { continue }
+                if FileManager.default.fileExists(atPath: resolvedURL.path) {
+                    repos.append(detectRepo(at: resolvedURL, configuredRepo: wsRepo))
+                } else {
+                    Self.logger.warning("Referenced directory not found: \(wsRepo.name, privacy: .public) at \(resolvedURL.path, privacy: .public)")
+                    missingDirectories.append(.init(name: wsRepo.name, path: resolvedURL.path))
                 }
-                repos.append(detectRepo(at: resolvedURL, configuredRepo: wsRepo))
             }
         }
 
@@ -87,7 +91,8 @@ public final class WorkspaceDiscoveryService {
             fileTreesByRepoID: fileTreesByRepoID,
             services: services.sorted(by: { $0.namespacedID.localizedStandardCompare($1.namespacedID) == .orderedAscending }),
             skills: skills,
-            gatewayPort: workspaceConfig?.gateway.port ?? 9090
+            gatewayPort: workspaceConfig?.gateway.port ?? 9090,
+            missingDirectories: missingDirectories
         )
     }
 

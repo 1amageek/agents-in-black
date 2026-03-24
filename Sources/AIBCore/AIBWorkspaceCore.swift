@@ -160,6 +160,18 @@ public enum AIBWorkspaceCore {
         )
     }
 
+    public static func relocateRepo(
+        workspaceRoot: String,
+        repoName: String,
+        newURL: URL
+    ) throws -> WorkspaceInitResult {
+        try AIBWorkspaceManager.relocateRepo(
+            workspaceRoot: workspaceRoot,
+            repoName: repoName,
+            newURL: newURL
+        )
+    }
+
     public static func updateServiceEndpoints(
         workspaceRoot: String,
         endpointsByNamespacedServiceID: [String: [String: String]]

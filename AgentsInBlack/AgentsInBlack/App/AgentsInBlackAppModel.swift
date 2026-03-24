@@ -330,6 +330,37 @@ final class AgentsInBlackAppModel {
         }
     }
 
+    func relocateMissingDirectory(name: String) {
+        guard workspace != nil else { return }
+
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Select"
+        panel.message = "Select the new location for \"\(name)\"."
+        let response = panel.runModal()
+        guard response == .OK, let url = panel.url else { return }
+
+        Task { await performRelocate(repoName: name, newURL: url.standardizedFileURL) }
+    }
+
+    private func performRelocate(repoName: String, newURL: URL) async {
+        guard let workspace else { return }
+        do {
+            _ = try AIBWorkspaceCore.relocateRepo(
+                workspaceRoot: workspace.rootURL.path,
+                repoName: repoName,
+                newURL: newURL
+            )
+            await loadWorkspace(at: workspace.rootURL)
+            lastErrorMessage = nil
+        } catch {
+            setError("Failed to relocate directory: \(error.localizedDescription)")
+        }
+    }
+
     func createNewService(template: any ProjectTemplate, serviceName: String) async throws {
         guard let workspace else {
             throw CreateServiceError.noWorkspace
@@ -522,6 +553,24 @@ final class AgentsInBlackAppModel {
             showUtilityPanel = true
             return
         }
+        // Agent services require Claude Code CLI for local execution (subscription auth).
+        let hasAgentServices = workspace.services.contains { $0.serviceKind == .agent }
+        if hasAgentServices && !isClaudeCodeAvailable {
+            setError("Claude Code is not installed. Install it to run agent services locally (no API cost).\nhttps://claude.ai/download")
+            appendAIBSystemLogLine("Claude Code CLI not found. Agent services require Claude Code for local execution.")
+            registerIssue(
+                severity: .error,
+                sourceTitle: "AIB Runtime",
+                message: "Claude Code CLI not installed. Required for local agent execution.",
+                serviceSelectionID: nil,
+                repoID: nil
+            )
+            emulatorState = .error("Claude Code not installed")
+            utilityPanelMode = .aibRuntime
+            showUtilityPanel = true
+            return
+        }
+
         let requestedGatewayPort = gatewayPort
         let effectiveGatewayPort = chooseGatewayPort(preferred: gatewayPort)
         gatewayPort = effectiveGatewayPort
@@ -738,13 +787,13 @@ final class AgentsInBlackAppModel {
 
     @discardableResult
     func createSession(for service: AIBServiceModel, activate: Bool) -> ChatSession {
-        let baseURL = a2aBaseURL(for: service)
-        let rpcPath = service.a2aProfile?.rpcPath ?? "/a2a"
         let card = agentCardCache.card(for: service.id)
+        let runner: any AgentRunner = makeLocalRunner(for: service)
+        let context = makeRunnerContext(for: service)
         let session = ChatSession(
             serviceID: service.id,
-            baseURL: baseURL,
-            rpcPath: rpcPath,
+            runner: runner,
+            context: context,
             agentCard: card
         )
         var sessions = chatSessionsByService[service.id] ?? []
@@ -781,6 +830,37 @@ final class AgentsInBlackAppModel {
         service.serviceKind == .agent
     }
 
+    /// Whether Claude Code CLI is installed and available for local agent execution.
+    var isClaudeCodeAvailable: Bool {
+        ClaudeCodeConfiguration().isInstalled
+    }
+
+    /// Create the local runner for a service using Claude Code CLI (subscription auth).
+    private func makeLocalRunner(for service: AIBServiceModel) -> any AgentRunner {
+        return ClaudeCodeAgentRunner(model: service.model)
+    }
+
+    /// Build the runner context for a local session.
+    private func makeRunnerContext(for service: AIBServiceModel) -> AgentRunnerContext {
+        let sanitizedID = service.namespacedID.replacingOccurrences(of: "/", with: "__")
+        let mcpConfigPath: String? = workspace.map { ws in
+            ws.rootURL
+                .appendingPathComponent(".aib/generated/runtime/mcp/\(sanitizedID)/.mcp.json")
+                .standardizedFileURL.path
+        }
+        let skillOverlayPath: String? = workspace.map { ws in
+            ws.rootURL
+                .appendingPathComponent(".aib/generated/runtime/skills/\(sanitizedID)")
+                .standardizedFileURL.path
+        }
+        return AgentRunnerContext(
+            serviceID: service.id,
+            mcpConfigPath: mcpConfigPath,
+            executionDirectory: service.executionDirectoryPath,
+            skillOverlayPath: skillOverlayPath
+        )
+    }
+
     private func a2aBaseURL(for service: AIBServiceModel) -> URL {
         let port = gatewayPort
         let urlString = "http://127.0.0.1:\(port)\(service.mountPath)"
@@ -792,10 +872,12 @@ final class AgentsInBlackAppModel {
     func createRemoteSession(for service: AIBServiceModel, deployedURL: URL, activate: Bool) -> ChatSession {
         let rpcPath = service.a2aProfile?.rpcPath ?? "/a2a"
         let card = agentCardCache.card(for: service.id)
+        let runner: any AgentRunner = A2AAgentRunner(baseURL: deployedURL, rpcPath: rpcPath)
+        let context = AgentRunnerContext(serviceID: service.id)
         let session = ChatSession(
             serviceID: service.id,
-            baseURL: deployedURL,
-            rpcPath: rpcPath,
+            runner: runner,
+            context: context,
             agentCard: card,
             title: "Remote"
         )
