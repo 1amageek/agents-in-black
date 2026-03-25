@@ -31,7 +31,9 @@ public enum WorkspaceDiscovery {
             }
         }
 
-        let uniqueNamed = uniquedRepoNames(for: repos)
+        // Exclude the workspace root itself — it is the parent container, not a service repo
+        let filtered = repos.filter { $0.repo.path != "." }
+        let uniqueNamed = uniquedRepoNames(for: filtered)
         return uniqueNamed.map { $0.repo }.sorted { $0.name < $1.name }
     }
 

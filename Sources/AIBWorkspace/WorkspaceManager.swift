@@ -62,6 +62,30 @@ public enum AIBWorkspaceManager {
         try WorkspaceYAMLCodec.saveWorkspace(workspace, to: path)
     }
 
+    /// Remove repos whose directories no longer exist on disk.
+    /// Returns the names of removed repos, or an empty array if nothing changed.
+    @discardableResult
+    public static func removeStaleRepos(workspaceRoot: String) throws -> [String] {
+        var workspace = try loadWorkspace(workspaceRoot: workspaceRoot)
+        let rootURL = URL(fileURLWithPath: workspaceRoot).standardizedFileURL
+        let fm = FileManager.default
+
+        var removedNames: [String] = []
+        workspace.repos.removeAll { repo in
+            let resolvedURL = URL(fileURLWithPath: repo.path, relativeTo: rootURL).standardizedFileURL
+            if !fm.fileExists(atPath: resolvedURL.path) {
+                removedNames.append(repo.name)
+                return true
+            }
+            return false
+        }
+
+        if !removedNames.isEmpty {
+            try saveWorkspace(workspace, workspaceRoot: workspaceRoot)
+        }
+        return removedNames
+    }
+
     public static func rescanWorkspace(workspaceRoot: String) throws -> WorkspaceInitResult {
         let existing = try loadWorkspace(workspaceRoot: workspaceRoot)
         let discovered = try WorkspaceDiscovery.discoverRepos(workspaceRoot: workspaceRoot, scanPath: workspaceRoot)
@@ -89,6 +113,9 @@ public enum AIBWorkspaceManager {
         var workspace = try loadWorkspace(workspaceRoot: workspaceRoot)
 
         let relPath = WorkspaceDiscovery.relativePath(from: rootURL, to: repoStandardized)
+        guard relPath != "." else {
+            throw ConfigError("Cannot add the workspace root as a repository", metadata: ["path": repoStandardized.path])
+        }
         guard !workspace.repos.contains(where: { $0.path == relPath }) else {
             throw ConfigError("Repository already exists in workspace", metadata: ["path": relPath])
         }

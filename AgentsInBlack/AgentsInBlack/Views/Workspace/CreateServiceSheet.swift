@@ -1,14 +1,20 @@
+import AIBCore
 import AIBWorkspace
 import SwiftUI
 
 struct CreateServiceSheet: View {
     @Bindable var model: AgentsInBlackAppModel
+    let serviceKind: AIBServiceKind
     @State private var selectedRuntime: RuntimeKind?
     @State private var selectedTemplate: (any ProjectTemplate)?
     @State private var serviceName: String = ""
     @State private var isCreating: Bool = false
     @State private var errorMessage: String?
     @FocusState private var isNameFieldFocused: Bool
+
+    private var kindLabel: String {
+        serviceKind == .mcp ? "MCP Service" : "Agent"
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -48,11 +54,11 @@ struct CreateServiceSheet: View {
 
     private var headerTitle: String {
         if let template = selectedTemplate {
-            return "New \(template.displayName) Service"
+            return "New \(template.displayName) \(kindLabel)"
         } else if let runtime = selectedRuntime {
             return "Choose \(runtime.displayLabel) Framework"
         }
-        return "Create New Service"
+        return "Create New \(kindLabel)"
     }
 
     // MARK: - Content
@@ -197,7 +203,7 @@ struct CreateServiceSheet: View {
         HStack {
             Spacer()
             Button("Cancel") {
-                model.showCreateServiceSheet = false
+                model.createServiceKind = nil
             }
             .keyboardShortcut(.cancelAction)
 
@@ -239,13 +245,14 @@ struct CreateServiceSheet: View {
     private func create() {
         guard let template = selectedTemplate, canCreate else { return }
         let name = sanitizedName
+        let kind = serviceKind
         isCreating = true
         errorMessage = nil
 
         Task {
             do {
-                try await model.createNewService(template: template, serviceName: name)
-                model.showCreateServiceSheet = false
+                try await model.createNewService(template: template, serviceName: name, serviceKind: kind)
+                model.createServiceKind = nil
             } catch {
                 errorMessage = error.localizedDescription
             }

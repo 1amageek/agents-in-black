@@ -77,8 +77,8 @@ public enum AIBConfigValidator {
             if service.watchMode == .external && service.watchPaths.isEmpty {
                 result.warnings.append("service \(service.id): watch_mode=external but watch_paths is empty")
             }
-            if service.watchMode == .internal && (service.build != nil || service.install != nil) {
-                result.warnings.append("service \(service.id): watch_mode=internal with build/install set")
+            if service.watchMode == .internal && service.build != nil {
+                result.warnings.append("service \(service.id): watch_mode=internal with build set")
             }
             do {
                 _ = try service.health.startupReadyTimeout.parse()

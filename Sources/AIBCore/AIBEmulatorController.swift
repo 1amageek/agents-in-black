@@ -202,6 +202,29 @@ public final class AIBEmulatorController {
             }
             emit(.kernelDownloadStarted(pc.setupProgress))
 
+            // Register local handlers for agent services so requests are processed
+            // by Claude Code CLI (subscription auth) instead of the container.
+            for service in loaded.config.services where service.kind == .agent {
+                let sanitizedID = service.id.rawValue.replacingOccurrences(of: "/", with: "__")
+                let mcpConfigPath = URL(fileURLWithPath: workspaceRoot)
+                    .appendingPathComponent(".aib/generated/runtime/mcp/\(sanitizedID)/.mcp.json")
+                    .standardizedFileURL.path
+                let executionDirectory = service.cwd
+                let skillOverlayPath = URL(fileURLWithPath: workspaceRoot)
+                    .appendingPathComponent(".aib/generated/runtime/skills/\(sanitizedID)")
+                    .standardizedFileURL.path
+                let handler = LocalAgentHandler.makeHandler(
+                    serviceID: service.id,
+                    mcpConfigPath: FileManager.default.fileExists(atPath: mcpConfigPath) ? mcpConfigPath : nil,
+                    executionDirectory: executionDirectory,
+                    skillOverlayPath: FileManager.default.fileExists(atPath: skillOverlayPath) ? skillOverlayPath : nil,
+                    model: nil,
+                    logger: logger
+                )
+                await gatewayControl.registerLocalHandler(serviceID: service.id, handler: handler)
+                logger.info("Registered local Claude Code handler", metadata: ["service_id": "\(service.id.rawValue)"])
+            }
+
             let supervisor = DevSupervisor(
                 gatewayControl: gatewayControl,
                 configProvider: configProvider,

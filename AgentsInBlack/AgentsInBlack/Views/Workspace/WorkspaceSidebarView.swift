@@ -124,10 +124,6 @@ struct WorkspaceSidebarView: View {
                     Button("Clone Repository…", systemImage: "square.and.arrow.down") {
                         model.showCloneSheet = true
                     }
-                    Button("Create New Service…", systemImage: "plus.rectangle.on.folder") {
-                        model.showCreateServiceSheet = true
-                    }
-                    Divider()
                     Button("Add Directory…", systemImage: "folder.badge.plus") {
                         model.addDirectoryPicker()
                     }
@@ -260,23 +256,19 @@ struct WorkspaceSidebarView: View {
             }
             .sorted { $0.repo.name.localizedStandardCompare($1.repo.name) == .orderedAscending }
 
-        if !agents.isEmpty {
-            sidebarGroupHeader("Agents")
-            ForEach(agents, id: \.id) { service in
-                serviceRow(service)
-            }
+        sidebarGroupHeaderWithAdd("Agents", kind: .agent)
+        ForEach(agents, id: \.id) { service in
+            serviceRow(service)
         }
 
-        if !mcps.isEmpty {
-            if !agents.isEmpty { sidebarSeparatorRow() }
-            sidebarGroupHeader("MCP")
-            ForEach(mcps, id: \.id) { service in
-                serviceRow(service)
-            }
+        sidebarSeparatorRow()
+        sidebarGroupHeaderWithAdd("MCP", kind: .mcp)
+        ForEach(mcps, id: \.id) { service in
+            serviceRow(service)
         }
 
         if !others.isEmpty {
-            if !agents.isEmpty || !mcps.isEmpty { sidebarSeparatorRow() }
+            sidebarSeparatorRow()
             sidebarGroupHeader("Other")
             ForEach(others, id: \.id) { service in
                 serviceRow(service)
@@ -284,7 +276,7 @@ struct WorkspaceSidebarView: View {
         }
 
         if !unconfiguredServices.isEmpty {
-            if !agents.isEmpty || !mcps.isEmpty || !others.isEmpty { sidebarSeparatorRow() }
+            sidebarSeparatorRow()
             sidebarGroupHeader("Unconfigured")
             ForEach(unconfiguredServices, id: \.id) { item in
                 unconfiguredServiceRow(runtime: item.runtime, repo: item.repo)
@@ -494,6 +486,26 @@ struct WorkspaceSidebarView: View {
             .font(.caption.weight(.semibold))
             .foregroundStyle(.secondary)
             .textCase(nil)
+    }
+
+    private func sidebarGroupHeaderWithAdd(_ title: String, kind: AIBServiceKind) -> some View {
+        HStack(spacing: 8) {
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .textCase(nil)
+            Spacer()
+            Button {
+                model.createServiceKind = kind
+            } label: {
+                Label("Add", systemImage: "plus")
+                    .labelStyle(.titleAndIcon)
+            }
+            .menuStyle(.borderlessButton)
+            .controlSize(.small)
+            .fixedSize()
+            .disabled(model.workspace == nil)
+        }
     }
 
     private func sidebarSeparatorRow() -> some View {

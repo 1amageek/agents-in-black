@@ -224,6 +224,11 @@ public actor DevSupervisor {
 
         var service = runtime.service
         for (key, value) in additionalEnvironment where service.env[key] == nil {
+            // Agent services use local Claude Code CLI (subscription auth) in dev mode.
+            // Do not inject API keys into agent containers to avoid API billing.
+            if service.kind == .agent && (key == "ANTHROPIC_API_KEY" || key == "ANTHROPIC_AUTH_TOKEN") {
+                continue
+            }
             service.env[key] = value
         }
 

@@ -25,6 +25,9 @@ final class ChatSession: Identifiable {
     private var runnerContext: AgentRunnerContext
     private(set) var agentCard: A2AAgentCard?
 
+    /// Callback to emit log lines to the service log panel.
+    var logHandler: ((String) -> Void)?
+
     /// Streaming text buffer for the current assistant response.
     private(set) var streamingText: String?
 
@@ -75,6 +78,7 @@ final class ChatSession: Identifiable {
         var latestResult: AgentRunnerResult?
 
         do {
+            logHandler?("[claude] send prompt (\(text.count) chars)\n")
             for try await event in runner.send(message: text, context: runnerContext) {
                 switch event {
                 case .textDelta(let delta):
@@ -84,18 +88,25 @@ final class ChatSession: Identifiable {
                     completeText = fullText
 
                 case .toolUse(let name):
+                    logHandler?("[claude] tool_use: \(name)\n")
                     appendMessage(.info("Using tool: \(name)"))
 
                 case .sessionID(let sid):
+                    logHandler?("[claude] session: \(sid.prefix(8))\n")
                     runnerContext.conversationID = sid
 
                 case .done(let result):
+                    let cost = result.totalCostUSD.map { String(format: "$%.4f", $0) } ?? "-"
+                    let turns = result.numTurns.map { "\($0)" } ?? "-"
+                    let duration = result.durationMS.map { "\($0)ms" } ?? "-"
+                    logHandler?("[claude] done turns=\(turns) cost=\(cost) duration=\(duration)\n")
                     latestResult = result
                     if let cid = result.conversationID {
                         runnerContext.conversationID = cid
                     }
 
                 case .error(let message):
+                    logHandler?("[claude] error: \(message)\n")
                     appendMessage(.error(message))
                 }
             }

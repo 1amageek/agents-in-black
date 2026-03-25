@@ -18,11 +18,44 @@ public struct GatewayRequestActivity: Sendable {
     }
 }
 
+/// Request/response types for local request handlers.
+public struct LocalRequest: Sendable {
+    public var method: String
+    public var path: String
+    public var query: String?
+    public var headers: [(String, String)]
+    public var body: Data
+
+    public init(method: String, path: String, query: String? = nil, headers: [(String, String)] = [], body: Data = Data()) {
+        self.method = method
+        self.path = path
+        self.query = query
+        self.headers = headers
+        self.body = body
+    }
+}
+
+public struct LocalResponse: Sendable {
+    public var statusCode: UInt
+    public var headers: [(String, String)]
+    public var body: Data
+
+    public init(statusCode: UInt, headers: [(String, String)] = [], body: Data = Data()) {
+        self.statusCode = statusCode
+        self.headers = headers
+        self.body = body
+    }
+}
+
+/// Handler that processes a request locally. Return nil to fall through to proxy.
+public typealias LocalRequestHandler = @Sendable (LocalRequest) async throws -> LocalResponse?
+
 public actor GatewayControl {
     private var snapshot: RouteSnapshot = .init(version: 0, entries: [])
     private var unavailable: [ServiceID: UnavailableReason] = [:]
     private var inflight: [ServiceID: Int] = [:]
     private var activityContinuations: [UUID: AsyncStream<GatewayRequestActivity>.Continuation] = [:]
+    private var localHandlers: [ServiceID: LocalRequestHandler] = [:]
 
     public init() {}
 
@@ -124,6 +157,16 @@ public actor GatewayControl {
 
     public func inflightCount(serviceID: ServiceID) async -> Int {
         inflight[serviceID, default: 0]
+    }
+
+    // MARK: - Local Handlers
+
+    public func registerLocalHandler(serviceID: ServiceID, handler: @escaping LocalRequestHandler) {
+        localHandlers[serviceID] = handler
+    }
+
+    public func localHandler(for serviceID: ServiceID) -> LocalRequestHandler? {
+        localHandlers[serviceID]
     }
 }
 

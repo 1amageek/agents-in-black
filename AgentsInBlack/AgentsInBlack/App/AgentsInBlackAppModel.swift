@@ -124,7 +124,7 @@ final class AgentsInBlackAppModel {
     var cloneError: String?
 
     // MARK: - Create New Service
-    var showCreateServiceSheet: Bool = false
+    var createServiceKind: AIBServiceKind?
 
     // MARK: - Skills
     var showAddSkillSheet: Bool = false
@@ -137,6 +137,8 @@ final class AgentsInBlackAppModel {
     let workspaceDiscovery = WorkspaceDiscoveryService()
     let emulatorController = AIBEmulatorController()
     let editorService = ExternalEditorService()
+    private var directoryMonitorSource: DispatchSourceFileSystemObject?
+    private var directoryMonitorFD: Int32 = -1
 
     init() {
         refreshPreferredApplications()
@@ -162,6 +164,7 @@ final class AgentsInBlackAppModel {
         gcloudContextTask = nil
         runtimeAnnouncementCenter.clear()
 
+        stopDirectoryMonitor()
         emulatorController.shutdown()
         deployController.shutdown()
     }
@@ -243,9 +246,16 @@ final class AgentsInBlackAppModel {
         let logger = os.Logger(subsystem: "com.aib.app", category: "Workspace")
         logger.info("loadWorkspace: starting at \(url.path)")
         do {
+            // Remove repos whose directories no longer exist before loading
+            let removed = try AIBWorkspaceCore.removeStaleRepos(workspaceRoot: url.path)
+            if !removed.isEmpty {
+                logger.info("loadWorkspace: removed stale repos: \(removed.joined(separator: ", "))")
+            }
+
             let snapshot = try workspaceDiscovery.loadWorkspace(at: url)
             logger.info("loadWorkspace: loaded \(snapshot.repos.count) repos, \(snapshot.services.count) services")
             workspace = snapshot
+            startDirectoryMonitor(for: url)
             gatewayPort = snapshot.gatewayPort
             runtimeIssues = []
             mcpConnectionStatusByConnectionID = [:]
@@ -282,6 +292,51 @@ final class AgentsInBlackAppModel {
     func refreshWorkspace() async {
         guard let workspace else { return }
         await loadWorkspace(at: workspace.rootURL)
+    }
+
+    // MARK: - Directory Monitor
+
+    private func startDirectoryMonitor(for rootURL: URL) {
+        stopDirectoryMonitor()
+        let fd = open(rootURL.path, O_EVTONLY)
+        guard fd >= 0 else { return }
+        directoryMonitorFD = fd
+
+        let source = DispatchSource.makeFileSystemObjectSource(
+            fileDescriptor: fd,
+            eventMask: .write,
+            queue: .global(qos: .utility)
+        )
+        source.setEventHandler { [weak self] in
+            Task { @MainActor [weak self] in
+                await self?.handleDirectoryChange()
+            }
+        }
+        source.setCancelHandler {
+            close(fd)
+        }
+        directoryMonitorSource = source
+        source.resume()
+    }
+
+    private func stopDirectoryMonitor() {
+        directoryMonitorSource?.cancel()
+        directoryMonitorSource = nil
+        directoryMonitorFD = -1
+    }
+
+    private func handleDirectoryChange() async {
+        guard let workspace else { return }
+        let logger = os.Logger(subsystem: "com.aib.app", category: "DirectoryMonitor")
+        do {
+            let removed = try AIBWorkspaceCore.removeStaleRepos(workspaceRoot: workspace.rootURL.path)
+            if !removed.isEmpty {
+                logger.info("Directory monitor: removed stale repos: \(removed.joined(separator: ", "))")
+                await loadWorkspace(at: workspace.rootURL)
+            }
+        } catch {
+            logger.error("Directory monitor: failed to sync: \(error)")
+        }
     }
 
     func addDirectoryPicker() {
@@ -361,7 +416,7 @@ final class AgentsInBlackAppModel {
         }
     }
 
-    func createNewService(template: any ProjectTemplate, serviceName: String) async throws {
+    func createNewService(template: any ProjectTemplate, serviceName: String, serviceKind: AIBServiceKind) async throws {
         guard let workspace else {
             throw CreateServiceError.noWorkspace
         }
@@ -373,7 +428,30 @@ final class AgentsInBlackAppModel {
         }
 
         try template.scaffold(at: serviceDir, serviceName: serviceName)
-        _ = try AIBWorkspaceCore.addRepo(workspaceRoot: workspace.rootURL.path, repoURL: serviceDir)
+        let result = try AIBWorkspaceCore.addRepo(workspaceRoot: workspace.rootURL.path, repoURL: serviceDir)
+
+        // Auto-configure the service so it appears active (not unconfigured)
+        let repoPath = result.workspaceConfig.repos.first { $0.path == serviceName }?.path ?? serviceName
+        let configResult = try AIBWorkspaceCore.configureServices(
+            workspaceRoot: workspace.rootURL.path,
+            path: repoPath,
+            runtimes: [template.runtime.rawValue]
+        )
+
+        // Override the auto-detected kind if it differs from user intent
+        let namespace = configResult.workspaceConfig.repos.first { $0.path == repoPath }?.servicesNamespace ?? serviceName
+        let namespacedID = "\(namespace)/main"
+        let detectedKind = configResult.workspaceConfig.repos
+            .first { $0.path == repoPath }?.services?
+            .first.flatMap { $0.kind.flatMap(AIBServiceKind.init(rawValue:)) }
+        if detectedKind != serviceKind {
+            try AIBWorkspaceCore.updateServiceKind(
+                workspaceRoot: workspace.rootURL.path,
+                namespacedServiceID: namespacedID,
+                kind: serviceKind.rawValue
+            )
+        }
+
         await loadWorkspace(at: workspace.rootURL)
         lastErrorMessage = nil
     }
@@ -796,6 +874,16 @@ final class AgentsInBlackAppModel {
             context: context,
             agentCard: card
         )
+        let namespacedID = service.namespacedID
+        session.logHandler = { [weak self] line in
+            guard let self else { return }
+            var output = self.serviceLogOutputByServiceID[namespacedID, default: ""]
+            output.append(line)
+            if output.count > 120_000 {
+                output.removeFirst(output.count - 120_000)
+            }
+            self.serviceLogOutputByServiceID[namespacedID] = output
+        }
         var sessions = chatSessionsByService[service.id] ?? []
         sessions.insert(session, at: 0)
         chatSessionsByService[service.id] = sessions

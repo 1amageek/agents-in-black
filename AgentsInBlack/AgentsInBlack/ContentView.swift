@@ -115,8 +115,8 @@ struct ContentView: View {
         }) {
             CloneRepositorySheet(model: model)
         }
-        .sheet(isPresented: $model.showCreateServiceSheet) {
-            CreateServiceSheet(model: model)
+        .sheet(item: $model.createServiceKind) { kind in
+            CreateServiceSheet(model: model, serviceKind: kind)
         }
         .sheet(isPresented: $model.showAddSkillSheet) {
             AddSkillSheet(model: model)

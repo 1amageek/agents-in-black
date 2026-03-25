@@ -84,6 +84,10 @@ private final class MockProcessController: ProcessController, Sendable {
     func killGroup(_ handle: ChildHandle) async {
         handle.containerState.isAlive.withLock { $0 = false }
     }
+
+    func stopAll() async {}
+
+    func teardown() async {}
 }
 
 // MARK: - Helpers

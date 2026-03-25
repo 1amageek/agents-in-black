@@ -65,6 +65,11 @@ public enum AIBWorkspaceCore {
         )
     }
 
+    @discardableResult
+    public static func removeStaleRepos(workspaceRoot: String) throws -> [String] {
+        try AIBWorkspaceManager.removeStaleRepos(workspaceRoot: workspaceRoot)
+    }
+
     public static func rescanWorkspace(workspaceRoot: String) throws -> WorkspaceInitResult {
         try AIBWorkspaceManager.rescanWorkspace(workspaceRoot: workspaceRoot)
     }

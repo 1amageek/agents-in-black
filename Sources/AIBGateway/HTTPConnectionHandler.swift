@@ -127,7 +127,31 @@ struct HTTPConnectionHandler: Sendable {
             }
 
             do {
-                let response = try await proxy(head: head, body: body, match: match, trace: trace)
+                let response: UpstreamResponse
+                if let handler = await control.localHandler(for: match.entry.serviceID) {
+                    let localReq = LocalRequest(
+                        method: head.method.rawValue,
+                        path: match.backendPath,
+                        query: match.query,
+                        headers: head.headers.map { ($0.name, $0.value) },
+                        body: Data(buffer: body)
+                    )
+                    if let localResp = try await handler(localReq) {
+                        var respHeaders = HTTPHeaders()
+                        for (name, value) in localResp.headers {
+                            respHeaders.add(name: name, value: value)
+                        }
+                        response = UpstreamResponse(
+                            status: HTTPResponseStatus(statusCode: Int(localResp.statusCode)),
+                            headers: respHeaders,
+                            body: ByteBuffer(data: localResp.body)
+                        )
+                    } else {
+                        response = try await proxy(head: head, body: body, match: match, trace: trace)
+                    }
+                } else {
+                    response = try await proxy(head: head, body: body, match: match, trace: trace)
+                }
                 await control.release(serviceID: match.entry.serviceID)
                 try await writeUpstreamResponse(
                     outbound: outbound,
