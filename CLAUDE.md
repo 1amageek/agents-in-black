@@ -172,29 +172,33 @@ Define (App UI)  →  Persist (.aib/workspace.yaml)  →  Resolve (in-memory AIB
 
 ### Cloud Run Deploy — What to Generate
 
-Cloud Run has no special MCP config format. Required artifacts are standard container + Cloud Run primitives **plus** agent-specific MCP connection config files. AIB generates all of these from workspace.yaml topology.
+Cloud Run has no special MCP config format. Required artifacts are standard container + Cloud Run primitives **plus** agent-specific Claude Code plugin bundles. AIB generates all of these from workspace.yaml topology.
 
 #### Per-Service Artifacts
 
 | Artifact | Placement | Purpose |
 |---|---|---|
-| MCP connection config | Each agent's service directory | Agent-specific format (see below) |
+| Claude Code plugin bundle | Each agent's service directory | Agent-specific MCP binding + skills |
 | `Dockerfile` | Each service directory | Container image build |
 | `clouddeploy.yaml` | `.aib/generated/deploy/` | `gcloud run deploy` arguments (region, memory, concurrency, env vars) |
 
-#### MCP Connection Config — Per-Agent Format
+#### Claude Code Plugin Bundle — Per-Agent Format
 
-Each Agent implementation reads MCP server connections from its own config format. AIB generates the correct format per agent and places it in the agent's service directory.
+Each Claude Code agent receives a generated plugin bundle. The bundle is static, and MCP endpoint URLs are rendered into it per environment.
 
-| Agent Type | Config File | Key Fields |
-|---|---|---|
-| Claude Code | `.mcp/mcp.json` | `mcpServers.{name}.url`, `mcpServers.{name}.transport` |
-| Codex | `codex.json` / env vars | Implementation-specific |
-| Custom Agent | `config.yaml` / env vars | `mcp_servers[].url`, `mcp_servers[].transport` |
+| File | Purpose |
+|---|---|
+| `.claude-plugin/plugin.json` | Claude Code plugin manifest / metadata |
+| `template.json` | Static service_ref-based MCP template |
+| `binding.json` | Environment-specific resolved MCP URLs |
+| `.mcp.json` / `.claude.json` | Claude Code-compatible rendered MCP config |
+| `USE_WITH_CLAUDE.md` | `claude --plugin-dir <plugin-root>` の利用案内 |
+| `__aib_deploy/.../skills` | Assigned skill payload projected into the plugin |
 
 - Transport is always `streamable_http` for Cloud Run (stdio is not supported)
 - URLs resolve differently per environment: local → `http://localhost:{port}/{path}`, Cloud Run → `https://{service}.run.app`
-- Config files are generated into each service directory so containers can include them at build time
+- `plugin = static package`, `binding = environment-specific render`
+- Local Claude Code execution passes the plugin root via `--plugin-dir <plugin-root>`
 
 #### Authentication & IAM
 - Agent → MCP: ID Token with `roles/run.invoker` on the MCP service

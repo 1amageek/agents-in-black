@@ -7,6 +7,8 @@ public struct AIBDeployArtifactSet: Sendable, Equatable {
     public var mcpConnectionConfig: AIBDeployArtifact?
     /// Skill bundle files projected into runtime-specific skill directories.
     public var skillConfigs: [AIBDeployArtifact]
+    /// Claude Code plugin bundle files generated per agent service.
+    public var claudeCodePluginArtifacts: [AIBDeployArtifact]
     /// Execution-directory agent files projected into `/app`.
     public var executionDirectoryConfigs: [AIBDeployArtifact]
 
@@ -15,12 +17,14 @@ public struct AIBDeployArtifactSet: Sendable, Equatable {
         deployConfig: AIBDeployArtifact,
         mcpConnectionConfig: AIBDeployArtifact? = nil,
         skillConfigs: [AIBDeployArtifact] = [],
+        claudeCodePluginArtifacts: [AIBDeployArtifact] = [],
         executionDirectoryConfigs: [AIBDeployArtifact] = []
     ) {
         self.dockerfile = dockerfile
         self.deployConfig = deployConfig
         self.mcpConnectionConfig = mcpConnectionConfig
         self.skillConfigs = skillConfigs
+        self.claudeCodePluginArtifacts = claudeCodePluginArtifacts
         self.executionDirectoryConfigs = executionDirectoryConfigs
     }
 }

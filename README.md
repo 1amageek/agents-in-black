@@ -7,6 +7,8 @@ It provides:
 - multi-process orchestration via `DevSupervisor`
 - multi-runtime support (Swift / Node / Deno / Python discovery)
 - workspace-level service configuration (`.aib/` at workspace root only)
+- fast local Node execution via `convenience` mode
+- local agent execution via Claude Code CLI
 
 ## Current Status (v1 prototype)
 
@@ -61,6 +63,10 @@ cd /Users/1amageek/Desktop/agents-in-black/demo
 ../.build/debug/aib emulator start --gateway-port 18080
 ```
 
+`local` targets default to `buildMode: convenience`, which runs Node MCP services as
+host processes for fast iteration. Use `buildMode: strict` when you explicitly want
+Cloud Run-aligned containerized validation.
+
 Test endpoints:
 
 ```bash
@@ -77,3 +83,10 @@ curl -sS -X POST 'http://127.0.0.1:18080/mcp/node/echo' -d 'ping'
 ## Notes
 
 This repository is currently a prototype implementation focused on local emulator behavior and workspace orchestration semantics.
+
+Local execution modes:
+- `convenience`: default for `.aib/targets/local.yaml`; fast host-process execution for local development
+- `strict`: slower containerized execution intended for Cloud Run-aligned validation
+
+Local agent services are not containerized. They run through Claude Code CLI and are
+served by the local handler registered in `AIBCore`.

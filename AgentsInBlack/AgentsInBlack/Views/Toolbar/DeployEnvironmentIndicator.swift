@@ -97,8 +97,8 @@ struct EditorStatusIndicator: View {
     }
 }
 
-/// Cloud provider status indicator for the toolbar.
-/// Shown when a provider is detected. Clicking opens Cloud Settings.
+/// Target settings status indicator for the toolbar.
+/// Clicking opens Target Settings.
 struct CloudProviderStatusIndicator: View {
     let result: PreflightCheckResult?
     let provider: (any DeploymentProvider)?
@@ -109,7 +109,7 @@ struct CloudProviderStatusIndicator: View {
         Button {
             onTap()
         } label: {
-            Image(systemName: "cloud")
+            Image(systemName: "slider.horizontal.3")
                 .font(.system(size: 15))
                 .frame(width: 20, height: 20)
                 .foregroundStyle(statusColor(for: result, isChecking: isChecking))
@@ -121,10 +121,10 @@ struct CloudProviderStatusIndicator: View {
     }
 
     private var tooltipText: String {
-        let name = provider?.displayName ?? "Cloud"
+        let name = provider?.displayName ?? "Target Settings"
         if isChecking { return "\(name): Checking..." }
-        guard let result else { return name }
-        return "\(name): \(statusLabel(for: result))"
+        guard let result else { return "Target Settings" }
+        return "Target Settings: \(statusLabel(for: result))"
     }
 }
 

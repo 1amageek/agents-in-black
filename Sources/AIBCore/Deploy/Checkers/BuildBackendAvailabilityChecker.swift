@@ -27,7 +27,7 @@ public struct BuildBackendAvailabilityChecker: PreflightChecker {
                     id: checkID,
                     title: title,
                     status: .failed("apple/container CLI is not installed."),
-                    remediationCommand: "Open Cloud Settings and click Install Latest apple/container."
+                    remediationCommand: "Open Target Settings and click Install Latest apple/container."
                 )
             }
 

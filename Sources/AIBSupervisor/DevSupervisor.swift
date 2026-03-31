@@ -12,6 +12,11 @@ private struct ChildEntry: Sendable {
     let containerID: String
 }
 
+private struct ServiceStartupAttemptResult: Sendable {
+    let serviceID: ServiceID
+    let errorDescription: String?
+}
+
 public actor DevSupervisor {
     public nonisolated let gatewayControl: GatewayControl
 
@@ -89,6 +94,20 @@ public actor DevSupervisor {
     public func restartService(_ id: ServiceID, reason: RestartReason) async {
         guard var runtime = runtimes[id] else { return }
         logger.info("Restarting service", metadata: ["service_id": "\(id)", "reason": "\(reason.rawValue)"])
+        if isLocallyHandled(runtime.service) {
+            do {
+                try materializeConnectionArtifactsIfNeeded(for: runtime.service)
+                runtime.lifecycleState = .ready
+                runtime.desiredState = .running
+                runtime.consecutiveProbeFailures = 0
+                runtimes[id] = runtime
+                try await publishRoutes()
+                logger.info("Refreshed local agent service", metadata: ["service_id": "\(id)"])
+            } catch {
+                logger.error("Local agent refresh failed", metadata: ["service_id": "\(id)", "error": "\(error)"])
+            }
+            return
+        }
         runtime.pendingRestartReason = reason
         runtimes[id] = runtime
         await stopRuntime(id: id, draining: true)
@@ -138,12 +157,23 @@ public actor DevSupervisor {
         for service in config.services {
             runtimes[service.id] = ServiceRuntime(service: service, configVersion: configVersion)
         }
+        try prepareLocalHandledServices(config.services)
         // Publish mount paths immediately so early requests get service_unavailable (not no_route)
         // while the remaining services are still booting.
         try await publishRoutes()
-        let orderedServices = try startupOrderedServices(from: config.services)
-        for service in orderedServices {
-            try await prepareAndStart(service: service, reason: .initialStart)
+        let startupBatches = try startupBatches(from: containerManagedServices(config.services))
+        let failedServices = await startServicesInBatches(
+            startupBatches,
+            allServices: containerManagedServices(config.services),
+            reason: .initialStart,
+            continueOnFailure: true
+        )
+        if !failedServices.isEmpty {
+            logger.warning("Some services failed to start", metadata: [
+                "failed": .string(failedServices.map(\.rawValue).sorted().joined(separator: ", ")),
+                "total": .stringConvertible(config.services.count),
+                "running": .stringConvertible(config.services.count - failedServices.count),
+            ])
         }
     }
 
@@ -197,15 +227,115 @@ public actor DevSupervisor {
             }
         }
 
+        try prepareLocalHandledServices(newConfig.services)
+
         let servicesToStart = Set(changed).union(added)
         if !servicesToStart.isEmpty {
-            let orderedServices = try startupOrderedServices(from: newConfig.services)
-            for service in orderedServices where servicesToStart.contains(service.id) {
-                try await prepareAndStart(service: service, reason: .configReload)
+            let startupBatches = try startupBatches(from: containerManagedServices(newConfig.services))
+            let failedServices = await startServicesInBatches(
+                startupBatches,
+                allServices: containerManagedServices(newConfig.services),
+                reason: .configReload,
+                limitTo: servicesToStart,
+                continueOnFailure: false
+            )
+            if let failedService = failedServices.sorted(by: { $0.rawValue < $1.rawValue }).first {
+                throw ReloadApplyError("Service failed to start during reload", metadata: [
+                    "service_id": failedService.rawValue,
+                ])
             }
         }
 
         try await publishRoutes()
+    }
+
+    private func startServicesInBatches(
+        _ batches: [[ServiceConfig]],
+        allServices: [ServiceConfig],
+        reason: RestartReason,
+        limitTo selectedServices: Set<ServiceID>? = nil,
+        continueOnFailure: Bool
+    ) async -> Set<ServiceID> {
+        let knownServiceIDs = Set(allServices.map(\.id))
+        var failedServices: Set<ServiceID> = []
+
+        for batch in batches {
+            let eligibleServices = batch.filter { service in
+                selectedServices?.contains(service.id) ?? true
+            }
+            guard !eligibleServices.isEmpty else {
+                continue
+            }
+
+            let runnableServices = eligibleServices.filter { service in
+                serviceConnectionDependencies(for: service, knownServiceIDs: knownServiceIDs)
+                    .isDisjoint(with: failedServices)
+            }
+            let skippedServices = eligibleServices.filter { service in
+                !serviceConnectionDependencies(for: service, knownServiceIDs: knownServiceIDs)
+                    .isDisjoint(with: failedServices)
+            }
+
+            for service in skippedServices {
+                logger.error("Skipping service start because dependency failed", metadata: [
+                    "service_id": .string(service.id.rawValue),
+                    "failed_dependencies": .string(
+                        serviceConnectionDependencies(for: service, knownServiceIDs: knownServiceIDs)
+                            .intersection(failedServices)
+                            .map(\.rawValue)
+                            .sorted()
+                            .joined(separator: ", ")
+                    ),
+                ])
+                failedServices.insert(service.id)
+            }
+
+            guard !runnableServices.isEmpty else {
+                continue
+            }
+
+            logger.info("Starting service batch", metadata: [
+                "reason": .string(reason.rawValue),
+                "service_ids": .string(runnableServices.map { $0.id.rawValue }.sorted().joined(separator: ", ")),
+                "count": .stringConvertible(runnableServices.count),
+            ])
+
+            let batchFailures = await withTaskGroup(
+                of: ServiceStartupAttemptResult.self,
+                returning: Set<ServiceID>.self
+            ) { group in
+                for service in runnableServices {
+                    group.addTask {
+                        do {
+                            try await self.prepareAndStart(service: service, reason: reason)
+                            return ServiceStartupAttemptResult(serviceID: service.id, errorDescription: nil)
+                        } catch {
+                            return ServiceStartupAttemptResult(serviceID: service.id, errorDescription: "\(error)")
+                        }
+                    }
+                }
+
+                var failures: Set<ServiceID> = []
+                for await result in group {
+                    guard let errorDescription = result.errorDescription else {
+                        continue
+                    }
+                    self.logger.error("Service failed to start — continuing with remaining services", metadata: [
+                        "service_id": .string(result.serviceID.rawValue),
+                        "error": .string(errorDescription),
+                    ])
+                    failures.insert(result.serviceID)
+                }
+                return failures
+            }
+
+            failedServices.formUnion(batchFailures)
+            if !continueOnFailure, !batchFailures.isEmpty {
+                break
+            }
+        }
+
+        return failedServices
     }
 
     private func prepareAndStart(service: ServiceConfig, reason: RestartReason) async throws {
@@ -347,7 +477,7 @@ public actor DevSupervisor {
         }
         try await gatewayControl.applyRouteSnapshot(RouteSnapshot.from(config: currentConfig, backends: backends, version: configVersion))
         for (id, runtime) in runtimes {
-            if runtime.lifecycleState != .ready {
+            if runtime.lifecycleState != .ready && !isLocallyHandled(runtime.service) {
                 await gatewayControl.markServiceUnavailable(id, reason: .notReady)
             }
         }
@@ -451,7 +581,7 @@ public actor DevSupervisor {
 
     private func livenessCheckInterval() -> Duration {
         var minimum: Duration = .seconds(2)
-        for runtime in runtimes.values where runtime.lifecycleState == .ready {
+        for runtime in runtimes.values where runtime.lifecycleState == .ready && !isLocallyHandled(runtime.service) {
             do {
                 let interval = try runtime.service.health.checkInterval.parse()
                 if interval < minimum {
@@ -469,7 +599,7 @@ public actor DevSupervisor {
 
     private func pollLiveness() async {
         for id in runtimes.keys {
-            guard var runtime = runtimes[id], runtime.lifecycleState == .ready else { continue }
+            guard var runtime = runtimes[id], runtime.lifecycleState == .ready, !isLocallyHandled(runtime.service) else { continue }
             let probe = await healthClient.checkLiveness(service: runtime)
             if probe.success {
                 runtime.consecutiveProbeFailures = 0
@@ -485,7 +615,7 @@ public actor DevSupervisor {
         }
     }
 
-    private func startupOrderedServices(from services: [ServiceConfig]) throws -> [ServiceConfig] {
+    private func startupBatches(from services: [ServiceConfig]) throws -> [[ServiceConfig]] {
         if services.isEmpty {
             return []
         }
@@ -509,28 +639,33 @@ public actor DevSupervisor {
             .map(\.id)
             .filter { indegree[$0] == 0 }
             .sorted { (serviceOrderIndex[$0] ?? 0) < (serviceOrderIndex[$1] ?? 0) }
-        var ordered: [ServiceConfig] = []
+        var batches: [[ServiceConfig]] = []
 
         while !queue.isEmpty {
-            let currentID = queue.removeFirst()
-            guard let currentService = servicesByID[currentID] else {
-                continue
-            }
-            ordered.append(currentService)
+            let currentLevel = queue
+            queue.removeAll(keepingCapacity: true)
 
-            let nextDependents = (dependents[currentID] ?? [])
-                .sorted { (serviceOrderIndex[$0] ?? 0) < (serviceOrderIndex[$1] ?? 0) }
-            for dependentID in nextDependents {
-                let updated = (indegree[dependentID] ?? 0) - 1
-                indegree[dependentID] = updated
-                if updated == 0 {
-                    queue.append(dependentID)
+            let batch = currentLevel.compactMap { servicesByID[$0] }
+            batches.append(batch)
+
+            for currentID in currentLevel {
+                let nextDependents = (dependents[currentID] ?? [])
+                    .sorted { (serviceOrderIndex[$0] ?? 0) < (serviceOrderIndex[$1] ?? 0) }
+                for dependentID in nextDependents {
+                    let updated = (indegree[dependentID] ?? 0) - 1
+                    indegree[dependentID] = updated
+                    if updated == 0 {
+                        queue.append(dependentID)
+                    }
                 }
             }
             queue.sort { (serviceOrderIndex[$0] ?? 0) < (serviceOrderIndex[$1] ?? 0) }
         }
 
-        if ordered.count != services.count {
+        let scheduledCount = batches.reduce(into: 0) { partial, batch in
+            partial += batch.count
+        }
+        if scheduledCount != services.count {
             let blocked = indegree
                 .filter { $0.value > 0 }
                 .map { $0.key.rawValue }
@@ -542,25 +677,41 @@ public actor DevSupervisor {
             )
         }
 
-        return ordered
+        return batches
     }
 
     private func serviceConnectionDependencies(
         for service: ServiceConfig,
         knownServiceIDs: Set<ServiceID>
     ) -> Set<ServiceID> {
-        var dependencies: Set<ServiceID> = []
-        let allTargets = service.connections.mcpServers + service.connections.a2aAgents
-        for target in allTargets {
-            guard let serviceRef = target.serviceRef, !serviceRef.isEmpty else {
-                continue
+        _ = knownServiceIDs
+        // Service-ref targets are resolved through the local gateway, so startup
+        // does not need to wait for the target container to become ready.
+        return []
+    }
+
+    private func prepareLocalHandledServices(_ services: [ServiceConfig]) throws {
+        for service in services where isLocallyHandled(service) {
+            try materializeConnectionArtifactsIfNeeded(for: service)
+            guard var runtime = runtimes[service.id] else {
+                throw ReloadApplyError(
+                    "Local handled service missing in runtime map",
+                    metadata: ["service_id": service.id.rawValue]
+                )
             }
-            let dependencyID = ServiceID(serviceRef)
-            if knownServiceIDs.contains(dependencyID) {
-                dependencies.insert(dependencyID)
-            }
+            runtime.lifecycleState = .ready
+            runtime.desiredState = .running
+            runtime.consecutiveProbeFailures = 0
+            runtimes[service.id] = runtime
         }
-        return dependencies
+    }
+
+    private func containerManagedServices(_ services: [ServiceConfig]) -> [ServiceConfig] {
+        services.filter { !isLocallyHandled($0) }
+    }
+
+    private func isLocallyHandled(_ service: ServiceConfig) -> Bool {
+        service.kind == .agent
     }
 
     private func materializeConnectionArtifactsIfNeeded(for service: ServiceConfig) throws {
@@ -581,10 +732,6 @@ public actor DevSupervisor {
             serviceID: service.id.rawValue,
             mcpTargets: mcpTargets,
             a2aTargets: a2aTargets
-        )
-        try writeMCPProjectConfigs(
-            serviceID: service.id.rawValue,
-            mcpTargets: mcpTargets
         )
     }
 
@@ -615,21 +762,9 @@ public actor DevSupervisor {
                     ]
                 )
             }
-            guard targetRuntime.lifecycleState == .ready,
-                  let targetHandle = targetRuntime.childHandle,
-                  let targetPort = targetRuntime.resolvedPort
-            else {
-                throw ReloadApplyError(
-                    "Connection target service is not ready",
-                    metadata: [
-                        "service_ref": serviceRef,
-                        "lifecycle_state": targetRuntime.lifecycleState.rawValue,
-                    ]
-                )
-            }
 
             let suffix = normalizedPath(defaultPathProvider(targetRuntime.service))
-            let resolvedURL = "http://\(targetHandle.containerIPAddress):\(targetPort)\(suffix)"
+            let resolvedURL = "http://localhost:\(gatewayPort)\(targetRuntime.service.mountPath)\(suffix)"
             resolved.append(RuntimeResolvedConnectionTarget(
                 serviceRef: serviceRef,
                 resolvedURL: resolvedURL,
@@ -681,65 +816,6 @@ public actor DevSupervisor {
                 ]
             )
         }
-    }
-
-    private func writeMCPProjectConfigs(
-        serviceID: String,
-        mcpTargets: [RuntimeResolvedConnectionTarget]
-    ) throws {
-        let outputRoot = URL(fileURLWithPath: configBaseDirectory)
-            .appendingPathComponent("generated/runtime/mcp/\(sanitizedServiceID(serviceID))")
-            .standardizedFileURL
-        do {
-            try FileManager.default.createDirectory(at: outputRoot, withIntermediateDirectories: true)
-        } catch {
-            throw ProcessSpawnError(
-                "Failed to create MCP config output directory",
-                metadata: [
-                    "path": outputRoot.path,
-                    "underlying_error": "\(error)",
-                ]
-            )
-        }
-
-        var servers: [String: RuntimeMCPProjectServerEntry] = [:]
-        for target in mcpTargets {
-            let name = mcpServerName(from: target)
-            servers[name] = RuntimeMCPProjectServerEntry(type: "http", url: target.resolvedURL)
-        }
-        let config = RuntimeMCPProjectConfig(mcpServers: servers)
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        do {
-            let data = try encoder.encode(config)
-            try data.write(to: outputRoot.appendingPathComponent(".mcp.json"), options: .atomic)
-            try data.write(to: outputRoot.appendingPathComponent(".claude.json"), options: .atomic)
-        } catch {
-            throw ProcessSpawnError(
-                "Failed to write MCP project config",
-                metadata: [
-                    "path": outputRoot.path,
-                    "underlying_error": "\(error)",
-                ]
-            )
-        }
-    }
-
-    private func mcpServerName(from target: RuntimeResolvedConnectionTarget) -> String {
-        if let serviceRef = target.serviceRef, !serviceRef.isEmpty {
-            return serviceRef.replacingOccurrences(of: "/", with: "-")
-        }
-        guard let url = URL(string: target.resolvedURL) else {
-            return "mcp-server"
-        }
-        let host = url.host ?? "unknown"
-        let path = url.path
-            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-            .replacingOccurrences(of: "/", with: "-")
-        if path.isEmpty {
-            return host
-        }
-        return "\(host)-\(path)"
     }
 
     private func sanitizedServiceID(_ value: String) -> String {
@@ -852,13 +928,4 @@ private struct RuntimeResolvedConnectionTarget: Codable {
         case resolvedURL = "resolved_url"
         case source
     }
-}
-
-private struct RuntimeMCPProjectConfig: Codable {
-    var mcpServers: [String: RuntimeMCPProjectServerEntry]
-}
-
-private struct RuntimeMCPProjectServerEntry: Codable {
-    var type: String
-    var url: String
 }

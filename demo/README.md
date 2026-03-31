@@ -58,7 +58,8 @@ cd demo
 ../.build/debug/aib emulator start
 ```
 
-> agent-swift は初回起動時に `swift build` が走るため、起動まで時間がかかります。
+> `local` target は既定で `buildMode: convenience` です。Node サービスは host process
+> として起動するため、containerized な `strict` より高速です。
 
 ## 動作確認
 

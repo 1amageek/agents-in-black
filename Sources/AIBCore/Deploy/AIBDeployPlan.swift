@@ -1,3 +1,4 @@
+import AIBRuntimeCore
 import Foundation
 
 /// The complete deploy plan generated from workspace topology.
@@ -57,6 +58,8 @@ public struct AIBDeployServicePlan: Sendable, Identifiable {
     public var envVars: [String: String]
     public var connections: AIBDeployResolvedConnections
     public var isPublic: Bool
+    public var sourceDependencies: [AIBSourceDependencyFinding]
+    public var sourceCredential: AIBSourceCredential?
 
     /// Secret environment variable names detected from source code.
     /// These must be provided by the user before deployment.
@@ -77,6 +80,8 @@ public struct AIBDeployServicePlan: Sendable, Identifiable {
         envVars: [String: String] = [:],
         connections: AIBDeployResolvedConnections = .init(),
         isPublic: Bool = false,
+        sourceDependencies: [AIBSourceDependencyFinding] = [],
+        sourceCredential: AIBSourceCredential? = nil,
         requiredSecrets: [String] = [],
         envWarnings: [String] = []
     ) {
@@ -91,6 +96,8 @@ public struct AIBDeployServicePlan: Sendable, Identifiable {
         self.envVars = envVars
         self.connections = connections
         self.isPublic = isPublic
+        self.sourceDependencies = sourceDependencies
+        self.sourceCredential = sourceCredential
         self.requiredSecrets = requiredSecrets
         self.envWarnings = envWarnings
     }

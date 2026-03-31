@@ -1,3 +1,5 @@
+import AIBRuntimeCore
+import AIBWorkspace
 import Foundation
 
 /// Reads and writes `.aib/targets/{providerID}.yaml`.
@@ -27,39 +29,83 @@ public struct DefaultDeployTargetConfigStore: DeployTargetConfigStore, Sendable 
 
         let filePath = targetsDir.appendingPathComponent("\(config.providerID).yaml")
 
-        var lines: [String] = []
-        lines.append("version: 1")
-        lines.append("target: \(config.providerID)")
+        var root: [String: Any] = [
+            "version": 1,
+            "target": config.providerID,
+            "buildMode": config.buildMode.rawValue,
+            "defaults": [
+                "auth": config.defaultAuth.rawValue,
+                "region": config.region,
+            ],
+        ]
 
-        // Provider-specific top-level keys (e.g., gcpProject, artifactRegistryHost)
         for key in config.providerConfig.keys.sorted() {
-            if key != "region" && key != "auth" {
-                lines.append("\(key): \(config.providerConfig[key]!)")
+            if key != "region" && key != "auth", let value = config.providerConfig[key] {
+                root[key] = value
             }
         }
 
-        lines.append("defaults:")
-        lines.append("  auth: \(config.defaultAuth.rawValue)")
-        lines.append("  region: \(config.region)")
-
-        // Per-kind resource overrides (only include kinds that differ from smart defaults)
-        let kindEntries: [(yamlKey: String, kind: AIBServiceKind)] = [
-            ("agent", .agent), ("mcp", .mcp), ("other", .unknown),
-        ]
-        for (yamlKey, kind) in kindEntries {
-            guard let override = config.kindDefaults[kind] else { continue }
-            let baseline = AIBDeployResourceConfig.defaults(for: kind)
-            guard override != baseline else { continue }
-            lines.append("  \(yamlKey):")
-            lines.append("    memory: \(override.memory)")
-            lines.append("    cpu: \(override.cpu)")
-            lines.append("    max_instances: \(override.maxInstances)")
-            lines.append("    min_instances: \(override.minInstances)")
-            lines.append("    concurrency: \(override.concurrency)")
-            lines.append("    timeout: \(override.timeout)")
+        if !config.sourceCredentials.isEmpty {
+            root["sourceCredentials"] = config.sourceCredentials.map { credential in
+                var item: [String: Any] = [
+                    "type": credential.type.rawValue,
+                    "host": credential.host,
+                ]
+                if let localPrivateKeyPath = credential.localPrivateKeyPath, !localPrivateKeyPath.isEmpty {
+                    item["localPrivateKeyPath"] = localPrivateKeyPath
+                }
+                if let localKnownHostsPath = credential.localKnownHostsPath, !localKnownHostsPath.isEmpty {
+                    item["localKnownHostsPath"] = localKnownHostsPath
+                }
+                if let localPrivateKeyPassphraseEnv = credential.localPrivateKeyPassphraseEnv,
+                   !localPrivateKeyPassphraseEnv.isEmpty
+                {
+                    item["localPrivateKeyPassphraseEnv"] = localPrivateKeyPassphraseEnv
+                }
+                if let localAccessTokenEnv = credential.localAccessTokenEnv,
+                   !localAccessTokenEnv.isEmpty
+                {
+                    item["localAccessTokenEnv"] = localAccessTokenEnv
+                }
+                if let cloudPrivateKeySecret = credential.cloudPrivateKeySecret, !cloudPrivateKeySecret.isEmpty {
+                    item["cloudPrivateKeySecret"] = cloudPrivateKeySecret
+                }
+                if let cloudKnownHostsSecret = credential.cloudKnownHostsSecret, !cloudKnownHostsSecret.isEmpty {
+                    item["cloudKnownHostsSecret"] = cloudKnownHostsSecret
+                }
+                return item
+            }
         }
 
-        let yamlString = lines.joined(separator: "\n") + "\n"
+        if let convenience = config.convenience {
+            root["convenience"] = [
+                "useHostCorepackCache": convenience.useHostCorepackCache,
+                "useHostPNPMStore": convenience.useHostPNPMStore,
+                "useRepoLocalPNPMStore": convenience.useRepoLocalPNPMStore,
+            ]
+        }
+
+        if var defaults = root["defaults"] as? [String: Any] {
+            let kindEntries: [(yamlKey: String, kind: AIBServiceKind)] = [
+                ("agent", .agent), ("mcp", .mcp), ("other", .unknown),
+            ]
+            for (yamlKey, kind) in kindEntries {
+                guard let override = config.kindDefaults[kind] else { continue }
+                let baseline = AIBDeployResourceConfig.defaults(for: kind)
+                guard override != baseline else { continue }
+                defaults[yamlKey] = [
+                    "memory": override.memory,
+                    "cpu": override.cpu,
+                    "max_instances": override.maxInstances,
+                    "min_instances": override.minInstances,
+                    "concurrency": override.concurrency,
+                    "timeout": override.timeout,
+                ]
+            }
+            root["defaults"] = defaults
+        }
+
+        let yamlString = YAMLUtility.emitYAML(root) + "\n"
         try yamlString.write(to: filePath, atomically: true, encoding: .utf8)
     }
 

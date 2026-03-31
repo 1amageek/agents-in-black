@@ -90,7 +90,11 @@ public struct NodeRuntimeAdapter: RuntimeAdapter, Sendable {
         let fm = FileManager.default
         if fm.fileExists(atPath: repoURL.appendingPathComponent("pnpm-lock.yaml").path) { return .pnpm }
         if fm.fileExists(atPath: repoURL.appendingPathComponent("yarn.lock").path) { return .yarn }
-        return .npm
+        if fm.fileExists(atPath: repoURL.appendingPathComponent("package-lock.json").path) { return .npm }
+        // Default to pnpm: node:22-slim ships npm v11 which has a known lockfile
+        // compatibility bug ("Cannot read properties of undefined (reading 'extraneous')").
+        // pnpm is pre-installed via corepack and avoids this issue.
+        return .pnpm
     }
 
     private func nodeCandidates(packageManager: PackageManagerKind, scripts: [String: String]) -> [CommandCandidate] {

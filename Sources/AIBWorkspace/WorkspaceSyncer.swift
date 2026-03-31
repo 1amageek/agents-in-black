@@ -115,7 +115,7 @@ public enum WorkspaceSyncer {
             workspaceRoot: workspaceRoot,
             gatewayPort: workspace.gateway.port
         )
-        try writeRuntimeSkillArtifacts(
+        try writeRuntimeClaudeCodePlugins(
             resolved: resolved,
             workspaceRoot: workspaceRoot,
             workspace: workspace
@@ -177,24 +177,19 @@ public enum WorkspaceSyncer {
                 )
             }
 
-            // Generate native MCP config files for Claude Code / Claude Agent SDK.
-            try writeMCPProjectConfigs(
-                serviceID: service.id.rawValue,
-                mcpTargets: mcpTargets,
-                workspaceRoot: workspaceRoot
-            )
         }
     }
 
-    /// Write runtime skill overlays for agent services.
-    /// Artifacts are staged under `.aib/generated/runtime/skills/{service-id}/`
-    /// and mounted into `/app` by the local runtime without mutating repo contents.
-    public static func writeRuntimeSkillArtifacts(
+    /// Write per-agent Claude Code plugin bundles for local runtime.
+    /// Bundles are staged under `.aib/generated/runtime/plugins/{service-id}/`.
+    public static func writeRuntimeClaudeCodePlugins(
         resolved: ResolvedConfig,
         workspaceRoot: String,
         workspace: AIBWorkspaceConfig
     ) throws {
-        let outputRoot = URL(fileURLWithPath: ".aib/generated/runtime/skills", relativeTo: URL(fileURLWithPath: workspaceRoot))
+        let runtimeRoot = URL(fileURLWithPath: ".aib/generated/runtime", relativeTo: URL(fileURLWithPath: workspaceRoot))
+            .standardizedFileURL
+        let outputRoot = runtimeRoot.appendingPathComponent("plugins", isDirectory: true)
             .standardizedFileURL
 
         if FileManager.default.fileExists(atPath: outputRoot.path(percentEncoded: false)) {
@@ -202,101 +197,75 @@ public enum WorkspaceSyncer {
         }
         try FileManager.default.createDirectory(at: outputRoot, withIntermediateDirectories: true)
 
+        for legacyDirectory in ["mcp", "skills"] {
+            let legacyURL = runtimeRoot.appendingPathComponent(legacyDirectory, isDirectory: true)
+            if FileManager.default.fileExists(atPath: legacyURL.path(percentEncoded: false)) {
+                try FileManager.default.removeItem(at: legacyURL)
+            }
+        }
+
         let workspaceSkillsByID = Dictionary(uniqueKeysWithValues: (workspace.skills ?? []).map { ($0.id, $0) })
-        guard !workspaceSkillsByID.isEmpty else { return }
-
-        for repo in workspace.repos where repo.enabled {
-            guard let services = repo.services, !services.isEmpty else { continue }
-
-            for service in services {
-                let assignedSkillIDs = service.skills ?? []
-                guard !assignedSkillIDs.isEmpty else { continue }
-
-                let namespacedID = "\(repo.namespace)/\(service.id)"
-                guard resolved.config.services.contains(where: { $0.id.rawValue == namespacedID }) else {
-                    continue
+        let servicesByID = Dictionary(uniqueKeysWithValues: resolved.config.services.map { ($0.id, $0) })
+        let skillIDsByService = workspace.repos
+            .filter(\.enabled)
+            .reduce(into: [String: [String]]()) { partial, repo in
+                guard let services = repo.services else { return }
+                for service in services {
+                    partial["\(repo.namespace)/\(service.id)"] = service.skills ?? []
                 }
+            }
 
-                let executionRootPath = resolved.serviceMetadata[namespacedID]?.executionRootPath
-                    ?? resolveExecutionRootPath(
-                        inlineCWD: service.cwd,
-                        repoPath: repo.path,
-                        workspaceRoot: workspaceRoot
+        for resolvedService in resolved.config.services where resolvedService.kind == .agent {
+            let namespacedID = resolvedService.id.rawValue
+            let assignedSkillIDs = skillIDsByService[namespacedID] ?? []
+            let executionRootPath = resolved.serviceMetadata[namespacedID]?.executionRootPath
+                ?? resolvedService.cwd
+                ?? workspaceRoot
+
+            let mcpTargets = resolveConnectionTargets(
+                resolvedService.connections.mcpServers,
+                servicesByID: servicesByID,
+                gatewayPort: resolved.config.gateway.port,
+                defaultPathProvider: { target in target.mcp?.path ?? "/mcp" }
+            )
+
+            let template = ClaudeCodePluginTemplate(
+                serviceID: namespacedID,
+                servers: mcpTargets.map { target in
+                    .init(
+                        name: ClaudeCodePluginBundle.mcpServerName(
+                            serviceRef: target.serviceRef,
+                            resolvedURL: target.resolvedURL
+                        ),
+                        serviceRef: target.serviceRef,
+                        source: target.source
                     )
-                try writeRuntimeSkillArtifacts(
-                    serviceID: namespacedID,
-                    assignedSkillIDs: assignedSkillIDs,
-                    workspaceSkillsByID: workspaceSkillsByID,
-                    workspaceRoot: workspaceRoot,
-                    executionRootPath: executionRootPath,
-                    outputRoot: outputRoot
-                )
-            }
-        }
-    }
+                }
+            )
+            let binding = ClaudeCodePluginBinding(
+                serviceID: namespacedID,
+                servers: mcpTargets.map { target in
+                    .init(
+                        name: ClaudeCodePluginBundle.mcpServerName(
+                            serviceRef: target.serviceRef,
+                            resolvedURL: target.resolvedURL
+                        ),
+                        resolvedURL: target.resolvedURL
+                    )
+                }
+            )
 
-    /// Generate native MCP config files for an agent service.
-    /// Placed at `.aib/generated/runtime/mcp/{sanitized_id}/`.
-    /// - `.mcp.json`: Claude Code project MCP config.
-    /// - `.claude.json`: legacy Claude config format used by some SDK flows.
-    private static func writeMCPProjectConfigs(
-        serviceID: String,
-        mcpTargets: [ResolvedConnectionTarget],
-        workspaceRoot: String
-    ) throws {
-        let sanitized = sanitizedServiceFilename(serviceID)
-        let mcpDir = URL(fileURLWithPath: ".aib/generated/runtime/mcp/\(sanitized)", relativeTo: URL(fileURLWithPath: workspaceRoot))
-            .standardizedFileURL
-
-        do {
-            try FileManager.default.createDirectory(at: mcpDir, withIntermediateDirectories: true)
-        } catch {
-            throw ConfigError(
-                "Failed to create MCP config output directory",
-                metadata: ["path": mcpDir.path, "underlying_error": "\(error)"]
+            try writeRuntimeClaudeCodePlugin(
+                serviceID: namespacedID,
+                assignedSkillIDs: assignedSkillIDs,
+                workspaceSkillsByID: workspaceSkillsByID,
+                workspaceRoot: workspaceRoot,
+                executionRootPath: executionRootPath,
+                outputRoot: outputRoot,
+                template: template,
+                binding: binding
             )
         }
-
-        var servers: [String: MCPProjectServerEntry] = [:]
-        for target in mcpTargets {
-            let name = mcpServerName(from: target)
-            servers[name] = MCPProjectServerEntry(type: "http", url: target.resolvedURL)
-        }
-
-        let config = MCPProjectConfig(mcpServers: servers)
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-
-        let outputURLs = [
-            mcpDir.appendingPathComponent(".mcp.json"),
-            mcpDir.appendingPathComponent(".claude.json"),
-        ]
-        do {
-            let data = try encoder.encode(config)
-            for outputURL in outputURLs {
-                try data.write(to: outputURL, options: .atomic)
-            }
-        } catch {
-            throw ConfigError(
-                "Failed to write MCP project config",
-                metadata: ["path": mcpDir.path, "underlying_error": "\(error)"]
-            )
-        }
-    }
-
-    /// Derive a human-readable MCP server name from a resolved connection target.
-    private static func mcpServerName(from target: ResolvedConnectionTarget) -> String {
-        if let ref = target.serviceRef, !ref.isEmpty {
-            return ref.replacingOccurrences(of: "/", with: "-")
-        }
-        // Fallback: extract host+path from URL
-        if let url = URL(string: target.resolvedURL) {
-            let host = url.host ?? "unknown"
-            let path = url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-                .replacingOccurrences(of: "/", with: "-")
-            return path.isEmpty ? host : "\(host)-\(path)"
-        }
-        return "mcp-server"
     }
 
     private static func namespacedServices(from repoServices: [ServiceConfig], repo: WorkspaceRepo, repoRoot: String) -> [ServiceConfig] {
@@ -504,7 +473,7 @@ public enum WorkspaceSyncer {
             guard let resolvedService = servicesByID[ServiceID(serviceRef)] else {
                 return nil
             }
-            let base = "http://127.0.0.1:\(gatewayPort)\(resolvedService.mountPath)"
+            let base = "http://localhost:\(gatewayPort)\(resolvedService.mountPath)"
             let suffix = normalizedPath(defaultPathProvider(resolvedService))
             return ResolvedConnectionTarget(
                 serviceRef: serviceRef,
@@ -528,17 +497,30 @@ public enum WorkspaceSyncer {
         value.replacingOccurrences(of: "/", with: "__")
     }
 
-    private static func writeRuntimeSkillArtifacts(
+    private static func writeRuntimeClaudeCodePlugin(
         serviceID: String,
         assignedSkillIDs: [String],
         workspaceSkillsByID: [String: WorkspaceSkillConfig],
         workspaceRoot: String,
         executionRootPath: String,
-        outputRoot: URL
+        outputRoot: URL,
+        template: ClaudeCodePluginTemplate,
+        binding: ClaudeCodePluginBinding
     ) throws {
         let workspaceSkillsRoot = SkillBundleLoader.workspaceSkillsRootURL(workspaceRoot: workspaceRoot)
         let executionRootURL = URL(fileURLWithPath: executionRootPath)
-        let serviceOutputRoot = outputRoot.appendingPathComponent(sanitizedServiceFilename(serviceID), isDirectory: true)
+        let serviceOutputRoot = ClaudeCodePluginBundle.pluginRootURL(baseURL: outputRoot, serviceID: serviceID)
+
+        try FileManager.default.createDirectory(at: serviceOutputRoot, withIntermediateDirectories: true)
+        let rendered = try ClaudeCodePluginBundle.render(template: template, binding: binding)
+        for file in rendered.files {
+            let destinationURL = serviceOutputRoot.appendingPathComponent(file.relativePath, isDirectory: false)
+            try FileManager.default.createDirectory(
+                at: destinationURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try file.content.write(to: destinationURL, options: .atomic)
+        }
 
         for projection in runtimeSkillProjectionDirectories {
             let stagedDirectoryURL = serviceOutputRoot.appendingPathComponent(projection.stagedRootPath, isDirectory: true)
@@ -569,6 +551,11 @@ public enum WorkspaceSyncer {
                 }
             }
         }
+
+        let usageURL = serviceOutputRoot.appendingPathComponent(ClaudeCodePluginBundle.usageFileName, isDirectory: false)
+        try ClaudeCodePluginBundle
+            .usageDocument(pluginRootPath: serviceOutputRoot.path)
+            .write(to: usageURL, atomically: true, encoding: .utf8)
     }
 
     private static func mergeDirectoryContentsIfPresent(from sourceURL: URL, to destinationURL: URL) throws {
@@ -749,15 +736,4 @@ private struct ResolvedConnectionTarget: Codable {
         case resolvedURL = "resolved_url"
         case source
     }
-}
-
-// MARK: - Native MCP Project Config (.mcp.json)
-
-private struct MCPProjectConfig: Codable {
-    var mcpServers: [String: MCPProjectServerEntry]
-}
-
-private struct MCPProjectServerEntry: Codable {
-    var type: String
-    var url: String
 }

@@ -78,7 +78,6 @@ let package = Package(
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "Containerization", package: "containerization"),
                 .product(name: "ContainerizationExtras", package: "containerization"),
-                .product(name: "SocketForwarder", package: "container"),
             ]
         ),
         .target(

@@ -15,6 +15,8 @@ public protocol AgentRunner: Sendable {
 /// Context passed to the runner for each send.
 public struct AgentRunnerContext: Sendable {
     public var serviceID: String
+    /// Absolute path to the generated Claude Code plugin root for this agent.
+    public var pluginRootPath: String?
     /// Absolute path to `.mcp.json` for the agent's MCP connections.
     public var mcpConfigPath: String?
     /// Absolute path to the agent's execution directory (project root).
@@ -27,12 +29,14 @@ public struct AgentRunnerContext: Sendable {
 
     public init(
         serviceID: String,
+        pluginRootPath: String? = nil,
         mcpConfigPath: String? = nil,
         executionDirectory: String? = nil,
         skillOverlayPath: String? = nil,
         conversationID: String? = nil
     ) {
         self.serviceID = serviceID
+        self.pluginRootPath = pluginRootPath
         self.mcpConfigPath = mcpConfigPath
         self.executionDirectory = executionDirectory
         self.skillOverlayPath = skillOverlayPath

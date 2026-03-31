@@ -196,17 +196,28 @@ public enum AIBWorkspaceManager {
         var workspace = try loadWorkspace(workspaceRoot: workspaceRoot)
         let rootURL = URL(fileURLWithPath: workspaceRoot).standardizedFileURL
 
-        guard let index = workspace.repos.firstIndex(where: { $0.path == path }) else {
-            throw ConfigError("Repository not found in workspace", metadata: ["path": path])
+        let repoIndex: Int
+        if let existingIndex = workspace.repos.firstIndex(where: { $0.path == path }) {
+            repoIndex = existingIndex
+        } else {
+            // Repo discovered by filesystem scan but not yet in workspace.yaml — add it now
+            let repoURL = URL(fileURLWithPath: path, relativeTo: rootURL).standardizedFileURL
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: repoURL.path, isDirectory: &isDir), isDir.boolValue else {
+                throw ConfigError("Repository directory not found", metadata: ["path": path])
+            }
+            let inspected = WorkspaceDiscovery.inspectSingleRepo(at: repoURL, workspaceRoot: rootURL)
+            workspace.repos.append(inspected)
+            repoIndex = workspace.repos.count - 1
         }
 
-        let resolvedURL = URL(fileURLWithPath: workspace.repos[index].path, relativeTo: rootURL).standardizedFileURL
-        let namespace = workspace.repos[index].namespace
+        let resolvedURL = URL(fileURLWithPath: workspace.repos[repoIndex].path, relativeTo: rootURL).standardizedFileURL
+        let namespace = workspace.repos[repoIndex].namespace
         let allDetections = RuntimeAdapterRegistry.detectAll(repoURL: resolvedURL)
         let hasMultipleRuntimes = allDetections.count > 1
 
         // Merge into existing services
-        var services = workspace.repos[index].services ?? []
+        var services = workspace.repos[repoIndex].services ?? []
         let existingIDs = Set(services.map(\.id))
 
         for runtime in runtimes {
@@ -241,8 +252,8 @@ public enum AIBWorkspaceManager {
             ))
         }
 
-        workspace.repos[index].services = services
-        workspace.repos[index].status = .discoverable
+        workspace.repos[repoIndex].services = services
+        workspace.repos[repoIndex].status = .discoverable
 
         try saveWorkspace(workspace, workspaceRoot: workspaceRoot)
         let syncResult = try WorkspaceSyncer.sync(workspaceRoot: workspaceRoot, workspace: workspace)
@@ -819,11 +830,28 @@ public enum AIBWorkspaceManager {
     private static func ensureTargetTemplates(workspaceRoot: String) throws {
         let files: [(String, String)] = [
             (
+                ".aib/targets/local.yaml",
+                """
+                version: 1
+                target: local
+                buildMode: convenience
+                # Local development defaults to convenience mode for fast host execution.
+                # Switch to strict when you need Cloud Run-aligned containerized validation.
+                # For private Git dependencies, add sourceCredentials entries here.
+                # If the SSH key is passphrase-protected, set localPrivateKeyPassphraseEnv
+                # and provide that environment variable when launching AIB.
+                defaults:
+                  region: local
+                  auth: private
+                """
+            ),
+            (
                 ".aib/targets/gcp-cloudrun.yaml",
                 """
                 version: 1
                 target: gcp-cloudrun
                 buildBackend: auto
+                buildMode: strict
                 defaults:
                   region: us-central1
                   auth: private

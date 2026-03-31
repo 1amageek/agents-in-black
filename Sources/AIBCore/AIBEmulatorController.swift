@@ -1,5 +1,6 @@
 import AIBConfig
 import AIBGateway
+import AIBRuntimeCore
 import AIBSupervisor
 import AIBWorkspace
 import Darwin
@@ -171,26 +172,6 @@ public final class AIBEmulatorController {
                     "gateway_port": "\(gatewayPort)"
                 ]
             )
-            let loaded = try AIBRuntimeCoreService.resolveWorkspaceConfig(
-                workspaceRoot: workspaceRoot,
-                gatewayPort: gatewayPort
-            )
-            for warning in loaded.warnings {
-                logger.warning("Config warning", metadata: ["warning": "\(warning)"])
-            }
-
-            let gatewayControl = GatewayControl()
-            let gateway = DevGateway(gatewayConfig: loaded.config.gateway, control: gatewayControl, logger: logger)
-            try await gateway.start()
-
-            let configProvider: ConfigProvider = { @Sendable in
-                try AIBRuntimeCoreService.resolveWorkspaceConfig(
-                    workspaceRoot: workspaceRoot,
-                    gatewayPort: gatewayPort
-                )
-            }
-            // Reuse the existing process controller (and its vmnet network) across restarts.
-            // Create a new one only on first start or after explicit teardown.
             let pc: ContainerProcessController
             if let existing = self.processController {
                 pc = existing
@@ -202,27 +183,60 @@ public final class AIBEmulatorController {
             }
             emit(.kernelDownloadStarted(pc.setupProgress))
 
+            let loaded = try await AIBRuntimeCoreService.resolvePreparedWorkspaceConfig(
+                workspaceRoot: workspaceRoot,
+                gatewayPort: gatewayPort,
+                processController: pc,
+                logger: logger
+            )
+            for warning in loaded.warnings {
+                logger.warning("Config warning", metadata: ["warning": "\(warning)"])
+            }
+
+            let gatewayControl = GatewayControl()
+            let gateway = DevGateway(gatewayConfig: loaded.config.gateway, control: gatewayControl, logger: logger)
+            try await gateway.start()
+
+            let preparedConfigCache = PreparedConfigCache(initial: loaded)
+            let configLogger = logger
+            let configProvider: ConfigProvider = { @Sendable in
+                if let cached = await preparedConfigCache.takeInitial() {
+                    return cached
+                }
+                return try await AIBRuntimeCoreService.resolvePreparedWorkspaceConfig(
+                    workspaceRoot: workspaceRoot,
+                    gatewayPort: gatewayPort,
+                    processController: pc,
+                    logger: configLogger
+                )
+            }
+
             // Register local handlers for agent services so requests are processed
             // by Claude Code CLI (subscription auth) instead of the container.
             for service in loaded.config.services where service.kind == .agent {
-                let sanitizedID = service.id.rawValue.replacingOccurrences(of: "/", with: "__")
-                let mcpConfigPath = URL(fileURLWithPath: workspaceRoot)
-                    .appendingPathComponent(".aib/generated/runtime/mcp/\(sanitizedID)/.mcp.json")
-                    .standardizedFileURL.path
+                let resolvedPluginRootPath = ClaudeCodePluginBundle.pluginRootURL(
+                    baseURL: URL(fileURLWithPath: workspaceRoot)
+                        .appendingPathComponent(".aib/generated/runtime/plugins", isDirectory: true),
+                    serviceID: service.id.rawValue
+                ).path
+                let pluginRootPath = FileManager.default.fileExists(atPath: resolvedPluginRootPath)
+                    ? resolvedPluginRootPath
+                    : nil
                 let executionDirectory = service.cwd
-                let skillOverlayPath = URL(fileURLWithPath: workspaceRoot)
-                    .appendingPathComponent(".aib/generated/runtime/skills/\(sanitizedID)")
-                    .standardizedFileURL.path
                 let handler = LocalAgentHandler.makeHandler(
                     serviceID: service.id,
-                    mcpConfigPath: FileManager.default.fileExists(atPath: mcpConfigPath) ? mcpConfigPath : nil,
+                    pluginRootPath: pluginRootPath,
                     executionDirectory: executionDirectory,
-                    skillOverlayPath: FileManager.default.fileExists(atPath: skillOverlayPath) ? skillOverlayPath : nil,
                     model: nil,
                     logger: logger
                 )
                 await gatewayControl.registerLocalHandler(serviceID: service.id, handler: handler)
-                logger.info("Registered local Claude Code handler", metadata: ["service_id": "\(service.id.rawValue)"])
+                var metadata: Logger.Metadata = ["service_id": "\(service.id.rawValue)"]
+                if let pluginRootPath {
+                    metadata["plugin_root"] = "\(pluginRootPath)"
+                    metadata["claude_plugin_command"] = "\(ClaudeCodePluginBundle.manualLaunchCommand(pluginRootPath: pluginRootPath))"
+                }
+                logger.info("Registered local Claude Code handler", metadata: metadata)
             }
 
             let supervisor = DevSupervisor(
@@ -441,5 +455,18 @@ public final class AIBEmulatorController {
             timer.cancel()
         }
         inactiveTimers.removeAll()
+    }
+}
+
+private actor PreparedConfigCache {
+    private var initial: LoadedConfig?
+
+    init(initial: LoadedConfig) {
+        self.initial = initial
+    }
+
+    func takeInitial() -> LoadedConfig? {
+        defer { initial = nil }
+        return initial
     }
 }

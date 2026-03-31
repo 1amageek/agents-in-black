@@ -7,8 +7,8 @@ struct AppSettingsView: View {
 
     var body: some View {
         Form {
-            Section("Environment Variables") {
-                Text("Injected into all service processes started by the emulator.")
+            Section("Advanced Environment Variables") {
+                Text("Injected into all service processes started by the emulator. Use Target Settings for provider-specific source auth such as local SSH key passphrases.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
 

@@ -1,3 +1,4 @@
+import AIBRuntimeCore
 import Foundation
 import Logging
 import Synchronization
@@ -106,14 +107,15 @@ public struct DefaultDeployExecutor: DeployExecuting {
             let buildContext = URL(fileURLWithPath: workspaceRoot)
                 .appendingPathComponent(service.repoPath)
                 .path
-            var copyInstructions: [String] = []
+            var injectedDockerfileInstructions: [String] = []
+            var appendedDockerfileInstructions: [String] = []
 
             if let mcpConfig = service.artifacts.mcpConnectionConfig {
                 let connectionsFileName = ".aib-connections.json"
                 let targetPath = URL(fileURLWithPath: buildContext)
                     .appendingPathComponent(connectionsFileName)
                 try mcpConfig.content.write(to: targetPath, options: .atomic)
-                copyInstructions.append("COPY \(connectionsFileName) ./")
+                injectedDockerfileInstructions.append("COPY \(connectionsFileName) ./")
             }
 
             let projectedArtifacts = service.artifacts.skillConfigs + service.artifacts.executionDirectoryConfigs
@@ -122,14 +124,24 @@ public struct DefaultDeployExecutor: DeployExecuting {
                     projectedArtifacts,
                     buildContext: buildContext
                 )
-                copyInstructions.append(contentsOf: Self.copyInstructionsForStagedRuntimeRoots(stagedRoots))
+                injectedDockerfileInstructions.append(contentsOf: Self.copyInstructionsForStagedRuntimeRoots(stagedRoots))
             }
 
-            if !copyInstructions.isEmpty {
+            if let sourceAuthInstructions = try await stageCloudBuildSourceAuthIfNeeded(
+                service: service,
+                buildContext: buildContext,
+                logHandler: logHandler
+            ) {
+                injectedDockerfileInstructions.append(contentsOf: sourceAuthInstructions.injectedInstructions)
+                appendedDockerfileInstructions.append(contentsOf: sourceAuthInstructions.appendedInstructions)
+            }
+
+            if !injectedDockerfileInstructions.isEmpty || !appendedDockerfileInstructions.isEmpty {
                 dockerfilePath = try Self.patchedDockerfilePath(
                     dockerfilePath: dockerfilePath,
                     buildContext: buildContext,
-                    copyInstructions: copyInstructions
+                    insertedInstructions: injectedDockerfileInstructions,
+                    appendedInstructions: appendedDockerfileInstructions
                 )
             }
 
@@ -603,16 +615,29 @@ public struct DefaultDeployExecutor: DeployExecuting {
     private static func patchedDockerfilePath(
         dockerfilePath: String,
         buildContext: String,
-        copyInstructions: [String]
+        insertedInstructions: [String],
+        appendedInstructions: [String]
     ) throws -> String {
         let originalContent = try String(contentsOfFile: dockerfilePath, encoding: .utf8)
-        let missingInstructions = copyInstructions.filter { !originalContent.contains($0) }
-        guard !missingInstructions.isEmpty else { return dockerfilePath }
+        let missingInsertedInstructions = insertedInstructions.filter { !originalContent.contains($0) }
+        let missingAppendedInstructions = appendedInstructions.filter { !originalContent.contains($0) }
+        guard !missingInsertedInstructions.isEmpty || !missingAppendedInstructions.isEmpty else { return dockerfilePath }
 
         let patchedPath = URL(fileURLWithPath: buildContext)
             .appendingPathComponent("Dockerfile.aib")
             .path(percentEncoded: false)
-        let patchedContent = originalContent + "\n" + missingInstructions.joined(separator: "\n") + "\n"
+        var lines = originalContent.components(separatedBy: "\n")
+        if !missingInsertedInstructions.isEmpty,
+           let fromIndex = lines.firstIndex(where: { $0.trimmingCharacters(in: .whitespaces).uppercased().hasPrefix("FROM ") })
+        {
+            lines.insert(contentsOf: missingInsertedInstructions, at: fromIndex + 1)
+        } else if !missingInsertedInstructions.isEmpty {
+            lines.append(contentsOf: missingInsertedInstructions)
+        }
+        if !missingAppendedInstructions.isEmpty {
+            lines.append(contentsOf: missingAppendedInstructions)
+        }
+        let patchedContent = lines.joined(separator: "\n") + "\n"
         try patchedContent.write(toFile: patchedPath, atomically: true, encoding: .utf8)
         return patchedPath
     }
@@ -658,6 +683,7 @@ public struct DefaultDeployExecutor: DeployExecuting {
     ) {
         let cleanupTargets = [
             "__aib_deploy",
+            ".aib-build-auth",
             ".aib-connections.json",
             "Dockerfile.aib",
         ]
@@ -679,6 +705,93 @@ public struct DefaultDeployExecutor: DeployExecuting {
                 ))
             }
         }
+    }
+
+    private func stageCloudBuildSourceAuthIfNeeded(
+        service: AIBDeployServicePlan,
+        buildContext: String,
+        logHandler: @escaping @Sendable (AIBDeployLogEntry) -> Void
+    ) async throws -> SourceAuthDockerfileInstructions? {
+        guard !service.sourceDependencies.isEmpty else { return nil }
+        guard let credential = service.sourceCredential else {
+            throw AIBDeployError(
+                phase: "build",
+                message: "Missing resolved cloud source credential for service '\(service.id)'."
+            )
+        }
+        guard let privateKeySecret = credential.cloudPrivateKeySecret, !privateKeySecret.isEmpty else {
+            throw AIBDeployError(
+                phase: "build",
+                message: "Cloud source credential for service '\(service.id)' is missing cloudPrivateKeySecret."
+            )
+        }
+
+        let authRoot = URL(fileURLWithPath: buildContext).appendingPathComponent(".aib-build-auth")
+        let fileManager = FileManager.default
+        if fileManager.fileExists(atPath: authRoot.path(percentEncoded: false)) {
+            try fileManager.removeItem(at: authRoot)
+        }
+        try fileManager.createDirectory(at: authRoot, withIntermediateDirectories: true)
+
+        let privateKey = try await fetchSecretValue(secretName: privateKeySecret)
+        try privateKey.write(
+            to: authRoot.appendingPathComponent("id_ed25519"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let knownHosts: String
+        if let cloudKnownHostsSecret = credential.cloudKnownHostsSecret, !cloudKnownHostsSecret.isEmpty {
+            knownHosts = try await fetchSecretValue(secretName: cloudKnownHostsSecret)
+        } else {
+            knownHosts = AIBSourceDependencyAnalyzer.defaultKnownHosts(for: credential.host) ?? ""
+        }
+        if !knownHosts.isEmpty {
+            try knownHosts.write(
+                to: authRoot.appendingPathComponent("known_hosts"),
+                atomically: true,
+                encoding: .utf8
+            )
+        }
+
+        logHandler(AIBDeployLogEntry(
+            level: .info,
+            serviceID: service.id,
+            step: .dockerBuild,
+            message: "Materialized explicit source auth for \(credential.host)"
+        ))
+
+        return SourceAuthDockerfileInstructions(
+            injectedInstructions: [
+                "COPY .aib-build-auth/ /tmp/.aib-build-auth/",
+                "RUN mkdir -p /root/.ssh && cp /tmp/.aib-build-auth/id_ed25519 /root/.ssh/id_ed25519 && chmod 700 /root/.ssh && chmod 600 /root/.ssh/id_ed25519 && if [ -f /tmp/.aib-build-auth/known_hosts ]; then cp /tmp/.aib-build-auth/known_hosts /root/.ssh/known_hosts && chmod 644 /root/.ssh/known_hosts; fi",
+                "ENV GIT_SSH_COMMAND=\"ssh -i /root/.ssh/id_ed25519 -o UserKnownHostsFile=/root/.ssh/known_hosts -o StrictHostKeyChecking=yes\"",
+            ],
+            appendedInstructions: [
+                "RUN rm -rf /root/.ssh /tmp/.aib-build-auth || true",
+            ]
+        )
+    }
+
+    private func fetchSecretValue(secretName: String) async throws -> String {
+        let result = try await processRunner.run(
+            arguments: [
+                "bash", "-lc",
+                "gcloud secrets versions access latest --secret=\(shellQuoted(secretName))",
+            ],
+            outputHandler: { _ in }
+        )
+        guard result.exitCode == 0 else {
+            throw AIBDeployError(
+                phase: "build",
+                message: "Failed to fetch source auth secret '\(secretName)'."
+            )
+        }
+        return result.stdout
+    }
+
+    private func shellQuoted(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
     private static func detectLogLevel(_ text: String) -> Logger.Level {
@@ -782,6 +895,11 @@ public struct DefaultDeployExecutor: DeployExecuting {
         default: return 1
         }
     }
+}
+
+private struct SourceAuthDockerfileInstructions: Sendable {
+    let injectedInstructions: [String]
+    let appendedInstructions: [String]
 }
 
 private struct CommandOutputProgressState: Sendable {

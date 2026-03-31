@@ -13,9 +13,8 @@ public enum LocalAgentHandler {
     /// Build a local handler for an agent service.
     public static func makeHandler(
         serviceID: ServiceID,
-        mcpConfigPath: String?,
+        pluginRootPath: String?,
         executionDirectory: String?,
-        skillOverlayPath: String?,
         model: String?,
         logger: Logger
     ) -> LocalRequestHandler {
@@ -30,15 +29,18 @@ public enum LocalAgentHandler {
             case ("GET", "/health"), ("GET", "/health/live"), ("GET", "/health/ready"):
                 return handleHealth()
 
+            case ("GET", "/.well-known/agent.json"):
+                log.info("[local] \(request.method) \(path) → Claude Code (Agent Card)", metadata: ["service_id": "\(serviceIDString)"])
+                return handleAgentCard(serviceID: serviceIDString)
+
             case ("POST", "/agent/chat"):
                 log.info("[local] \(request.method) \(path) → Claude Code", metadata: ["service_id": "\(serviceIDString)"])
                 return try await handleChat(
                     request: request,
                     runner: runner,
                     serviceID: serviceIDString,
-                    mcpConfigPath: mcpConfigPath,
+                    pluginRootPath: pluginRootPath,
                     executionDirectory: executionDirectory,
-                    skillOverlayPath: skillOverlayPath,
                     logger: log
                 )
 
@@ -48,9 +50,8 @@ public enum LocalAgentHandler {
                     request: request,
                     runner: runner,
                     serviceID: serviceIDString,
-                    mcpConfigPath: mcpConfigPath,
-                    executionDirectory: executionDirectory,
-                    skillOverlayPath: skillOverlayPath
+                    pluginRootPath: pluginRootPath,
+                    executionDirectory: executionDirectory
                 )
 
             default:
@@ -70,15 +71,49 @@ public enum LocalAgentHandler {
         )
     }
 
+    private static func handleAgentCard(serviceID: String) -> LocalResponse {
+        let card = A2AAgentCard(
+            name: serviceID,
+            description: "Local Claude Code agent",
+            capabilities: A2ACapabilities(streaming: false, pushNotifications: false),
+            defaultInputModes: ["text"],
+            defaultOutputModes: ["text"],
+            skills: [
+                A2ASkill(
+                    id: serviceID,
+                    name: serviceID,
+                    description: "Local Claude Code-backed agent"
+                ),
+            ]
+        )
+
+        do {
+            let body = try JSONEncoder().encode(card)
+            return LocalResponse(
+                statusCode: 200,
+                headers: [("Content-Type", "application/json")],
+                body: body
+            )
+        } catch {
+            let fallback = """
+            {"error":"failed_to_encode_agent_card","service_id":"\(serviceID)"}
+            """
+            return LocalResponse(
+                statusCode: 500,
+                headers: [("Content-Type", "application/json")],
+                body: Data(fallback.utf8)
+            )
+        }
+    }
+
     // MARK: - Chat
 
     private static func handleChat(
         request: LocalRequest,
         runner: ClaudeCodeAgentRunner,
         serviceID: String,
-        mcpConfigPath: String?,
+        pluginRootPath: String?,
         executionDirectory: String?,
-        skillOverlayPath: String?,
         logger: Logger
     ) async throws -> LocalResponse {
         guard let json = try? JSONSerialization.jsonObject(with: request.body) as? [String: Any],
@@ -93,14 +128,15 @@ public enum LocalAgentHandler {
 
         // Inject X-Context header into MCP config when context is provided
         let requestContext = json["context"] as? [String: Any]
+        let baseMCPConfigPath = pluginRootPath.map { ClaudeCodePluginBundle.mcpConfigPath(pluginRootPath: $0) }
         let effectiveMCPConfigPath: String?
         var tempMCPConfigURL: URL?
-        if let requestContext, let basePath = mcpConfigPath {
+        if let requestContext, let basePath = baseMCPConfigPath {
             let (path, url) = try injectContextIntoMCPConfig(basePath: basePath, context: requestContext)
             effectiveMCPConfigPath = path
             tempMCPConfigURL = url
         } else {
-            effectiveMCPConfigPath = mcpConfigPath
+            effectiveMCPConfigPath = baseMCPConfigPath
         }
 
         defer {
@@ -111,9 +147,9 @@ public enum LocalAgentHandler {
 
         let context = AgentRunnerContext(
             serviceID: serviceID,
+            pluginRootPath: pluginRootPath,
             mcpConfigPath: effectiveMCPConfigPath,
-            executionDirectory: executionDirectory,
-            skillOverlayPath: skillOverlayPath
+            executionDirectory: executionDirectory
         )
 
         // Collect SSE events
@@ -181,9 +217,8 @@ public enum LocalAgentHandler {
         request: LocalRequest,
         runner: ClaudeCodeAgentRunner,
         serviceID: String,
-        mcpConfigPath: String?,
+        pluginRootPath: String?,
         executionDirectory: String?,
-        skillOverlayPath: String?
     ) async throws -> LocalResponse {
         guard let json = try? JSONSerialization.jsonObject(with: request.body) as? [String: Any] else {
             return jsonRPCError(id: nil, code: -32700, message: "Parse error")
@@ -213,9 +248,9 @@ public enum LocalAgentHandler {
 
         let context = AgentRunnerContext(
             serviceID: serviceID,
-            mcpConfigPath: mcpConfigPath,
-            executionDirectory: executionDirectory,
-            skillOverlayPath: skillOverlayPath
+            pluginRootPath: pluginRootPath,
+            mcpConfigPath: pluginRootPath.map { ClaudeCodePluginBundle.mcpConfigPath(pluginRootPath: $0) },
+            executionDirectory: executionDirectory
         )
 
         var textParts: [String] = []

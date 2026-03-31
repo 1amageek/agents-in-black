@@ -10,6 +10,7 @@ struct DeployFailedView: View {
     @State private var appleContainerInstallMessage: String?
     @State private var appleContainerInstallFailed: Bool = false
     @State private var updatedReport: PreflightReport?
+    @State private var copiedError: Bool = false
 
     var body: some View {
         ScrollView {
@@ -36,11 +37,27 @@ struct DeployFailedView: View {
                                 .font(.caption.monospaced())
                         }
                     }
-                    Text(error.message)
-                        .font(.body)
-                        .padding(12)
-                        .background(Color(.textBackgroundColor))
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text("Error")
+                                .font(.caption.bold())
+                            Spacer()
+                            Button {
+                                copyErrorToPasteboard()
+                            } label: {
+                                Label(copiedError ? "Copied" : "Copy Error", systemImage: copiedError ? "checkmark" : "doc.on.doc")
+                                    .font(.caption)
+                            }
+                            .buttonStyle(.borderless)
+                        }
+
+                        Text(error.message)
+                            .font(.body)
+                            .textSelection(.enabled)
+                    }
+                    .padding(12)
+                    .background(Color(.textBackgroundColor))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
                 }
                 .frame(maxWidth: 500)
 
@@ -233,6 +250,31 @@ struct DeployFailedView: View {
                 }
                 .padding(.leading, 24)
             }
+        }
+    }
+
+    private var formattedErrorText: String {
+        var lines = ["Phase: \(error.phase)"]
+        if let serviceID = error.serviceID, !serviceID.isEmpty {
+            lines.append("Service: \(serviceID)")
+        }
+        lines.append("")
+        lines.append(error.message)
+        return lines.joined(separator: "\n")
+    }
+
+    private func copyErrorToPasteboard() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(formattedErrorText, forType: .string)
+        copiedError = true
+
+        Task { @MainActor in
+            do {
+                try await Task.sleep(for: .seconds(1.5))
+            } catch {
+                return
+            }
+            copiedError = false
         }
     }
 

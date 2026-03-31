@@ -44,6 +44,24 @@ Status: Draft (Spec Freeze for v1 implementation)
 
 備考:
 - 本仕様は `Cloud Run-Accurate` ではなく `Cloud Run-Aligned` を名乗る。
+- ローカル `target: local` では、開発体験を優先する `convenience` mode を許容する。
+
+## 2.3 ローカル実行モード
+
+`local` target では 2 つの build mode を持つ。
+
+- `strict`: Cloud Run-aligned を優先する containerized 実行
+- `convenience`: 開発速度を優先する host-process 実行
+
+運用方針:
+
+- `local` の既定は `convenience`
+- Cloud Run 互換性の確認が必要な場合のみ `strict` を選ぶ
+
+補足:
+
+- `convenience` は Cloud Run-aligned ではないため、警告ログを出してよい
+- `strict` は性能よりも再現性を優先する
 
 ## 3. 全体アーキテクチャ
 
@@ -82,6 +100,19 @@ Status: Draft (Spec Freeze for v1 implementation)
 - `PORT` 環境変数を優先して bind することを推奨
 - ローカル bind は既定で `127.0.0.1`
 - `SIGTERM` 受信時は graceful shutdown を試みる
+
+### 4.2 Agent サービスのローカル契約
+
+`kind: agent` のローカル実行は、通常の service container ではなく Claude Code CLI
+を使う local handler を優先する。
+
+- `agent` は local target で container 起動対象にしない
+- Agent Card (`/.well-known/agent.json`) は local handler が返す
+- MCP / その他 HTTP service は build mode に応じて host process または container で実行する
+- Claude Code 向け artifact は `.aib/generated/runtime/plugins/{agent-id}/` に生成する
+- plugin root は `.claude-plugin/plugin.json` を含み、Claude Code には `--plugin-dir` で渡す
+- plugin root には `USE_WITH_CLAUDE.md` を生成し、外部 Claude Code session からの利用コマンドを明示する
+- plugin bundle は static package、`binding.json` は local / remote で別 render する
 
 ## 5. 設定ソース（workspace.yaml）
 

@@ -41,8 +41,8 @@ struct AgentsInBlackApp: App {
                 .keyboardShortcut("i", modifiers: [.command, .option])
             }
 
-            CommandMenu("Cloud") {
-                Button("Cloud Settings\u{2026}") {
+            CommandMenu("Target") {
+                Button("Target Settings\u{2026}") {
                     model.openCloudSettings()
                 }
                 .disabled(model.workspace == nil)

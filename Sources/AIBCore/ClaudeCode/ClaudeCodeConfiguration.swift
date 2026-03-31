@@ -33,6 +33,10 @@ public struct ClaudeCodeConfiguration: Sendable {
     /// Additional directories to allow tool access to (passed as --add-dir).
     public var additionalDirectories: [URL]
 
+    /// Plugin roots to load for this session (passed as --plugin-dir).
+    /// Each path must point to a directory containing `.claude-plugin/plugin.json`.
+    public var pluginDirectories: [URL]
+
     /// Additional CLI flags passed verbatim.
     public var additionalFlags: [String]
 
@@ -54,6 +58,7 @@ public struct ClaudeCodeConfiguration: Sendable {
         permissionMode: String? = nil,
         dangerouslySkipPermissions: Bool = true,
         additionalDirectories: [URL] = [],
+        pluginDirectories: [URL] = [],
         additionalFlags: [String] = [],
         mcpConfigPath: String? = nil,
         additionalEnvironment: [String: String] = [:]
@@ -68,6 +73,7 @@ public struct ClaudeCodeConfiguration: Sendable {
         self.permissionMode = permissionMode
         self.dangerouslySkipPermissions = dangerouslySkipPermissions
         self.additionalDirectories = additionalDirectories
+        self.pluginDirectories = pluginDirectories
         self.additionalFlags = additionalFlags
         self.mcpConfigPath = mcpConfigPath
         self.additionalEnvironment = additionalEnvironment
@@ -128,6 +134,10 @@ public struct ClaudeCodeConfiguration: Sendable {
 
         if !additionalDirectories.isEmpty {
             args += ["--add-dir"] + additionalDirectories.map(\.path)
+        }
+
+        for pluginDirectory in pluginDirectories {
+            args += ["--plugin-dir", pluginDirectory.path]
         }
 
         args += additionalFlags

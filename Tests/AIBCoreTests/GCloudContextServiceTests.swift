@@ -51,7 +51,7 @@ func gcloudContextFetchesAccountsAndProjects() async throws {
             stdout: "active@example.com",
             stderr: ""
         ),
-        "gcloud projects list --format=json(projectId,name) 2>/dev/null": .init(
+        "gcloud projects list --format='json(projectId,name)' 2>/dev/null": .init(
             exitCode: 0,
             stdout: """
             [

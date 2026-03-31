@@ -98,6 +98,7 @@ final class AgentsInBlackAppModel {
     private var deployEventsTask: Task<Void, Never>?
     private let configStore: DeployTargetConfigStore = DefaultDeployTargetConfigStore()
     private let gcloudContextService = GCloudContextService()
+    private let targetSourceAuthKeychainStore = TargetSourceAuthKeychainStore()
 
     // MARK: - Deploy Environment Status
     var buildBackendCheckResult: PreflightCheckResult?
@@ -665,7 +666,11 @@ final class AgentsInBlackAppModel {
             showUtilityPanel = true
         }
         do {
-            let additionalEnv = (UserDefaults.standard.dictionary(forKey: AppSettingsKey.userEnvironmentVariables) as? [String: String]) ?? [:]
+            let userEnvironment = (UserDefaults.standard.dictionary(forKey: AppSettingsKey.userEnvironmentVariables) as? [String: String]) ?? [:]
+            let targetEnvironment = try resolvedTargetSettingsEnvironment(workspaceRoot: workspace.rootURL.path)
+            let additionalEnv = userEnvironment.merging(targetEnvironment) { _, targetValue in
+                targetValue
+            }
             let result = try await emulatorController.start(
                 workspaceURL: workspace.rootURL,
                 gatewayPort: effectiveGatewayPort,
@@ -704,6 +709,15 @@ final class AgentsInBlackAppModel {
                 serviceSelectionID: nil,
                 repoID: nil
             )
+        }
+    }
+
+    private func resolvedTargetSettingsEnvironment(workspaceRoot: String) throws -> [String: String] {
+        let localTargetConfig = try configStore.load(workspaceRoot: workspaceRoot, providerID: "local")
+        return try AIBLocalSourceAuthEnvironmentResolver.resolvedSourceAuthEnvironment(
+            targetConfig: localTargetConfig
+        ) { [targetSourceAuthKeychainStore] environmentKey in
+            try targetSourceAuthKeychainStore.passphrase(for: environmentKey)
         }
     }
 
@@ -930,22 +944,17 @@ final class AgentsInBlackAppModel {
 
     /// Build the runner context for a local session.
     private func makeRunnerContext(for service: AIBServiceModel) -> AgentRunnerContext {
-        let sanitizedID = service.namespacedID.replacingOccurrences(of: "/", with: "__")
-        let mcpConfigPath: String? = workspace.map { ws in
-            ws.rootURL
-                .appendingPathComponent(".aib/generated/runtime/mcp/\(sanitizedID)/.mcp.json")
-                .standardizedFileURL.path
-        }
-        let skillOverlayPath: String? = workspace.map { ws in
-            ws.rootURL
-                .appendingPathComponent(".aib/generated/runtime/skills/\(sanitizedID)")
-                .standardizedFileURL.path
+        let pluginRootPath: String? = workspace.map { ws in
+            AIBRuntimeCoreService.localClaudeCodePluginRootPath(
+                workspaceRoot: ws.rootURL.path,
+                serviceID: service.namespacedID
+            )
         }
         return AgentRunnerContext(
             serviceID: service.id,
-            mcpConfigPath: mcpConfigPath,
+            pluginRootPath: pluginRootPath,
             executionDirectory: service.executionDirectoryPath,
-            skillOverlayPath: skillOverlayPath
+            skillOverlayPath: nil
         )
     }
 

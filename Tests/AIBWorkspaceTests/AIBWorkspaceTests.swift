@@ -73,6 +73,74 @@ private struct MockDeploymentProvider: DeploymentProvider {
     }
 }
 
+private struct MockCloudRunDeploymentProvider: DeploymentProvider {
+    let providerID: String = "gcp-cloudrun"
+    let displayName: String = "Mock Cloud Run"
+
+    func preflightCheckers() -> [any PreflightChecker] { [] }
+    func preflightDependencies() -> [PreflightCheckID: [PreflightCheckID]] { [:] }
+    func extractDetectedConfig(from report: PreflightReport) -> [String: String] { [:] }
+    func validateTargetConfig(_ config: AIBDeployTargetConfig) throws {}
+    func deployedServiceName(from namespacedID: String) -> String {
+        "mock-\(namespacedID.replacingOccurrences(of: "/", with: "-"))"
+    }
+    func resolveURL(
+        serviceRef: String,
+        region: String,
+        path: String?,
+        serviceNameMap: [String: String],
+        existingServiceURLs: [String: String]
+    ) -> String {
+        "https://example.invalid\(path ?? "")"
+    }
+    func generateDeployConfig(service: AIBDeployServicePlan) -> String {
+        "service: \(service.deployedServiceName)\n"
+    }
+    func registryImageTag(
+        service: AIBDeployServicePlan,
+        targetConfig: AIBDeployTargetConfig
+    ) -> String {
+        "mock/\(service.deployedServiceName):latest"
+    }
+    func registryAuthCommands(targetConfig: AIBDeployTargetConfig) -> [DeployCommand] { [] }
+    func buildBackendPreparationCommands(targetConfig: AIBDeployTargetConfig) -> [DeployCommand] { [] }
+    func ensureRegistryRepoCommands(
+        service: AIBDeployServicePlan,
+        targetConfig: AIBDeployTargetConfig
+    ) -> [DeployCommand] { [] }
+    func buildAndPushCommands(
+        imageTag: String,
+        dockerfilePath: String,
+        buildContext: String,
+        targetConfig: AIBDeployTargetConfig
+    ) -> [DeployCommand] { [] }
+    func deployCommands(
+        service: AIBDeployServicePlan,
+        imageTag: String,
+        targetConfig: AIBDeployTargetConfig,
+        secrets: [String: String]
+    ) -> [DeployCommand] { [] }
+    func authBindingCommands(
+        binding: AIBDeployAuthBinding,
+        targetConfig: AIBDeployTargetConfig
+    ) -> [DeployCommand] { [] }
+    func existingServiceURL(
+        serviceName: String,
+        targetConfig: AIBDeployTargetConfig
+    ) async -> String? { nil }
+    func existingEnvVarNames(
+        serviceName: String,
+        targetConfig: AIBDeployTargetConfig
+    ) async -> Set<String> { [] }
+    func parseDeployedURL(from output: String) -> String? { nil }
+    func authBindingMember(
+        sourceServiceName: String,
+        targetConfig: AIBDeployTargetConfig
+    ) -> String {
+        "serviceAccount:\(sourceServiceName)"
+    }
+}
+
 @Test(.timeLimit(.minutes(1)))
 func workspaceInitDiscoversRepos() throws {
     let root = FileManager.default.temporaryDirectory
@@ -111,7 +179,7 @@ func workspaceInitDiscoversRepos() throws {
 
     let discoverable = result.workspaceConfig.repos.first(where: { $0.name == "mcp-web" })
     #expect(discoverable?.status == .discoverable)
-    #expect(discoverable?.selectedCommand == ["npm", "run", "dev"])
+    #expect(discoverable?.selectedCommand == ["pnpm", "dev"])
 }
 
 @Test(.timeLimit(.minutes(1)))
@@ -276,21 +344,37 @@ func workspaceSyncWritesRuntimeConnectionArtifacts() throws {
     #expect(mcpServers.contains(where: { $0["service_ref"] as? String == "mcp-web/web" }))
     #expect(a2aAgents.contains(where: { $0["service_ref"] as? String == "agent-a/helper" }))
 
-    let mcpProjectConfig = root
-        .appendingPathComponent(".aib/generated/runtime/mcp")
-        .appendingPathComponent("agent-a__app/.mcp.json")
+    let pluginRoot = root
+        .appendingPathComponent(".aib/generated/runtime/plugins")
+        .appendingPathComponent("agent-a__app")
+    let pluginManifest = pluginRoot
+        .appendingPathComponent(".claude-plugin")
+        .appendingPathComponent("plugin.json")
+    #expect(FileManager.default.fileExists(atPath: pluginManifest.path))
+
+    let bindingConfig = pluginRoot.appendingPathComponent("binding.json")
+    let bindingData = try Data(contentsOf: bindingConfig)
+    let bindingDecoded = try JSONSerialization.jsonObject(with: bindingData) as? [String: Any]
+    let bindingServers = bindingDecoded?["servers"] as? [[String: Any]]
+    #expect(bindingServers?.contains(where: { $0["name"] as? String == "mcp-web-web" }) == true)
+
+    let mcpProjectConfig = pluginRoot.appendingPathComponent(".mcp.json")
     let mcpProjectData = try Data(contentsOf: mcpProjectConfig)
     let mcpProjectDecoded = try JSONSerialization.jsonObject(with: mcpProjectData) as? [String: Any]
     let mcpProjectServers = mcpProjectDecoded?["mcpServers"] as? [String: Any]
     #expect(mcpProjectServers?["mcp-web-web"] != nil)
+    let mcpWebConfig = mcpProjectServers?["mcp-web-web"] as? [String: Any]
+    #expect((mcpWebConfig?["url"] as? String)?.contains("http://localhost:9090") == true)
 
-    let claudeConfig = root
-        .appendingPathComponent(".aib/generated/runtime/mcp")
-        .appendingPathComponent("agent-a__app/.claude.json")
+    let claudeConfig = pluginRoot.appendingPathComponent(".claude.json")
     let claudeConfigData = try Data(contentsOf: claudeConfig)
     let claudeConfigDecoded = try JSONSerialization.jsonObject(with: claudeConfigData) as? [String: Any]
     let claudeServers = claudeConfigDecoded?["mcpServers"] as? [String: Any]
     #expect(claudeServers?["mcp-web-web"] != nil)
+
+    let usageDoc = pluginRoot.appendingPathComponent("USE_WITH_CLAUDE.md")
+    let usageText = try String(contentsOf: usageDoc, encoding: .utf8)
+    #expect(usageText.contains("claude --plugin-dir"))
 }
 
 @Test(.timeLimit(.minutes(1)))
@@ -387,13 +471,23 @@ func workspaceSyncWritesRuntimeSkillArtifacts() throws {
     #expect(syncResult.serviceCount == 1)
 
     let stagedRoot = root
-        .appendingPathComponent(".aib/generated/runtime/skills/agent-a__app")
+        .appendingPathComponent(".aib/generated/runtime/plugins/agent-a__app")
+    #expect(
+        FileManager.default.fileExists(
+            atPath: stagedRoot
+                .appendingPathComponent(".claude-plugin")
+                .appendingPathComponent("plugin.json")
+                .path
+        )
+    )
+    #expect(FileManager.default.fileExists(atPath: stagedRoot.appendingPathComponent(".mcp.json").path))
     #expect(FileManager.default.fileExists(atPath: stagedRoot.appendingPathComponent(".claude/settings.local.json").path))
     #expect(FileManager.default.fileExists(atPath: stagedRoot.appendingPathComponent(".claude/skills/manual/SKILL.md").path))
     #expect(FileManager.default.fileExists(atPath: stagedRoot.appendingPathComponent(".claude/skills/deploy/SKILL.md").path))
     #expect(FileManager.default.fileExists(atPath: stagedRoot.appendingPathComponent(".claude/skills/deploy/scripts/deploy.sh").path))
     #expect(FileManager.default.fileExists(atPath: stagedRoot.appendingPathComponent(".agents/skills/deploy/agents/openai.yaml").path))
     #expect(FileManager.default.fileExists(atPath: stagedRoot.appendingPathComponent("skills/deploy/SKILL.md").path))
+    #expect(FileManager.default.fileExists(atPath: stagedRoot.appendingPathComponent("USE_WITH_CLAUDE.md").path))
 }
 
 @MainActor
@@ -576,9 +670,9 @@ func runtimeAdapterRegistryDetectsNode() {
         let result = RuntimeAdapterRegistry.detect(repoURL: root)
         #expect(result.runtime == .node)
         #expect(result.framework == .express)
-        #expect(result.packageManager == .npm)
+        #expect(result.packageManager == .pnpm)
         #expect(result.candidates.count >= 1)
-        #expect(result.candidates.first?.argv == ["npm", "run", "dev"])
+        #expect(result.candidates.first?.argv == ["pnpm", "dev"])
     } catch {
         Issue.record("Adapter test setup failed: \(error)")
     }
@@ -1187,11 +1281,15 @@ func deployPlanProjectsAssignedSkillBundlesIntoRuntimeDirectories() async throws
     #expect(plan.services.count == 1)
     let service = try #require(plan.services.first)
     let skillPaths = Set(service.artifacts.skillConfigs.map(\.relativePath))
+    let pluginPaths = Set(service.artifacts.claudeCodePluginArtifacts.map(\.relativePath))
     let executionPaths = Set(service.artifacts.executionDirectoryConfigs.map(\.relativePath))
     #expect(skillPaths.contains("__aib_deploy/claude/skills/deploy/SKILL.md"))
     #expect(skillPaths.contains("__aib_deploy/claude/skills/deploy/scripts/deploy.sh"))
     #expect(skillPaths.contains("__aib_deploy/agents/skills/deploy/agents/openai.yaml"))
     #expect(skillPaths.contains("__aib_deploy/skills/deploy/SKILL.md"))
+    #expect(pluginPaths.contains(".claude-plugin/plugin.json"))
+    #expect(pluginPaths.contains(".mcp.json"))
+    #expect(pluginPaths.contains("__aib_deploy/claude/skills/deploy/SKILL.md"))
     #expect(executionPaths.contains("__aib_deploy/claude/commands/deploy.md"))
     #expect(executionPaths.contains("__aib_deploy/root/CLAUDE.md"))
 
@@ -1203,7 +1301,7 @@ func deployPlanProjectsAssignedSkillBundlesIntoRuntimeDirectories() async throws
         .appendingPathComponent("deploy")
         .appendingPathComponent("services")
         .appendingPathComponent(service.deployedServiceName)
-        .appendingPathComponent("skills")
+        .appendingPathComponent("plugin")
         .appendingPathComponent("__aib_deploy")
         .appendingPathComponent("claude")
         .appendingPathComponent("skills")
@@ -1211,6 +1309,37 @@ func deployPlanProjectsAssignedSkillBundlesIntoRuntimeDirectories() async throws
         .appendingPathComponent("scripts")
         .appendingPathComponent("deploy.sh")
     #expect(FileManager.default.fileExists(atPath: stagedSkillFile.path))
+
+    let stagedPluginConfig = root
+        .appendingPathComponent(".aib")
+        .appendingPathComponent("generated")
+        .appendingPathComponent("deploy")
+        .appendingPathComponent("services")
+        .appendingPathComponent(service.deployedServiceName)
+        .appendingPathComponent("plugin")
+        .appendingPathComponent(".mcp.json")
+    #expect(FileManager.default.fileExists(atPath: stagedPluginConfig.path))
+
+    let stagedPluginManifest = root
+        .appendingPathComponent(".aib")
+        .appendingPathComponent("generated")
+        .appendingPathComponent("deploy")
+        .appendingPathComponent("services")
+        .appendingPathComponent(service.deployedServiceName)
+        .appendingPathComponent("plugin")
+        .appendingPathComponent(".claude-plugin")
+        .appendingPathComponent("plugin.json")
+    #expect(FileManager.default.fileExists(atPath: stagedPluginManifest.path))
+
+    let stagedUsageDoc = root
+        .appendingPathComponent(".aib")
+        .appendingPathComponent("generated")
+        .appendingPathComponent("deploy")
+        .appendingPathComponent("services")
+        .appendingPathComponent(service.deployedServiceName)
+        .appendingPathComponent("plugin")
+        .appendingPathComponent("USE_WITH_CLAUDE.md")
+    #expect(FileManager.default.fileExists(atPath: stagedUsageDoc.path))
 
     let stagedExecutionFile = root
         .appendingPathComponent(".aib")
@@ -1224,4 +1353,253 @@ func deployPlanProjectsAssignedSkillBundlesIntoRuntimeDirectories() async throws
         .appendingPathComponent("commands")
         .appendingPathComponent("deploy.md")
     #expect(FileManager.default.fileExists(atPath: stagedExecutionFile.path))
+}
+
+@Test(.timeLimit(.minutes(1)))
+func deployPlanRejectsPrivateGitSSHDependenciesForCloudRun() async throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("aib-deploy-private-git-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer {
+        do {
+            try FileManager.default.removeItem(at: root)
+        } catch {
+            // Best-effort cleanup for temp test directory.
+        }
+    }
+
+    let repo = root.appendingPathComponent("valuemap-mcp", isDirectory: true)
+    try FileManager.default.createDirectory(at: repo.appendingPathComponent(".git"), withIntermediateDirectories: true)
+    try """
+    {
+      "name": "valuemap-mcp",
+      "packageManager": "pnpm@10.8.0",
+      "scripts": { "dev": "tsx watch src/index.ts" }
+    }
+    """.write(to: repo.appendingPathComponent("package.json"), atomically: true, encoding: .utf8)
+    try """
+    lockfileVersion: '9.0'
+
+    packages:
+      '@salescore-inc/valuemap-api@git+https://git@github.com:salescore-inc/valuemap-api.git#deadbeef':
+        resolution:
+          repo: git@github.com:salescore-inc/valuemap-api.git
+          type: git
+    """.write(to: repo.appendingPathComponent("pnpm-lock.yaml"), atomically: true, encoding: .utf8)
+
+    let workspace = AIBWorkspaceConfig(
+        workspaceName: "test",
+        repos: [
+            WorkspaceRepo(
+                name: "valuemap-mcp",
+                path: "valuemap-mcp",
+                runtime: .node,
+                framework: .hono,
+                packageManager: .pnpm,
+                status: .discoverable,
+                detectionConfidence: .high,
+                services: [
+                    WorkspaceRepoServiceConfig(
+                        id: "main",
+                        kind: "mcp",
+                        mountPath: "/valuemap-mcp",
+                        run: ["pnpm", "dev"],
+                        watchMode: "internal"
+                    ),
+                ]
+            ),
+        ]
+    )
+    try AIBWorkspaceManager.saveWorkspace(workspace, workspaceRoot: root.path)
+
+    let provider = MockCloudRunDeploymentProvider()
+    let targetConfig = AIBDeployTargetConfig(providerID: provider.providerID, region: "us-central1")
+
+    await #expect(throws: AIBDeployError.self) {
+        try await AIBDeployService.generatePlan(
+            workspaceRoot: root.path,
+            targetConfig: targetConfig,
+            provider: provider
+        )
+    }
+}
+
+@Test(.timeLimit(.minutes(1)))
+func targetConfigRoundTripsBuildPolicyFields() throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("aib-target-config-roundtrip-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer {
+        do {
+            try FileManager.default.removeItem(at: root)
+        } catch {
+        }
+    }
+
+    let store = DefaultDeployTargetConfigStore()
+    let config = AIBDeployTargetConfig(
+        providerID: "local",
+        region: "local",
+        defaultAuth: .private,
+        buildMode: .convenience,
+        sourceCredentials: [
+            AIBSourceCredential(
+                type: .ssh,
+                host: "github.com",
+                localPrivateKeyPath: "/tmp/id_ed25519",
+                localKnownHostsPath: "/tmp/known_hosts",
+                localPrivateKeyPassphraseEnv: "AIB_GITHUB_KEY_PASSPHRASE",
+                cloudPrivateKeySecret: "github-private-key",
+                cloudKnownHostsSecret: "github-known-hosts"
+            ),
+        ],
+        convenience: AIBConvenienceOptions(
+            useHostCorepackCache: false,
+            useHostPNPMStore: true,
+            useRepoLocalPNPMStore: false
+        )
+    )
+
+    try store.save(workspaceRoot: root.path, config: config)
+    let loaded = try store.load(workspaceRoot: root.path, providerID: "local")
+
+    #expect(loaded.providerID == "local")
+    #expect(loaded.buildMode == .convenience)
+    #expect(loaded.sourceCredentials == config.sourceCredentials)
+    #expect(loaded.convenience == config.convenience)
+}
+
+@Test(.timeLimit(.minutes(1)))
+func targetConfigRoundTripsAppManagedPassphrasePointer() throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("aib-target-config-app-managed-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer {
+        do {
+            try FileManager.default.removeItem(at: root)
+        } catch {
+        }
+    }
+
+    let store = DefaultDeployTargetConfigStore()
+    let environmentKey = AIBLocalSourceAuthEnvironmentResolver.appManagedPassphraseEnvironmentKey(
+        workspaceRoot: root.path,
+        providerID: "local",
+        host: "github.com",
+        privateKeyPath: "/tmp/id_ed25519"
+    )
+
+    let config = AIBDeployTargetConfig(
+        providerID: "local",
+        region: "local",
+        defaultAuth: .private,
+        buildMode: .strict,
+        sourceCredentials: [
+            AIBSourceCredential(
+                type: .ssh,
+                host: "github.com",
+                localPrivateKeyPath: "/tmp/id_ed25519",
+                localKnownHostsPath: "/tmp/known_hosts",
+                localPrivateKeyPassphraseEnv: environmentKey
+            ),
+        ]
+    )
+
+    try store.save(workspaceRoot: root.path, config: config)
+    let loaded = try store.load(workspaceRoot: root.path, providerID: "local")
+    let yaml = try String(
+        contentsOf: root.appendingPathComponent(".aib/targets/local.yaml"),
+        encoding: .utf8
+    )
+
+    #expect(loaded.sourceCredentials == config.sourceCredentials)
+    #expect(yaml.contains(environmentKey))
+    #expect(!yaml.contains("passphrase:"))
+}
+
+@Test(.timeLimit(.minutes(1)))
+func deployPlanAllowsPrivateGitSSHDependenciesWhenCloudCredentialConfigured() async throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("aib-deploy-private-git-allowed-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer {
+        do {
+            try FileManager.default.removeItem(at: root)
+        } catch {
+        }
+    }
+
+    let repo = root.appendingPathComponent("valuemap-mcp", isDirectory: true)
+    try FileManager.default.createDirectory(at: repo.appendingPathComponent(".git"), withIntermediateDirectories: true)
+    try """
+    {
+      "name": "valuemap-mcp",
+      "packageManager": "pnpm@10.8.0",
+      "dependencies": {
+        "valuemap-api": "github:salescore-inc/valuemap-api"
+      },
+      "scripts": { "dev": "tsx watch src/index.ts" }
+    }
+    """.write(to: repo.appendingPathComponent("package.json"), atomically: true, encoding: .utf8)
+    try """
+    lockfileVersion: '9.0'
+
+    packages:
+      '@salescore-inc/valuemap-api@git+https://git@github.com:salescore-inc/valuemap-api.git#deadbeef':
+        resolution:
+          repo: git@github.com:salescore-inc/valuemap-api.git
+          type: git
+    """.write(to: repo.appendingPathComponent("pnpm-lock.yaml"), atomically: true, encoding: .utf8)
+    try "FROM node:22-slim\nWORKDIR /app\nCOPY package.json pnpm-lock.yaml ./\nRUN corepack enable pnpm && pnpm install\nCOPY . .\nCMD [\"node\", \"index.js\"]\n"
+        .write(to: repo.appendingPathComponent("Dockerfile.node"), atomically: true, encoding: .utf8)
+
+    let workspace = AIBWorkspaceConfig(
+        workspaceName: "test",
+        repos: [
+            WorkspaceRepo(
+                name: "valuemap-mcp",
+                path: "valuemap-mcp",
+                runtime: .node,
+                framework: .hono,
+                packageManager: .pnpm,
+                status: .discoverable,
+                detectionConfidence: .high,
+                services: [
+                    WorkspaceRepoServiceConfig(
+                        id: "main",
+                        kind: "mcp",
+                        mountPath: "/valuemap-mcp",
+                        run: ["pnpm", "dev"],
+                        watchMode: "internal"
+                    ),
+                ]
+            ),
+        ]
+    )
+    try AIBWorkspaceManager.saveWorkspace(workspace, workspaceRoot: root.path)
+
+    let provider = MockCloudRunDeploymentProvider()
+    let targetConfig = AIBDeployTargetConfig(
+        providerID: provider.providerID,
+        region: "us-central1",
+        sourceCredentials: [
+            AIBSourceCredential(
+                type: .ssh,
+                host: "github.com",
+                cloudPrivateKeySecret: "github-private-key",
+                cloudKnownHostsSecret: "github-known-hosts"
+            ),
+        ]
+    )
+
+    let plan = try await AIBDeployService.generatePlan(
+        workspaceRoot: root.path,
+        targetConfig: targetConfig,
+        provider: provider
+    )
+
+    #expect(plan.services.count == 1)
+    let service = try #require(plan.services.first)
+    #expect(!service.sourceDependencies.isEmpty)
+    #expect(service.sourceCredential?.cloudPrivateKeySecret == "github-private-key")
 }

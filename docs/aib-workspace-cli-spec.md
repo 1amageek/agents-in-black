@@ -48,6 +48,11 @@ Resolve runtime service config from `.aib/workspace.yaml` and refresh generated 
 Runs the local runtime using generated `.aib/workspace.yaml`.
 Internally wraps the existing DevGateway + DevSupervisor runtime.
 
+For `local` targets:
+- default `buildMode` is `convenience`
+- Node MCP/services run as host processes for fast local iteration
+- agent services run via Claude Code CLI, not local containers
+
 ### `aib emulator validate`
 
 Validates generated `.aib/workspace.yaml` using existing runtime config validation.
@@ -84,6 +89,33 @@ Reserved for Cloud Run deployment workflows.
 - Workspace orchestration config: `.aib/workspace.yaml`
 - Local runtime config: resolved from `.aib/workspace.yaml`
 - **No per-repo manifests**: `.aib/` does not exist inside individual repositories
+
+## Local Target Source Credentials
+
+Strict local builds that resolve private Git dependencies must declare explicit source
+credentials in `.aib/targets/local.yaml`.
+
+The generated `local` target template defaults to:
+
+```yaml
+buildMode: convenience
+```
+
+Switch to `strict` only when Cloud Run-aligned containerized validation is required.
+
+```yaml
+sourceCredentials:
+  - type: ssh
+    host: github.com
+    localPrivateKeyPath: /Users/example/.ssh/id_ed25519
+    localKnownHostsPath: /Users/example/.ssh/known_hosts
+    localPrivateKeyPassphraseEnv: AIB_GITHUB_KEY_PASSPHRASE
+```
+
+If `localPrivateKeyPassphraseEnv` is set, AIB reads that environment variable on the
+host, creates a temporary decrypted key only for the build-preparation lifecycle, and
+mounts that ephemeral copy into the isolated build container. The container never prompts
+for a passphrase.
 
 ## Repo Status Classification
 

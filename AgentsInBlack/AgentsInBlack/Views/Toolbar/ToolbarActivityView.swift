@@ -37,14 +37,12 @@ struct ToolbarActivityView: View {
 
                     EditorStatusIndicator(model: model)
                     BuildBackendStatusIndicator(model: model)
-                    if model.cloudProviderCheckResult != nil || model.detectedProvider != nil {
-                        CloudProviderStatusIndicator(
-                            result: model.cloudProviderCheckResult,
-                            provider: model.detectedProvider,
-                            isChecking: model.isCheckingEnvironment,
-                            onTap: { model.openCloudSettings() }
-                        )
-                    }
+                    CloudProviderStatusIndicator(
+                        result: model.cloudProviderCheckResult,
+                        provider: model.detectedProvider,
+                        isChecking: model.isCheckingEnvironment,
+                        onTap: { model.openCloudSettings() }
+                    )
                 }
                 .padding(.trailing, 6)
             }

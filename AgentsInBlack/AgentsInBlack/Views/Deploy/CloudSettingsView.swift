@@ -1,8 +1,9 @@
 import AIBCore
+import AIBRuntimeCore
 import SwiftUI
 
-/// Cloud deploy target configuration panel.
-/// Accessible from the menu bar (Cloud > Cloud Settings...).
+/// Target configuration panel.
+/// Accessible from the menu bar (Target > Target Settings...).
 /// Validates gcloud environment using the same preflight checkers as the deploy pipeline,
 /// then allows editing deploy target configuration persisted in `.aib/targets/{providerID}.yaml`.
 struct CloudSettingsView: View {
@@ -35,15 +36,43 @@ struct CloudSettingsView: View {
     @State private var gcpProject: String = ""
     @State private var region: String = "us-central1"
     @State private var authMode: AIBDeployAuthMode = .private
+    @State private var buildMode: AIBBuildMode = .strict
     @State private var kindDefaults: [AIBServiceKind: AIBDeployResourceConfig] = [:]
     @State private var selectedKind: AIBServiceKind = .agent
     @State private var artifactRegistryHost: String = ""
+    @State private var sourceAuthHost: String = "github.com"
+    @State private var localSourceAuthMethod: LocalSourceAuthMethod = .sshKey
+    @State private var localPrivateKeyPath: String = ""
+    @State private var localKnownHostsPath: String = ""
+    @State private var localPassphraseMode: LocalSourceAuthPassphraseMode = .none
+    @State private var localManagedPassphrase: String = ""
+    @State private var localExternalPassphraseEnvironmentKey: String = ""
+    @State private var persistedLocalPassphraseEnvironmentKey: String = ""
+    @State private var persistedLocalPassphraseWasAppManaged: Bool = false
+    @State private var localAccessTokenMode: LocalSourceAuthPassphraseMode = .none
+    @State private var localManagedAccessToken: String = ""
+    @State private var localExternalAccessTokenEnvironmentKey: String = ""
+    @State private var persistedLocalAccessTokenEnvironmentKey: String = ""
+    @State private var persistedLocalAccessTokenWasAppManaged: Bool = false
+    @State private var persistedSourceAuthHost: String = "github.com"
+    @State private var loadedSourceCredentials: [AIBSourceCredential] = []
+    @State private var cloudPrivateKeySecret: String = ""
+    @State private var cloudKnownHostsSecret: String = ""
+    @State private var isProvisioningCloudSourceAuth: Bool = false
+    @State private var cloudSourceAuthProvisionMessage: String?
+    @State private var cloudSourceAuthProvisionFailed: Bool = false
+    @State private var useHostCorepackCache: Bool = true
+    @State private var useHostPNPMStore: Bool = true
+    @State private var useRepoLocalPNPMStore: Bool = true
 
     @State private var errorMessage: String?
     @State private var hasLoadedInitial: Bool = false
 
     private let configStore: DeployTargetConfigStore = DefaultDeployTargetConfigStore()
     private let gcloudContextService = GCloudContextService()
+    private let targetSourceAuthKeychainStore = TargetSourceAuthKeychainStore()
+    private let localSourceAuthValidationService = LocalSourceAuthValidationService()
+    private let cloudSourceCredentialProvisioningService = CloudSourceCredentialProvisioningService()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -52,7 +81,9 @@ struct CloudSettingsView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
                     providerSection
-                    environmentSection
+                    if providerID != "local" {
+                        environmentSection
+                    }
                     configSection
                     resourceDefaultsSection
                 }
@@ -68,6 +99,14 @@ struct CloudSettingsView: View {
             async let context: Void = refreshGCloudContext()
             _ = await (checks, context)
         }
+        .onChange(of: providerID) { _, _ in
+            resetFormDefaults(for: providerID)
+            loadConfig(force: true)
+            Task {
+                await runEnvironmentChecks()
+                await refreshGCloudContext()
+            }
+        }
     }
 
     // MARK: - Header
@@ -75,9 +114,9 @@ struct CloudSettingsView: View {
     private var header: some View {
         HStack {
             VStack(alignment: .leading, spacing: 2) {
-                Text("Cloud Settings")
+                Text("Target Settings")
                     .font(.headline)
-                Text("Deploy target configuration for this workspace")
+                Text("Target configuration for local runtime and cloud deploy")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -95,6 +134,7 @@ struct CloudSettingsView: View {
                 .font(.subheadline.weight(.medium))
 
             Picker("Provider", selection: $providerID) {
+                Text("Local Emulator").tag("local")
                 ForEach(DeploymentProviderRegistry.providers, id: \.providerID) { provider in
                     Text(provider.displayName).tag(provider.providerID)
                 }
@@ -323,94 +363,298 @@ struct CloudSettingsView: View {
 
     @ViewBuilder
     private var configSection: some View {
-        if providerID == "gcp-cloudrun" {
-            VStack(alignment: .leading, spacing: 12) {
-                Text("Configuration")
-                    .font(.subheadline.weight(.medium))
+        VStack(alignment: .leading, spacing: 12) {
+            Text(providerID == "local" ? "Local Target" : "Configuration")
+                .font(.subheadline.weight(.medium))
 
-                VStack(spacing: 0) {
-                    configContextRow(
-                        title: "Account",
-                        value: activeGCloudAccount ?? "No active Google account"
-                    ) {
-                        Menu("Switch") {
-                            ForEach(gcloudAccounts) { account in
-                                Button {
-                                    Task { await switchAccount(to: account.account) }
-                                } label: {
-                                    if account.account == activeGCloudAccount {
-                                        Label(account.account, systemImage: "checkmark")
-                                    } else {
-                                        Text(account.account)
-                                    }
-                                }
-                            }
-                        }
-                        .disabled(
-                            isRefreshingGCloudContext
-                            || isSwitchingGCloudAccount
-                            || isSwitchingGCloudProject
-                            || gcloudAccounts.isEmpty
-                        )
-                    }
-
-                    Divider().padding(.leading, 12)
-
-                    configContextRow(
-                        title: "Project",
-                        value: gcpProject.isEmpty ? "No project selected" : gcpProject
-                    ) {
-                        Menu("Switch") {
-                            ForEach(gcloudProjects) { project in
-                                Button {
-                                    Task { await switchProject(to: project.projectID) }
-                                } label: {
-                                    let label = project.name ?? project.projectID
-                                    if project.projectID == gcpProject {
-                                        Label("\(label) (\(project.projectID))", systemImage: "checkmark")
-                                    } else {
-                                        Text("\(label) (\(project.projectID))")
-                                    }
-                                }
-                            }
-                        }
-                        .disabled(
-                            isRefreshingGCloudContext
-                            || isSwitchingGCloudAccount
-                            || isSwitchingGCloudProject
-                            || gcloudProjects.isEmpty
-                        )
-                    }
-
-                    Divider().padding(.leading, 12)
-
-                    configContextRow(title: "Region", value: region) {
-                        EmptyView()
-                    }
+            LabeledContent("Build Mode") {
+                Picker("Build Mode", selection: $buildMode) {
+                    Text("Strict").tag(AIBBuildMode.strict)
+                    Text("Convenience").tag(AIBBuildMode.convenience)
                 }
-                .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
+                .labelsHidden()
+                .pickerStyle(.segmented)
+                .frame(maxWidth: 220)
+            }
 
-                if let gcloudContextErrorMessage {
-                    Text(gcloudContextErrorMessage)
+            if buildMode == .convenience {
+                VStack(alignment: .leading, spacing: 8) {
+                    Toggle("Reuse host corepack cache", isOn: $useHostCorepackCache)
+                    Toggle("Reuse host pnpm store", isOn: $useHostPNPMStore)
+                    Toggle("Reuse repo-local .pnpm-store", isOn: $useRepoLocalPNPMStore)
+                    Text("Convenience mode is local-only and not Cloud Run-aligned.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+                .padding(12)
+                .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
+            }
 
-                LabeledContent("Default Auth") {
-                    Picker("Auth", selection: $authMode) {
-                        Text("Private").tag(AIBDeployAuthMode.private)
-                        Text("Public").tag(AIBDeployAuthMode.public)
+            if providerID == "local" {
+                localSourceAuthSection
+            } else {
+                cloudSourceAuthSection
+            }
+
+            if providerID == "gcp-cloudrun" {
+                VStack(alignment: .leading, spacing: 12) {
+                    VStack(spacing: 0) {
+                        configContextRow(
+                            title: "Account",
+                            value: activeGCloudAccount ?? "No active Google account"
+                        ) {
+                            Menu("Switch") {
+                                ForEach(gcloudAccounts) { account in
+                                    Button {
+                                        Task { await switchAccount(to: account.account) }
+                                    } label: {
+                                        if account.account == activeGCloudAccount {
+                                            Label(account.account, systemImage: "checkmark")
+                                        } else {
+                                            Text(account.account)
+                                        }
+                                    }
+                                }
+                            }
+                            .disabled(
+                                isRefreshingGCloudContext
+                                || isSwitchingGCloudAccount
+                                || isSwitchingGCloudProject
+                                || gcloudAccounts.isEmpty
+                            )
+                        }
+
+                        Divider().padding(.leading, 12)
+
+                        configContextRow(
+                            title: "Project",
+                            value: gcpProject.isEmpty ? "No project selected" : gcpProject
+                        ) {
+                            Menu("Switch") {
+                                ForEach(gcloudProjects) { project in
+                                    Button {
+                                        Task { await switchProject(to: project.projectID) }
+                                    } label: {
+                                        let label = project.name ?? project.projectID
+                                        if project.projectID == gcpProject {
+                                            Label("\(label) (\(project.projectID))", systemImage: "checkmark")
+                                        } else {
+                                            Text("\(label) (\(project.projectID))")
+                                        }
+                                    }
+                                }
+                            }
+                            .disabled(
+                                isRefreshingGCloudContext
+                                || isSwitchingGCloudAccount
+                                || isSwitchingGCloudProject
+                                || gcloudProjects.isEmpty
+                            )
+                        }
+
+                        Divider().padding(.leading, 12)
+
+                        configContextRow(title: "Region", value: region) {
+                            EmptyView()
+                        }
+                    }
+                    .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
+
+                    if let gcloudContextErrorMessage {
+                        Text(gcloudContextErrorMessage)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    LabeledContent("Default Auth") {
+                        Picker("Auth", selection: $authMode) {
+                            Text("Private").tag(AIBDeployAuthMode.private)
+                            Text("Public").tag(AIBDeployAuthMode.public)
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.segmented)
+                        .frame(maxWidth: 180)
+                    }
+
+                    LabeledContent("Artifact Registry") {
+                        TextField("Auto (region-docker.pkg.dev)", text: $artifactRegistryHost)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(maxWidth: 260)
+                    }
+                }
+            } else {
+                Text("Strict mode builds services in an isolated local builder before runtime startup.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var localSourceAuthSection: some View {
+        let sshValidation = localSourceAuthValidationState
+
+        return VStack(alignment: .leading, spacing: 12) {
+            Text("Source Auth")
+                .font(.callout.weight(.medium))
+
+            TextField("Host", text: $sourceAuthHost)
+                .textFieldStyle(.roundedBorder)
+
+            Picker("Authentication Method", selection: $localSourceAuthMethod) {
+                ForEach(LocalSourceAuthMethod.allCases) { method in
+                    Text(method.title).tag(method)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.segmented)
+
+            switch localSourceAuthMethod {
+            case .sshKey:
+                VStack(alignment: .leading, spacing: 10) {
+                    TextField("Private key path", text: $localPrivateKeyPath)
+                        .textFieldStyle(.roundedBorder)
+                    TextField("known_hosts path", text: $localKnownHostsPath)
+                        .textFieldStyle(.roundedBorder)
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Passphrase Management")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    Picker("Passphrase Management", selection: $localPassphraseMode) {
+                        ForEach(LocalSourceAuthPassphraseMode.allCases) { mode in
+                            Text(mode.title).tag(mode)
+                        }
                     }
                     .labelsHidden()
                     .pickerStyle(.segmented)
-                    .frame(maxWidth: 180)
+
+                    switch localPassphraseMode {
+                    case .appManaged:
+                        SecureField("Private key passphrase", text: $localManagedPassphrase)
+                            .textFieldStyle(.roundedBorder)
+                        Text("Stored in Keychain and injected into local strict builds automatically.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    case .external:
+                        TextField("Environment variable name", text: $localExternalPassphraseEnvironmentKey)
+                            .textFieldStyle(.roundedBorder)
+                        Text("Use this only when another process manages the passphrase outside the app.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    case .none:
+                        Text("Use this when the key has no passphrase or you do not want AIB to manage it.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
 
-                LabeledContent("Artifact Registry") {
-                    TextField("Auto (region-docker.pkg.dev)", text: $artifactRegistryHost)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(maxWidth: 260)
+                VStack(alignment: .leading, spacing: 6) {
+                    LabeledContent("Passphrase Status") {
+                        Text(localPassphraseStorageStatusMessage)
+                            .foregroundStyle(localPassphraseStorageStatusColor)
+                    }
+
+                    Text(sshValidation.message)
+                        .font(.caption)
+                        .foregroundStyle(color(for: sshValidation.level))
                 }
+            case .githubToken:
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Token Management")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    Picker("Token Management", selection: $localAccessTokenMode) {
+                        ForEach(LocalSourceAuthPassphraseMode.allCases) { mode in
+                            Text(mode.title).tag(mode)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+
+                    switch localAccessTokenMode {
+                    case .appManaged:
+                        SecureField("GitHub personal access token", text: $localManagedAccessToken)
+                            .textFieldStyle(.roundedBorder)
+                        Text("Stored in Keychain and used only on the host to mirror private GitHub dependencies.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    case .external:
+                        TextField("Environment variable name", text: $localExternalAccessTokenEnvironmentKey)
+                            .textFieldStyle(.roundedBorder)
+                        Text("Use this only when another process manages the GitHub token outside the app.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    case .none:
+                        Text("Use this only when all GitHub dependencies are public.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    LabeledContent("Token Status") {
+                        Text(localAccessTokenStorageStatusMessage)
+                            .foregroundStyle(localAccessTokenStorageStatusColor)
+                    }
+
+                    Text(localAccessTokenValidationMessage)
+                        .font(.caption)
+                        .foregroundStyle(localAccessTokenValidationColor)
+                }
+            }
+
+            Text("Target Settings is the primary place to configure private Git access for the local builder.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var cloudSourceAuthSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Source Auth")
+                .font(.callout.weight(.medium))
+
+            TextField("Host", text: $sourceAuthHost)
+                .textFieldStyle(.roundedBorder)
+            TextField("Cloud private key secret", text: $cloudPrivateKeySecret)
+                .textFieldStyle(.roundedBorder)
+            TextField("Cloud known_hosts secret", text: $cloudKnownHostsSecret)
+                .textFieldStyle(.roundedBorder)
+
+            Text("These secret names are used only for explicit private Git dependencies during cloud-aligned builds.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            HStack {
+                Button {
+                    Task { await provisionCloudSourceSecretsFromLocalSSH() }
+                } label: {
+                    if isProvisioningCloudSourceAuth {
+                        HStack(spacing: 6) {
+                            ProgressView()
+                                .controlSize(.small)
+                            Text("Creating secrets...")
+                        }
+                    } else {
+                        Text("Create / Update Secrets from Local SSH Key")
+                    }
+                }
+                .disabled(isProvisioningCloudSourceAuth)
+
+                Spacer()
+            }
+
+            Text("Imports the SSH key configured in the local target, uploads it to Secret Manager, and saves the secret names back into this target.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            if let cloudSourceAuthProvisionMessage {
+                Text(cloudSourceAuthProvisionMessage)
+                    .font(.caption)
+                    .foregroundStyle(cloudSourceAuthProvisionFailed ? .red : .secondary)
             }
         }
     }
@@ -542,19 +786,42 @@ struct CloudSettingsView: View {
 
     // MARK: - Actions
 
-    private func loadConfig() {
-        guard !hasLoadedInitial else { return }
+    private func loadConfig(force: Bool = false) {
+        guard force || !hasLoadedInitial else { return }
         hasLoadedInitial = true
 
         do {
             let config = try configStore.load(workspaceRoot: workspaceRootPath, providerID: providerID)
+            loadedSourceCredentials = config.sourceCredentials
             region = config.region
             authMode = config.defaultAuth
+            buildMode = config.buildMode
             kindDefaults = config.kindDefaults
             gcpProject = config.providerConfig["gcpProject"] ?? ""
             artifactRegistryHost = config.providerConfig["artifactRegistryHost"] ?? ""
+            if let credential = config.sourceCredentials.first(where: {
+                $0.type == .ssh || $0.type == .githubToken
+            }) {
+                sourceAuthHost = credential.host
+                persistedSourceAuthHost = credential.host
+                cloudPrivateKeySecret = credential.cloudPrivateKeySecret ?? ""
+                cloudKnownHostsSecret = credential.cloudKnownHostsSecret ?? ""
+                loadLocalSourceCredentialState(from: credential)
+            } else {
+                sourceAuthHost = "github.com"
+                persistedSourceAuthHost = "github.com"
+                resetLocalSourceCredentialState()
+                cloudPrivateKeySecret = ""
+                cloudKnownHostsSecret = ""
+            }
+            if let convenience = config.convenience {
+                useHostCorepackCache = convenience.useHostCorepackCache
+                useHostPNPMStore = convenience.useHostPNPMStore
+                useRepoLocalPNPMStore = convenience.useRepoLocalPNPMStore
+            }
         } catch {
-            // No existing config — use defaults
+            loadedSourceCredentials = []
+            resetFormDefaults(for: providerID)
         }
     }
 
@@ -596,6 +863,75 @@ struct CloudSettingsView: View {
     }
 
     private func saveConfig() {
+        _ = persistConfig(dismissOnSuccess: true)
+    }
+
+    @discardableResult
+    private func persistConfig(dismissOnSuccess: Bool) -> Bool {
+        let trimmedSourceAuthHost = trimmed(sourceAuthHost)
+        let trimmedLocalPrivateKeyPath = trimmed(localPrivateKeyPath)
+        let trimmedLocalKnownHostsPath = trimmed(localKnownHostsPath)
+        let trimmedCloudPrivateKeySecret = trimmed(cloudPrivateKeySecret)
+        let trimmedCloudKnownHostsSecret = trimmed(cloudKnownHostsSecret)
+
+        let hasLocalSSHInput =
+            !trimmedLocalPrivateKeyPath.isEmpty
+            || !trimmedLocalKnownHostsPath.isEmpty
+            || localPassphraseMode != .none
+        let hasLocalGitHubTokenInput =
+            localAccessTokenMode != .none
+        let hasCloudSourceAuthInput =
+            !trimmedCloudPrivateKeySecret.isEmpty
+            || !trimmedCloudKnownHostsSecret.isEmpty
+
+        if ((localSourceAuthMethod == .sshKey && hasLocalSSHInput)
+            || (localSourceAuthMethod == .githubToken && hasLocalGitHubTokenInput)
+            || hasCloudSourceAuthInput) && trimmedSourceAuthHost.isEmpty
+        {
+            errorMessage = "Set a source auth host before saving credentials."
+            return false
+        }
+
+        if providerID == "local", localSourceAuthMethod == .sshKey, localPassphraseMode == .external,
+           trimmed(localExternalPassphraseEnvironmentKey).isEmpty
+        {
+            errorMessage = "Provide the external environment variable name or switch passphrase management to None."
+            return false
+        }
+
+        if providerID == "local", localSourceAuthMethod == .sshKey, localPassphraseMode == .appManaged, localManagedPassphrase.isEmpty {
+            errorMessage = "Enter a passphrase to store in Keychain or switch passphrase management to None or External Env."
+            return false
+        }
+
+        if providerID == "local", localSourceAuthMethod == .sshKey, localPassphraseMode != .none, trimmedLocalPrivateKeyPath.isEmpty {
+            errorMessage = "Set a private key path before configuring local passphrase management."
+            return false
+        }
+
+        if providerID == "local", localSourceAuthMethod == .githubToken,
+           trimmedSourceAuthHost.caseInsensitiveCompare("github.com") != .orderedSame
+        {
+            errorMessage = "GitHub token source auth currently supports github.com only."
+            return false
+        }
+
+        if providerID == "local", localSourceAuthMethod == .githubToken,
+           localAccessTokenMode == .external,
+           trimmed(localExternalAccessTokenEnvironmentKey).isEmpty
+        {
+            errorMessage = "Provide the external environment variable name or switch token management to None."
+            return false
+        }
+
+        if providerID == "local", localSourceAuthMethod == .githubToken,
+           localAccessTokenMode == .appManaged,
+           localManagedAccessToken.isEmpty
+        {
+            errorMessage = "Enter a GitHub token to store in Keychain or switch token management to None or External Env."
+            return false
+        }
+
         var providerConfig: [String: String] = [:]
         if !gcpProject.isEmpty {
             providerConfig["gcpProject"] = gcpProject
@@ -604,21 +940,63 @@ struct CloudSettingsView: View {
             providerConfig["artifactRegistryHost"] = artifactRegistryHost
         }
 
-        let config = AIBDeployTargetConfig(
-            providerID: providerID,
-            region: region,
-            defaultAuth: authMode,
-            kindDefaults: kindDefaults,
-            providerConfig: providerConfig
-        )
-
         do {
+            let sourceCredentials = try saveSourceCredentials(
+                host: trimmedSourceAuthHost,
+                localPrivateKeyPath: trimmedLocalPrivateKeyPath,
+                localKnownHostsPath: trimmedLocalKnownHostsPath,
+                cloudPrivateKeySecret: trimmedCloudPrivateKeySecret,
+                cloudKnownHostsSecret: trimmedCloudKnownHostsSecret
+            )
+
+            let config = AIBDeployTargetConfig(
+                providerID: providerID,
+                region: region,
+                defaultAuth: authMode,
+                buildMode: buildMode,
+                sourceCredentials: sourceCredentials,
+                convenience: buildMode == .convenience
+                    ? AIBConvenienceOptions(
+                        useHostCorepackCache: useHostCorepackCache,
+                        useHostPNPMStore: useHostPNPMStore,
+                        useRepoLocalPNPMStore: useRepoLocalPNPMStore
+                    )
+                    : nil,
+                kindDefaults: kindDefaults,
+                providerConfig: providerConfig
+            )
+
             try configStore.save(workspaceRoot: workspaceRootPath, config: config)
             errorMessage = nil
-            onDismiss()
+            if dismissOnSuccess {
+                onDismiss()
+            }
+            return true
         } catch {
             errorMessage = error.localizedDescription
+            return false
         }
+    }
+
+    private func resetFormDefaults(for providerID: String) {
+        if providerID == "local" {
+            region = "local"
+        } else {
+            region = "us-central1"
+        }
+        authMode = .private
+        buildMode = providerID == "local" ? .convenience : .strict
+        kindDefaults = [:]
+        gcpProject = ""
+        artifactRegistryHost = ""
+        sourceAuthHost = "github.com"
+        persistedSourceAuthHost = "github.com"
+        resetLocalSourceCredentialState()
+        cloudPrivateKeySecret = ""
+        cloudKnownHostsSecret = ""
+        useHostCorepackCache = true
+        useHostPNPMStore = true
+        useRepoLocalPNPMStore = true
     }
 
     @MainActor
@@ -642,6 +1020,102 @@ struct CloudSettingsView: View {
         }
 
         isStartingBuilder = false
+    }
+
+    @MainActor
+    private func provisionCloudSourceSecretsFromLocalSSH() async {
+        guard !isProvisioningCloudSourceAuth else { return }
+        isProvisioningCloudSourceAuth = true
+        cloudSourceAuthProvisionMessage = nil
+        cloudSourceAuthProvisionFailed = false
+
+        do {
+            let host = trimmed(sourceAuthHost)
+            guard !host.isEmpty else {
+                throw AIBDeployError(phase: "gcloud-secrets", message: "Set a source auth host before creating cloud source auth secrets.")
+            }
+
+            let projectID = trimmed(gcpProject.isEmpty ? (activeGCloudProject ?? "") : gcpProject)
+            guard !projectID.isEmpty else {
+                throw AIBDeployError(phase: "gcloud-secrets", message: "Set a Google Cloud project before creating cloud source auth secrets.")
+            }
+
+            let localConfig = try configStore.load(workspaceRoot: workspaceRootPath, providerID: "local")
+            guard let localCredential = localConfig.sourceCredentials.first(where: {
+                $0.type == .ssh && $0.host.caseInsensitiveCompare(host) == .orderedSame
+            }) else {
+                throw AIBDeployError(
+                    phase: "gcloud-secrets",
+                    message: "No local SSH source credential for '\(host)' was found in .aib/targets/local.yaml."
+                )
+            }
+
+            guard let localPrivateKeyPath = localCredential.localPrivateKeyPath,
+                  !trimmed(localPrivateKeyPath).isEmpty else
+            {
+                throw AIBDeployError(
+                    phase: "gcloud-secrets",
+                    message: "The local SSH source credential for '\(host)' is missing localPrivateKeyPath."
+                )
+            }
+
+            let resolvedEnvironment = try AIBLocalSourceAuthEnvironmentResolver.resolvedSourceAuthEnvironment(
+                targetConfig: localConfig
+            ) { [targetSourceAuthKeychainStore] environmentKey in
+                if let value = ProcessInfo.processInfo.environment[environmentKey], !value.isEmpty {
+                    return value
+                }
+                return try targetSourceAuthKeychainStore.passphrase(for: environmentKey)
+            }
+            let passphrase = localCredential.localPrivateKeyPassphraseEnv.flatMap { resolvedEnvironment[$0] }
+
+            let privateKeySecretName = trimmed(cloudPrivateKeySecret).isEmpty
+                ? CloudSourceCredentialProvisioningService.suggestedPrivateKeySecretName(
+                    workspaceRoot: workspaceRootPath,
+                    host: host
+                )
+                : trimmed(cloudPrivateKeySecret)
+            let knownHostsSecretName = trimmed(cloudKnownHostsSecret).isEmpty
+                ? CloudSourceCredentialProvisioningService.suggestedKnownHostsSecretName(
+                    workspaceRoot: workspaceRootPath,
+                    host: host
+                )
+                : trimmed(cloudKnownHostsSecret)
+
+            let result = try await cloudSourceCredentialProvisioningService.provisionFromLocalSSH(request: .init(
+                projectID: projectID,
+                host: host,
+                localPrivateKeyPath: localPrivateKeyPath,
+                localKnownHostsPath: localCredential.localKnownHostsPath,
+                localPrivateKeyPassphrase: passphrase,
+                privateKeySecretName: privateKeySecretName,
+                knownHostsSecretName: knownHostsSecretName
+            ))
+
+            cloudPrivateKeySecret = result.privateKeySecretName
+            cloudKnownHostsSecret = result.knownHostsSecretName ?? ""
+            gcpProject = projectID
+
+            let didSave = persistConfig(dismissOnSuccess: false)
+            if didSave {
+                let privateKeyVerb = result.createdPrivateKeySecret ? "Created" : "Updated"
+                let knownHostsVerb = result.createdKnownHostsSecret ? "created" : "updated"
+                if let knownHostsSecretName = result.knownHostsSecretName, !knownHostsSecretName.isEmpty {
+                    cloudSourceAuthProvisionMessage = "\(privateKeyVerb) '\(result.privateKeySecretName)' and \(knownHostsVerb) '\(knownHostsSecretName)'. Target config saved."
+                } else {
+                    cloudSourceAuthProvisionMessage = "\(privateKeyVerb) '\(result.privateKeySecretName)'. Target config saved."
+                }
+                cloudSourceAuthProvisionFailed = false
+            } else {
+                cloudSourceAuthProvisionMessage = "Secrets were uploaded, but the target config could not be saved: \(errorMessage ?? "unknown error")."
+                cloudSourceAuthProvisionFailed = true
+            }
+        } catch {
+            cloudSourceAuthProvisionMessage = error.localizedDescription
+            cloudSourceAuthProvisionFailed = true
+        }
+
+        isProvisioningCloudSourceAuth = false
     }
 
     private func refreshGCloudContext() async {
@@ -714,5 +1188,314 @@ struct CloudSettingsView: View {
         }
 
         isInstallingAppleContainer = false
+    }
+
+    private var localSourceAuthValidationState: LocalSourceAuthValidationState {
+        localSourceAuthValidationService.validate(
+            privateKeyPath: localPrivateKeyPath,
+            passphraseMode: localPassphraseMode,
+            managedPassphrase: localManagedPassphrase,
+            externalEnvironmentKey: localExternalPassphraseEnvironmentKey
+        )
+    }
+
+    private var localPassphraseStorageStatusMessage: String {
+        switch localPassphraseMode {
+        case .none:
+            return "No passphrase stored"
+        case .appManaged:
+            return localManagedPassphrase.isEmpty ? "No passphrase stored" : "Stored in Keychain"
+        case .external:
+            return "Managed externally"
+        }
+    }
+
+    private var localPassphraseStorageStatusColor: Color {
+        switch localPassphraseMode {
+        case .none:
+            return .secondary
+        case .appManaged:
+            return localManagedPassphrase.isEmpty ? .secondary : .green
+        case .external:
+            return .yellow
+        }
+    }
+
+    private var localAccessTokenStorageStatusMessage: String {
+        switch localAccessTokenMode {
+        case .none:
+            return "No token stored"
+        case .appManaged:
+            return localManagedAccessToken.isEmpty ? "No token stored" : "Stored in Keychain"
+        case .external:
+            return "Managed externally"
+        }
+    }
+
+    private var localAccessTokenStorageStatusColor: Color {
+        switch localAccessTokenMode {
+        case .none:
+            return .secondary
+        case .appManaged:
+            return localManagedAccessToken.isEmpty ? .secondary : .green
+        case .external:
+            return .yellow
+        }
+    }
+
+    private var localAccessTokenValidationMessage: String {
+        switch localAccessTokenMode {
+        case .none:
+            return "No GitHub token is configured."
+        case .appManaged:
+            return localManagedAccessToken.isEmpty
+                ? "Enter a token to mirror private GitHub dependencies."
+                : "GitHub token will be used on the host to mirror private dependencies."
+        case .external:
+            let envName = trimmed(localExternalAccessTokenEnvironmentKey)
+            return envName.isEmpty
+                ? "Provide the external environment variable name used for the GitHub token."
+                : "GitHub token will be read from external env '\(envName)'."
+        }
+    }
+
+    private var localAccessTokenValidationColor: Color {
+        switch localAccessTokenMode {
+        case .none:
+            return .secondary
+        case .appManaged:
+            return localManagedAccessToken.isEmpty ? .yellow : .green
+        case .external:
+            return trimmed(localExternalAccessTokenEnvironmentKey).isEmpty ? .yellow : .yellow
+        }
+    }
+
+    private func color(for level: LocalSourceAuthValidationState.Level) -> Color {
+        switch level {
+        case .neutral:
+            .secondary
+        case .success:
+            .green
+        case .warning:
+            .yellow
+        case .failure:
+            .red
+        }
+    }
+
+    private func loadLocalSourceCredentialState(from credential: AIBSourceCredential) {
+        localSourceAuthMethod = credential.type == .githubToken ? .githubToken : .sshKey
+        localPrivateKeyPath = credential.localPrivateKeyPath ?? ""
+        localKnownHostsPath = credential.localKnownHostsPath ?? ""
+        loadLocalPassphraseState(from: credential)
+        loadLocalAccessTokenState(from: credential)
+    }
+
+    private func loadLocalPassphraseState(from credential: AIBSourceCredential) {
+        persistedLocalPassphraseEnvironmentKey = trimmed(credential.localPrivateKeyPassphraseEnv ?? "")
+        localManagedPassphrase = ""
+        localExternalPassphraseEnvironmentKey = ""
+        persistedLocalPassphraseWasAppManaged = false
+
+        guard !persistedLocalPassphraseEnvironmentKey.isEmpty else {
+            localPassphraseMode = .none
+            return
+        }
+
+        do {
+            if let stored = try targetSourceAuthKeychainStore.passphrase(for: persistedLocalPassphraseEnvironmentKey),
+               !stored.isEmpty
+            {
+                localPassphraseMode = .appManaged
+                localManagedPassphrase = stored
+                persistedLocalPassphraseWasAppManaged = true
+            } else {
+                localPassphraseMode = .external
+                localExternalPassphraseEnvironmentKey = persistedLocalPassphraseEnvironmentKey
+            }
+        } catch {
+            localPassphraseMode = .external
+            localExternalPassphraseEnvironmentKey = persistedLocalPassphraseEnvironmentKey
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func loadLocalAccessTokenState(from credential: AIBSourceCredential) {
+        persistedLocalAccessTokenEnvironmentKey = trimmed(credential.localAccessTokenEnv ?? "")
+        localManagedAccessToken = ""
+        localExternalAccessTokenEnvironmentKey = ""
+        persistedLocalAccessTokenWasAppManaged = false
+
+        guard !persistedLocalAccessTokenEnvironmentKey.isEmpty else {
+            localAccessTokenMode = .none
+            return
+        }
+
+        do {
+            if let stored = try targetSourceAuthKeychainStore.passphrase(for: persistedLocalAccessTokenEnvironmentKey),
+               !stored.isEmpty
+            {
+                localAccessTokenMode = .appManaged
+                localManagedAccessToken = stored
+                persistedLocalAccessTokenWasAppManaged = true
+            } else {
+                localAccessTokenMode = .external
+                localExternalAccessTokenEnvironmentKey = persistedLocalAccessTokenEnvironmentKey
+            }
+        } catch {
+            localAccessTokenMode = .external
+            localExternalAccessTokenEnvironmentKey = persistedLocalAccessTokenEnvironmentKey
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func resetLocalSourceCredentialState() {
+        localSourceAuthMethod = .sshKey
+        localPrivateKeyPath = ""
+        localKnownHostsPath = ""
+        resetLocalPassphraseState()
+        resetLocalAccessTokenState()
+        loadedSourceCredentials = []
+    }
+
+    private func resetLocalPassphraseState() {
+        localPassphraseMode = .none
+        localManagedPassphrase = ""
+        localExternalPassphraseEnvironmentKey = ""
+        persistedLocalPassphraseEnvironmentKey = ""
+        persistedLocalPassphraseWasAppManaged = false
+    }
+
+    private func resetLocalAccessTokenState() {
+        localAccessTokenMode = .none
+        localManagedAccessToken = ""
+        localExternalAccessTokenEnvironmentKey = ""
+        persistedLocalAccessTokenEnvironmentKey = ""
+        persistedLocalAccessTokenWasAppManaged = false
+    }
+
+    private func saveSourceCredentials(
+        host: String,
+        localPrivateKeyPath: String,
+        localKnownHostsPath: String,
+        cloudPrivateKeySecret: String,
+        cloudKnownHostsSecret: String
+    ) throws -> [AIBSourceCredential] {
+        let previousEnvironmentKey = persistedLocalPassphraseEnvironmentKey
+        let previousEnvironmentWasAppManaged = persistedLocalPassphraseWasAppManaged
+        let previousAccessTokenEnvironmentKey = persistedLocalAccessTokenEnvironmentKey
+        let previousAccessTokenWasAppManaged = persistedLocalAccessTokenWasAppManaged
+
+        var localPassphraseEnvironmentKey: String?
+        var shouldPersistAppManagedPassphrase = false
+        var localAccessTokenEnvironmentKey: String?
+        var shouldPersistAppManagedAccessToken = false
+
+        if providerID == "local" {
+            switch localSourceAuthMethod {
+            case .sshKey:
+                switch localPassphraseMode {
+                case .none:
+                    localPassphraseEnvironmentKey = nil
+                case .appManaged:
+                    if !localManagedPassphrase.isEmpty {
+                        let generatedEnvironmentKey = AIBLocalSourceAuthEnvironmentResolver.appManagedPassphraseEnvironmentKey(
+                            workspaceRoot: workspaceRootPath,
+                            providerID: providerID,
+                            host: host,
+                            privateKeyPath: localPrivateKeyPath
+                        )
+                        try targetSourceAuthKeychainStore.setPassphrase(localManagedPassphrase, for: generatedEnvironmentKey)
+                        localPassphraseEnvironmentKey = generatedEnvironmentKey
+                        shouldPersistAppManagedPassphrase = true
+                    }
+                case .external:
+                    localPassphraseEnvironmentKey = trimmed(localExternalPassphraseEnvironmentKey)
+                }
+                localAccessTokenEnvironmentKey = nil
+            case .githubToken:
+                localPassphraseEnvironmentKey = nil
+                switch localAccessTokenMode {
+                case .none:
+                    localAccessTokenEnvironmentKey = nil
+                case .appManaged:
+                    if !localManagedAccessToken.isEmpty {
+                        let generatedEnvironmentKey = AIBLocalSourceAuthEnvironmentResolver.appManagedAccessTokenEnvironmentKey(
+                            workspaceRoot: workspaceRootPath,
+                            providerID: providerID,
+                            host: host
+                        )
+                        try targetSourceAuthKeychainStore.setPassphrase(localManagedAccessToken, for: generatedEnvironmentKey)
+                        localAccessTokenEnvironmentKey = generatedEnvironmentKey
+                        shouldPersistAppManagedAccessToken = true
+                    }
+                case .external:
+                    localAccessTokenEnvironmentKey = trimmed(localExternalAccessTokenEnvironmentKey)
+                }
+            }
+        }
+
+        if previousEnvironmentWasAppManaged {
+            let currentEnvironmentKey = localPassphraseEnvironmentKey ?? ""
+            if previousEnvironmentKey != currentEnvironmentKey || !shouldPersistAppManagedPassphrase {
+                try targetSourceAuthKeychainStore.removePassphrase(for: previousEnvironmentKey)
+            }
+        }
+
+        if previousAccessTokenWasAppManaged {
+            let currentEnvironmentKey = localAccessTokenEnvironmentKey ?? ""
+            if previousAccessTokenEnvironmentKey != currentEnvironmentKey || !shouldPersistAppManagedAccessToken {
+                try targetSourceAuthKeychainStore.removePassphrase(for: previousAccessTokenEnvironmentKey)
+            }
+        }
+
+        persistedLocalPassphraseEnvironmentKey = localPassphraseEnvironmentKey ?? ""
+        persistedLocalPassphraseWasAppManaged = shouldPersistAppManagedPassphrase
+        persistedLocalAccessTokenEnvironmentKey = localAccessTokenEnvironmentKey ?? ""
+        persistedLocalAccessTokenWasAppManaged = shouldPersistAppManagedAccessToken
+
+        let sourceAuthHostsToReplace = Set(
+            [persistedSourceAuthHost, host]
+                .map { trimmed($0).lowercased() }
+                .filter { !$0.isEmpty }
+        )
+        var sourceCredentials = loadedSourceCredentials.filter { credential in
+            guard credential.type == .ssh || credential.type == .githubToken else { return true }
+            return !sourceAuthHostsToReplace.contains(credential.host.lowercased())
+        }
+
+        let shouldSaveLocalCredential = providerID == "local"
+            && (
+                (localSourceAuthMethod == .sshKey && !localPrivateKeyPath.isEmpty)
+                || (localSourceAuthMethod == .githubToken && localAccessTokenMode != .none)
+            )
+        let shouldSaveCloudCredential = providerID != "local"
+            && !cloudPrivateKeySecret.isEmpty
+
+        if shouldSaveLocalCredential || shouldSaveCloudCredential {
+            sourceCredentials.append(AIBSourceCredential(
+                type: providerID == "local"
+                    ? (localSourceAuthMethod == .sshKey ? .ssh : .githubToken)
+                    : .ssh,
+                host: host,
+                localPrivateKeyPath: providerID == "local" && localSourceAuthMethod == .sshKey ? localPrivateKeyPath : nil,
+                localKnownHostsPath: providerID == "local" && localSourceAuthMethod == .sshKey && !localKnownHostsPath.isEmpty ? localKnownHostsPath : nil,
+                localPrivateKeyPassphraseEnv: providerID == "local" && localSourceAuthMethod == .sshKey ? localPassphraseEnvironmentKey : nil,
+                localAccessTokenEnv: providerID == "local" && localSourceAuthMethod == .githubToken ? localAccessTokenEnvironmentKey : nil,
+                cloudPrivateKeySecret: providerID != "local" ? cloudPrivateKeySecret : nil,
+                cloudKnownHostsSecret: providerID != "local" && !cloudKnownHostsSecret.isEmpty ? cloudKnownHostsSecret : nil
+            ))
+        }
+
+        loadedSourceCredentials = sourceCredentials
+        if !host.isEmpty {
+            persistedSourceAuthHost = host
+        }
+
+        return sourceCredentials
+    }
+
+    private func trimmed(_ value: String) -> String {
+        value.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }

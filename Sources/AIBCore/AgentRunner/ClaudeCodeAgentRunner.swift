@@ -1,3 +1,4 @@
+import AIBRuntimeCore
 import Foundation
 
 /// Agent runner that executes Claude Code CLI locally using subscription auth.
@@ -23,15 +24,26 @@ public final class ClaudeCodeAgentRunner: AgentRunner, @unchecked Sendable {
         if let execDir = context.executionDirectory {
             config.workingDirectory = URL(fileURLWithPath: execDir)
         }
+        let effectivePluginRootPath = context.pluginRootPath
+        let effectiveMCPConfigPath: String?
+        if let explicitPath = context.mcpConfigPath {
+            effectiveMCPConfigPath = explicitPath
+        } else if let pluginRootPath = effectivePluginRootPath {
+            effectiveMCPConfigPath = ClaudeCodePluginBundle.mcpConfigPath(pluginRootPath: pluginRootPath)
+        } else {
+            effectiveMCPConfigPath = nil
+        }
         // Use AIB-generated MCP config exclusively.
         // Set DISABLE_MCP_GLOBAL_CONFIG to prevent inheriting user's global/project MCP servers.
-        if let mcpPath = context.mcpConfigPath {
+        if let mcpPath = effectiveMCPConfigPath {
             config.mcpConfigPath = mcpPath
             config.additionalEnvironment["DISABLE_MCP_GLOBAL_CONFIG"] = "1"
         }
 
-        // Add staged skill overlay directory so Claude Code discovers AIB skills.
-        if let skillPath = context.skillOverlayPath {
+        if let pluginRootPath = effectivePluginRootPath {
+            config.pluginDirectories.append(URL(fileURLWithPath: pluginRootPath))
+            config.additionalDirectories.append(URL(fileURLWithPath: pluginRootPath))
+        } else if let skillPath = context.skillOverlayPath {
             config.additionalDirectories.append(URL(fileURLWithPath: skillPath))
         }
 

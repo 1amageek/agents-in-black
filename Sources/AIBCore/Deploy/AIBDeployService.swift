@@ -57,14 +57,54 @@ public enum AIBDeployService {
             .appendingPathComponent(".aib/targets/\(providerID).yaml")
             .path
 
-        var region = overrides["region"] ?? "us-central1"
+        let isLocalProvider = providerID == "local"
+        var region = overrides["region"] ?? (isLocalProvider ? "local" : "us-central1")
         var auth: AIBDeployAuthMode = .private
+        var buildMode: AIBBuildMode = isLocalProvider ? .convenience : .strict
         var providerConfig: [String: String] = overrides
         var kindDefaults: [AIBServiceKind: AIBDeployResourceConfig] = [:]
+        var sourceCredentials: [AIBSourceCredential] = []
+        var convenience: AIBConvenienceOptions?
 
         if FileManager.default.fileExists(atPath: targetPath) {
             let content = try String(contentsOfFile: targetPath, encoding: .utf8)
             if let node = try compose(yaml: content), let root = node.mapping {
+                if let buildModeValue = root["buildMode"]?.scalar?.string ?? root["build_mode"]?.scalar?.string {
+                    buildMode = AIBBuildMode(rawValue: buildModeValue) ?? .strict
+                }
+
+                if let sourceCredentialNodes = root["sourceCredentials"]?.sequence ?? root["source_credentials"]?.sequence {
+                    sourceCredentials = sourceCredentialNodes.compactMap { credentialNode in
+                        guard let credentialMap = credentialNode.mapping else { return nil }
+                        let typeValue = credentialMap["type"]?.scalar?.string ?? AIBSourceCredentialType.ssh.rawValue
+                        let host = credentialMap["host"]?.scalar?.string ?? "github.com"
+                        return AIBSourceCredential(
+                            type: AIBSourceCredentialType(rawValue: typeValue) ?? .ssh,
+                            host: host,
+                            localPrivateKeyPath: credentialMap["localPrivateKeyPath"]?.scalar?.string
+                                ?? credentialMap["local_private_key_path"]?.scalar?.string,
+                            localKnownHostsPath: credentialMap["localKnownHostsPath"]?.scalar?.string
+                                ?? credentialMap["local_known_hosts_path"]?.scalar?.string,
+                            localPrivateKeyPassphraseEnv: credentialMap["localPrivateKeyPassphraseEnv"]?.scalar?.string
+                                ?? credentialMap["local_private_key_passphrase_env"]?.scalar?.string,
+                            localAccessTokenEnv: credentialMap["localAccessTokenEnv"]?.scalar?.string
+                                ?? credentialMap["local_access_token_env"]?.scalar?.string,
+                            cloudPrivateKeySecret: credentialMap["cloudPrivateKeySecret"]?.scalar?.string
+                                ?? credentialMap["cloud_private_key_secret"]?.scalar?.string,
+                            cloudKnownHostsSecret: credentialMap["cloudKnownHostsSecret"]?.scalar?.string
+                                ?? credentialMap["cloud_known_hosts_secret"]?.scalar?.string
+                        )
+                    }
+                }
+
+                if let convenienceMap = root["convenience"]?.mapping {
+                    convenience = AIBConvenienceOptions(
+                        useHostCorepackCache: parseBoolNode(convenienceMap["useHostCorepackCache"] ?? convenienceMap["use_host_corepack_cache"]) ?? true,
+                        useHostPNPMStore: parseBoolNode(convenienceMap["useHostPNPMStore"] ?? convenienceMap["use_host_pnpm_store"]) ?? true,
+                        useRepoLocalPNPMStore: parseBoolNode(convenienceMap["useRepoLocalPNPMStore"] ?? convenienceMap["use_repo_local_pnpm_store"]) ?? true
+                    )
+                }
+
                 if let defaults = root["defaults"]?.mapping {
                     if let r = defaults["region"]?.scalar?.string, overrides["region"] == nil {
                         region = r
@@ -94,7 +134,14 @@ public enum AIBDeployService {
                 }
                 // Top-level keys (e.g., gcpProject, artifactRegistryHost)
                 for (key, value) in root {
-                    guard let keyStr = key.scalar?.string, keyStr != "defaults" else { continue }
+                    guard let keyStr = key.scalar?.string else { continue }
+                    let reservedTopLevelKeys: Set<String> = [
+                        "version", "target", "defaults",
+                        "buildMode", "build_mode",
+                        "sourceCredentials", "source_credentials",
+                        "convenience",
+                    ]
+                    guard !reservedTopLevelKeys.contains(keyStr) else { continue }
                     if let strVal = value.scalar?.string, providerConfig[keyStr] == nil {
                         providerConfig[keyStr] = strVal
                     }
@@ -106,6 +153,9 @@ public enum AIBDeployService {
             providerID: providerID,
             region: region,
             defaultAuth: auth,
+            buildMode: buildMode,
+            sourceCredentials: sourceCredentials,
+            convenience: convenience,
             kindDefaults: kindDefaults,
             providerConfig: providerConfig
         )
@@ -131,6 +181,18 @@ public enum AIBDeployService {
             concurrency: concurrency,
             timeout: timeout
         )
+    }
+
+    private static func parseBoolNode(_ node: Node?) -> Bool? {
+        guard let stringValue = node?.scalar?.string else { return nil }
+        switch stringValue.lowercased() {
+        case "true", "yes", "on", "1":
+            return true
+        case "false", "no", "off", "0":
+            return false
+        default:
+            return nil
+        }
     }
 
     // MARK: - Plan Generation
@@ -184,6 +246,40 @@ public enum AIBDeployService {
             let meta = resolved.serviceMetadata[service.id.rawValue]
             let runtime = meta?.runtime ?? .unknown
             let repoPath = meta?.repoPath ?? ""
+            let repoRoot = URL(fileURLWithPath: workspaceRoot)
+                .appendingPathComponent(repoPath)
+                .standardizedFileURL
+                .path
+            let sourceDependencies: [AIBSourceDependencyFinding]
+            do {
+                sourceDependencies = runtime == .node && !repoPath.isEmpty
+                    ? try AIBSourceDependencyAnalyzer.nodeGitDependencies(repoRoot: repoRoot)
+                    : []
+            } catch {
+                fatalErrors.append(
+                    "Service '\(service.id.rawValue)': failed to inspect source dependencies: \(error.localizedDescription)"
+                )
+                continue
+            }
+            let cloudSourceCredential = sourceDependencies.first.flatMap {
+                AIBSourceDependencyAnalyzer.matchingCloudCredential(for: $0, in: targetConfig.sourceCredentials)
+            }
+
+            do {
+                try validateDeployableDependencies(
+                    runtime: runtime,
+                    repoPath: repoPath,
+                    workspaceRoot: workspaceRoot,
+                    providerID: provider.providerID,
+                    sourceDependencies: sourceDependencies,
+                    targetConfig: targetConfig
+                )
+            } catch {
+                fatalErrors.append(
+                    "Service '\(service.id.rawValue)': \(error.localizedDescription)"
+                )
+                continue
+            }
 
             // Resolve Dockerfile using metadata
             let dockerfile: AIBDeployArtifact
@@ -359,6 +455,24 @@ public enum AIBDeployService {
                 )
             }
 
+            let claudeCodePluginArtifacts: [AIBDeployArtifact]
+            do {
+                if service.kind == .agent {
+                    claudeCodePluginArtifacts = try resolveClaudeCodePluginArtifacts(
+                        serviceID: service.id.rawValue,
+                        resolvedConnections: resolvedConnections,
+                        skillArtifacts: skillArtifacts
+                    )
+                } else {
+                    claudeCodePluginArtifacts = []
+                }
+            } catch {
+                fatalErrors.append(
+                    "Service '\(service.id.rawValue)': \(error.localizedDescription)"
+                )
+                continue
+            }
+
             var servicePlan = AIBDeployServicePlan(
                 id: service.id.rawValue,
                 serviceKind: AIBServiceKind(from: service.kind),
@@ -371,12 +485,15 @@ public enum AIBDeployService {
                     deployConfig: AIBDeployArtifact(relativePath: "", content: "", source: .generated),
                     mcpConnectionConfig: mcpConnectionArtifact,
                     skillConfigs: skillArtifacts,
+                    claudeCodePluginArtifacts: claudeCodePluginArtifacts,
                     executionDirectoryConfigs: executionDirectoryArtifacts
                 ),
                 resourceConfig: resourceConfig,
                 envVars: envVars,
                 connections: resolvedConnections,
                 isPublic: isPublic,
+                sourceDependencies: sourceDependencies,
+                sourceCredential: cloudSourceCredential,
                 requiredSecrets: requiredSecrets,
                 envWarnings: envWarnings
             )
@@ -532,6 +649,25 @@ public enum AIBDeployService {
                 }
             }
 
+            if !service.artifacts.claudeCodePluginArtifacts.isEmpty {
+                let pluginDir = serviceDeployDir.appendingPathComponent("plugin")
+                try fm.createDirectory(at: pluginDir, withIntermediateDirectories: true)
+
+                for artifact in service.artifacts.claudeCodePluginArtifacts {
+                    let destination = pluginDir.appendingPathComponent(artifact.relativePath)
+                    try fm.createDirectory(
+                        at: destination.deletingLastPathComponent(),
+                        withIntermediateDirectories: true
+                    )
+                    try artifact.content.write(to: destination, options: .atomic)
+                }
+
+                let usageURL = pluginDir.appendingPathComponent(ClaudeCodePluginBundle.usageFileName)
+                try ClaudeCodePluginBundle
+                    .usageDocument(pluginRootPath: pluginDir.path)
+                    .write(to: usageURL, atomically: true, encoding: .utf8)
+            }
+
             if !service.artifacts.executionDirectoryConfigs.isEmpty {
                 let executionDir = serviceDeployDir.appendingPathComponent("execution-directory")
                 try fm.createDirectory(at: executionDir, withIntermediateDirectories: true)
@@ -666,6 +802,32 @@ public enum AIBDeployService {
 // MARK: - Helpers
 
 private extension AIBDeployService {
+    static func validateDeployableDependencies(
+        runtime: RuntimeKind,
+        repoPath: String,
+        workspaceRoot: String,
+        providerID: String,
+        sourceDependencies: [AIBSourceDependencyFinding],
+        targetConfig: AIBDeployTargetConfig
+    ) throws {
+        guard providerID == "gcp-cloudrun", runtime == .node, !repoPath.isEmpty else { return }
+        for dependency in sourceDependencies {
+            guard AIBSourceDependencyAnalyzer.matchingCloudCredential(
+                for: dependency,
+                in: targetConfig.sourceCredentials
+            ) != nil else {
+                throw AIBDeployError(
+                    phase: "plan",
+                    message: """
+                    Cloud Run image build requires explicit SSH source credentials for private Git dependencies. \
+                    Missing cloud source credential for host '\(dependency.host)' referenced by \(repoPath)/\(dependency.sourceFile). \
+                    Add a matching entry under sourceCredentials in .aib/targets/\(providerID).yaml with cloudPrivateKeySecret and optional cloudKnownHostsSecret.
+                    """
+                )
+            }
+        }
+    }
+
     static let deployedSkillProjectionRoots: [String] = [
         "__aib_deploy/claude/skills",
         "__aib_deploy/agents/skills",
@@ -699,6 +861,51 @@ private extension AIBDeployService {
         }
 
         return artifacts.sorted { $0.relativePath < $1.relativePath }
+    }
+
+    static func resolveClaudeCodePluginArtifacts(
+        serviceID: String,
+        resolvedConnections: AIBDeployResolvedConnections,
+        skillArtifacts: [AIBDeployArtifact]
+    ) throws -> [AIBDeployArtifact] {
+        let template = ClaudeCodePluginTemplate(
+            serviceID: serviceID,
+            servers: resolvedConnections.mcpServers.map { target in
+                let serviceRef = URL(string: target.serviceRef) == nil ? target.serviceRef : nil
+                return .init(
+                    name: ClaudeCodePluginBundle.mcpServerName(
+                        serviceRef: serviceRef,
+                        resolvedURL: target.resolvedURL
+                    ),
+                    serviceRef: serviceRef,
+                    source: serviceRef == nil ? "url" : "service_ref"
+                )
+            }
+        )
+        let binding = ClaudeCodePluginBinding(
+            serviceID: serviceID,
+            servers: resolvedConnections.mcpServers.map { target in
+                let serviceRef = URL(string: target.serviceRef) == nil ? target.serviceRef : nil
+                return .init(
+                    name: ClaudeCodePluginBundle.mcpServerName(
+                        serviceRef: serviceRef,
+                        resolvedURL: target.resolvedURL
+                    ),
+                    resolvedURL: target.resolvedURL
+                )
+            }
+        )
+        let rendered = try ClaudeCodePluginBundle.render(template: template, binding: binding)
+
+        let pluginFiles = rendered.files.map {
+            AIBDeployArtifact(
+                relativePath: $0.relativePath,
+                content: $0.content,
+                source: .generated
+            )
+        }
+        return (pluginFiles + skillArtifacts)
+            .sorted { $0.relativePath < $1.relativePath }
     }
 
     static func resolveExecutionDirectoryArtifacts(

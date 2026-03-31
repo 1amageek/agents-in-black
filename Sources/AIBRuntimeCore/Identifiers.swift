@@ -18,13 +18,21 @@ public struct BackendEndpoint: Hashable, Sendable, Codable {
     public var host: String
     public var port: Int
 
-    public init(host: String = "127.0.0.1", port: Int) {
+    /// Path to a host-side Unix domain socket exposed via vsock relay.
+    /// When set, connections go through UDS instead of TCP.
+    public var unixSocketPath: String?
+
+    public init(host: String = "127.0.0.1", port: Int, unixSocketPath: String? = nil) {
         self.host = host
         self.port = port
+        self.unixSocketPath = unixSocketPath
     }
 
     /// Authority used for HTTP/1.1 Host header.
     public var hostHeaderValue: String {
+        if unixSocketPath != nil {
+            return "localhost"
+        }
         if port == 80 {
             return authorityHost
         }
@@ -42,11 +50,23 @@ public struct BackendEndpoint: Hashable, Sendable, Codable {
     }
 
     public var baseURLString: String {
+        if let uds = unixSocketPath {
+            let encoded = uds.addingPercentEncoding(withAllowedCharacters: .urlHostAllowed) ?? uds
+            return "http+unix://\(encoded)"
+        }
         return "http://\(authorityHost):\(port)"
     }
 
     private var authorityHost: String {
         let trimmed = host.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? "localhost" : trimmed
+        guard !trimmed.isEmpty else {
+            return "localhost"
+        }
+        switch trimmed {
+        case "127.0.0.1", "::1":
+            return "localhost"
+        default:
+            return trimmed
+        }
     }
 }
