@@ -56,11 +56,17 @@ public struct CloudSourceCredentialProvisioningService: Sendable {
     }
 
     public static func suggestedPrivateKeySecretName(workspaceRoot: String, host: String) -> String {
-        suggestedSecretName(workspaceRoot: workspaceRoot, host: host, suffix: "ssh-key")
+        AIBSourceCredentialNaming.suggestedPrivateKeySecretName(
+            workspaceRoot: workspaceRoot,
+            host: host
+        )
     }
 
     public static func suggestedKnownHostsSecretName(workspaceRoot: String, host: String) -> String {
-        suggestedSecretName(workspaceRoot: workspaceRoot, host: host, suffix: "known-hosts")
+        AIBSourceCredentialNaming.suggestedKnownHostsSecretName(
+            workspaceRoot: workspaceRoot,
+            host: host
+        )
     }
 
     public func provisionFromLocalSSH(request: Request) async throws -> Result {
@@ -112,31 +118,6 @@ public struct CloudSourceCredentialProvisioningService: Sendable {
             createdPrivateKeySecret: createdPrivateKeySecret,
             createdKnownHostsSecret: createdKnownHostsSecret
         )
-    }
-
-    private static func suggestedSecretName(workspaceRoot: String, host: String, suffix: String) -> String {
-        let workspaceName = URL(fileURLWithPath: workspaceRoot).lastPathComponent
-        let components = [
-            "aib",
-            sanitizeSecretComponent(workspaceName),
-            sanitizeSecretComponent(host),
-            suffix,
-        ].filter { !$0.isEmpty }
-        return components.joined(separator: "-")
-    }
-
-    private static func sanitizeSecretComponent(_ value: String) -> String {
-        let lowercased = value.lowercased()
-        let mapped = lowercased.map { character -> Character in
-            if character.isLetter || character.isNumber {
-                return character
-            }
-            return "-"
-        }
-        let collapsed = String(mapped)
-            .split(separator: "-", omittingEmptySubsequences: true)
-            .joined(separator: "-")
-        return collapsed.isEmpty ? "value" : String(collapsed.prefix(63))
     }
 
     private func materializePrivateKeyContents(

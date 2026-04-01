@@ -1,6 +1,7 @@
 import AIBConfig
 import AIBRuntimeCore
 import Foundation
+import YAML
 
 public struct ResolvedConfig: Sendable {
     public var config: AIBConfig
@@ -8,11 +9,18 @@ public struct ResolvedConfig: Sendable {
     /// Per-service deploy metadata keyed by namespaced service ID (e.g., "agent/node").
     /// Populated during config resolution from runtime detection results.
     public var serviceMetadata: [String: ServiceDeployMetadata]
+    public var sourceAuthRequirements: [WorkspaceSourceAuthRequirement]
 
-    public init(config: AIBConfig, warnings: [String], serviceMetadata: [String: ServiceDeployMetadata] = [:]) {
+    public init(
+        config: AIBConfig,
+        warnings: [String],
+        serviceMetadata: [String: ServiceDeployMetadata] = [:],
+        sourceAuthRequirements: [WorkspaceSourceAuthRequirement] = []
+    ) {
         self.config = config
         self.warnings = warnings
         self.serviceMetadata = serviceMetadata
+        self.sourceAuthRequirements = sourceAuthRequirements
     }
 }
 
@@ -103,7 +111,19 @@ public enum WorkspaceSyncer {
         }
         warnings.append(contentsOf: validation.warnings)
 
-        return ResolvedConfig(config: config, warnings: warnings, serviceMetadata: serviceMetadata)
+        let sourceAuthAnalysis = analyzeSourceAuthRequirements(
+            services: services,
+            serviceMetadata: serviceMetadata,
+            workspaceRoot: workspaceRoot
+        )
+        warnings.append(contentsOf: sourceAuthAnalysis.warnings)
+
+        return ResolvedConfig(
+            config: config,
+            warnings: warnings,
+            serviceMetadata: serviceMetadata,
+            sourceAuthRequirements: sourceAuthAnalysis.requirements
+        )
     }
 
     /// Sync workspace: resolve config and write runtime connection artifacts.
@@ -120,7 +140,11 @@ public enum WorkspaceSyncer {
             workspaceRoot: workspaceRoot,
             workspace: workspace
         )
-        return WorkspaceSyncResult(serviceCount: resolved.config.services.count, warnings: resolved.warnings)
+        return WorkspaceSyncResult(
+            serviceCount: resolved.config.services.count,
+            warnings: resolved.warnings,
+            sourceAuthRequirements: resolved.sourceAuthRequirements
+        )
     }
 
     /// Write runtime connection JSON artifacts for agent services.
@@ -701,6 +725,208 @@ public enum WorkspaceSyncer {
         return URL(fileURLWithPath: inlineCWD, relativeTo: repoURL)
             .standardizedFileURL
             .path(percentEncoded: false)
+    }
+}
+
+private extension WorkspaceSyncer {
+    struct SourceAuthAnalysisResult {
+        var requirements: [WorkspaceSourceAuthRequirement]
+        var warnings: [String]
+    }
+
+    struct RequirementAccumulator {
+        var serviceIDs: Set<String>
+        var repoPath: String
+        var host: String
+        var findings: [AIBSourceDependencyFinding]
+        var hasLocalCredential: Bool
+        var hasCloudCredential: Bool
+        var suggestedPrivateKeySecretName: String
+        var suggestedKnownHostsSecretName: String?
+    }
+
+    static func analyzeSourceAuthRequirements(
+        services: [ServiceConfig],
+        serviceMetadata: [String: ServiceDeployMetadata],
+        workspaceRoot: String
+    ) -> SourceAuthAnalysisResult {
+        var warnings: [String] = []
+
+        let localSourceCredentials: [AIBSourceCredential]
+        do {
+            localSourceCredentials = try loadTargetSourceCredentials(
+                workspaceRoot: workspaceRoot,
+                providerID: "local"
+            )
+        } catch {
+            localSourceCredentials = []
+            warnings.append("Failed to inspect local source credentials: \(error.localizedDescription)")
+        }
+
+        let cloudSourceCredentials: [AIBSourceCredential]
+        do {
+            cloudSourceCredentials = try loadTargetSourceCredentials(
+                workspaceRoot: workspaceRoot,
+                providerID: "gcp-cloudrun"
+            )
+        } catch {
+            cloudSourceCredentials = []
+            warnings.append("Failed to inspect gcp-cloudrun source credentials: \(error.localizedDescription)")
+        }
+
+        var accumulators: [String: RequirementAccumulator] = [:]
+
+        for service in services {
+            let serviceID = service.id.rawValue
+            guard let metadata = serviceMetadata[serviceID], metadata.runtime == .node else {
+                continue
+            }
+
+            let repoRoot = URL(fileURLWithPath: workspaceRoot)
+                .appendingPathComponent(metadata.repoPath)
+                .standardizedFileURL
+                .path
+
+            let findings: [AIBSourceDependencyFinding]
+            do {
+                findings = try AIBSourceDependencyAnalyzer.nodeGitDependencies(repoRoot: repoRoot)
+            } catch {
+                warnings.append(
+                    "Service '\(serviceID)': failed to inspect private source dependencies: \(error.localizedDescription)"
+                )
+                continue
+            }
+
+            for finding in findings {
+                let key = sourceAuthRequirementKey(repoPath: metadata.repoPath, host: finding.host)
+                var accumulator = accumulators[key] ?? RequirementAccumulator(
+                    serviceIDs: [],
+                    repoPath: metadata.repoPath,
+                    host: finding.host,
+                    findings: [],
+                    hasLocalCredential: false,
+                    hasCloudCredential: false,
+                    suggestedPrivateKeySecretName: AIBSourceCredentialNaming.suggestedPrivateKeySecretName(
+                        workspaceRoot: workspaceRoot,
+                        host: finding.host
+                    ),
+                    suggestedKnownHostsSecretName: AIBSourceCredentialNaming.suggestedKnownHostsSecretName(
+                        workspaceRoot: workspaceRoot,
+                        host: finding.host
+                    )
+                )
+
+                accumulator.serviceIDs.insert(serviceID)
+                if !accumulator.findings.contains(finding) {
+                    accumulator.findings.append(finding)
+                }
+                if AIBSourceDependencyAnalyzer.matchingLocalCredential(
+                    for: finding,
+                    in: localSourceCredentials
+                ) != nil {
+                    accumulator.hasLocalCredential = true
+                }
+                if AIBSourceDependencyAnalyzer.matchingCloudCredential(
+                    for: finding,
+                    in: cloudSourceCredentials
+                ) != nil {
+                    accumulator.hasCloudCredential = true
+                }
+                accumulators[key] = accumulator
+            }
+        }
+
+        let requirements = accumulators.values
+            .map { accumulator in
+                WorkspaceSourceAuthRequirement(
+                    serviceIDs: accumulator.serviceIDs.sorted(),
+                    repoPath: accumulator.repoPath,
+                    host: accumulator.host,
+                    findings: accumulator.findings.sorted {
+                        if $0.sourceFile == $1.sourceFile {
+                            return $0.requirement < $1.requirement
+                        }
+                        return $0.sourceFile < $1.sourceFile
+                    },
+                    hasLocalCredential: accumulator.hasLocalCredential,
+                    hasCloudCredential: accumulator.hasCloudCredential,
+                    suggestedPrivateKeySecretName: accumulator.suggestedPrivateKeySecretName,
+                    suggestedKnownHostsSecretName: accumulator.suggestedKnownHostsSecretName
+                )
+            }
+            .sorted {
+                if $0.repoPath == $1.repoPath {
+                    return $0.host.localizedStandardCompare($1.host) == .orderedAscending
+                }
+                return $0.repoPath.localizedStandardCompare($1.repoPath) == .orderedAscending
+            }
+
+        warnings.append(contentsOf: sourceAuthWarnings(for: requirements))
+        return SourceAuthAnalysisResult(requirements: requirements, warnings: warnings)
+    }
+
+    static func sourceAuthWarnings(for requirements: [WorkspaceSourceAuthRequirement]) -> [String] {
+        requirements.compactMap { requirement in
+            guard !requirement.hasCloudCredential else { return nil }
+            let serviceList = requirement.serviceIDs.joined(separator: ", ")
+            let sourceFiles = requirement.findings.map(\.sourceFile).joined(separator: ", ")
+            if requirement.hasLocalCredential {
+                return """
+                Private Git dependency detected for \(serviceList) (\(requirement.repoPath)) on host '\(requirement.host)' via \(sourceFiles). \
+                Cloud Run source auth is not configured yet. Use Cloud Settings or the app quick setup to create Secret Manager entries.
+                """
+            }
+            return """
+            Private Git dependency detected for \(serviceList) (\(requirement.repoPath)) on host '\(requirement.host)' via \(sourceFiles). \
+            Configure a matching local SSH credential in .aib/targets/local.yaml before provisioning gcp-cloudrun source auth.
+            """
+        }
+    }
+
+    static func sourceAuthRequirementKey(repoPath: String, host: String) -> String {
+        "\(repoPath)|\(host.lowercased())"
+    }
+
+    static func loadTargetSourceCredentials(
+        workspaceRoot: String,
+        providerID: String
+    ) throws -> [AIBSourceCredential] {
+        let targetURL = URL(fileURLWithPath: workspaceRoot)
+            .appendingPathComponent(".aib/targets/\(providerID).yaml")
+        guard FileManager.default.fileExists(atPath: targetURL.path) else {
+            return []
+        }
+
+        let content = try String(contentsOf: targetURL, encoding: .utf8)
+        guard let node = try compose(yaml: content), let root = node.mapping else {
+            return []
+        }
+        guard let sourceCredentialNodes = root["sourceCredentials"]?.sequence ?? root["source_credentials"]?.sequence else {
+            return []
+        }
+
+        return sourceCredentialNodes.compactMap { credentialNode in
+            guard let credentialMap = credentialNode.mapping else { return nil }
+            let typeValue = credentialMap["type"]?.scalar?.string ?? AIBSourceCredentialType.ssh.rawValue
+            let host = credentialMap["host"]?.scalar?.string ?? "github.com"
+            guard let type = AIBSourceCredentialType(rawValue: typeValue) else { return nil }
+            return AIBSourceCredential(
+                type: type,
+                host: host,
+                localPrivateKeyPath: credentialMap["localPrivateKeyPath"]?.scalar?.string
+                    ?? credentialMap["local_private_key_path"]?.scalar?.string,
+                localKnownHostsPath: credentialMap["localKnownHostsPath"]?.scalar?.string
+                    ?? credentialMap["local_known_hosts_path"]?.scalar?.string,
+                localPrivateKeyPassphraseEnv: credentialMap["localPrivateKeyPassphraseEnv"]?.scalar?.string
+                    ?? credentialMap["local_private_key_passphrase_env"]?.scalar?.string,
+                localAccessTokenEnv: credentialMap["localAccessTokenEnv"]?.scalar?.string
+                    ?? credentialMap["local_access_token_env"]?.scalar?.string,
+                cloudPrivateKeySecret: credentialMap["cloudPrivateKeySecret"]?.scalar?.string
+                    ?? credentialMap["cloud_private_key_secret"]?.scalar?.string,
+                cloudKnownHostsSecret: credentialMap["cloudKnownHostsSecret"]?.scalar?.string
+                    ?? credentialMap["cloud_known_hosts_secret"]?.scalar?.string
+            )
+        }
     }
 }
 

@@ -411,7 +411,7 @@ struct DeployReviewView: View {
                     sectionHeader("Warnings")
 
                     cardBackground {
-                        ForEach(plan.warnings, id: \.self) { warning in
+                        ForEach(Array(plan.warnings.enumerated()), id: \.offset) { _, warning in
                             HStack(alignment: .top, spacing: 8) {
                                 Image(systemName: "exclamationmark.triangle.fill")
                                     .font(.caption)
@@ -441,7 +441,7 @@ struct DeployReviewView: View {
                     sectionHeader("Secrets Required", count: plan.allRequiredSecrets.count)
 
                     cardBackground {
-                        ForEach(Array(plan.allRequiredSecrets.enumerated()), id: \.element) { index, name in
+                        ForEach(Array(plan.allRequiredSecrets.enumerated()), id: \.offset) { index, name in
                             if index > 0 {
                                 Divider().padding(.leading, 12)
                             }
@@ -475,7 +475,7 @@ struct DeployReviewView: View {
                     sectionHeader("Environment Warnings")
 
                     cardBackground {
-                        ForEach(plan.allEnvWarnings, id: \.self) { warning in
+                        ForEach(Array(plan.allEnvWarnings.enumerated()), id: \.offset) { _, warning in
                             HStack(alignment: .top, spacing: 8) {
                                 Image(systemName: "info.circle.fill")
                                     .font(.caption)

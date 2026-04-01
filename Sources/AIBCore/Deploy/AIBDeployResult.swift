@@ -19,6 +19,14 @@ public struct AIBDeployResult: Sendable {
     public var allSucceeded: Bool {
         serviceResults.allSatisfy(\.success)
     }
+
+    public var succeededCount: Int {
+        serviceResults.filter(\.success).count
+    }
+
+    public var failedCount: Int {
+        serviceResults.count - succeededCount
+    }
 }
 
 /// The result of deploying a single service.

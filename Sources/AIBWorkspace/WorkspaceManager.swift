@@ -43,7 +43,12 @@ public enum AIBWorkspaceManager {
         try ensureGitignoreEntries(workspaceRoot: workspaceRoot)
 
         let syncResult = try WorkspaceSyncer.sync(workspaceRoot: workspaceRoot, workspace: workspace)
-        return WorkspaceInitResult(workspaceConfig: workspace, generatedServices: syncResult.serviceCount, warnings: syncResult.warnings)
+        return WorkspaceInitResult(
+            workspaceConfig: workspace,
+            generatedServices: syncResult.serviceCount,
+            warnings: syncResult.warnings,
+            sourceAuthRequirements: syncResult.sourceAuthRequirements
+        )
     }
 
     public static func loadWorkspace(workspaceRoot: String) throws -> AIBWorkspaceConfig {
@@ -92,7 +97,12 @@ public enum AIBWorkspaceManager {
         let merged = merge(existing: existing, discovered: discovered)
         try saveWorkspace(merged, workspaceRoot: workspaceRoot)
         let syncResult = try WorkspaceSyncer.sync(workspaceRoot: workspaceRoot, workspace: merged)
-        return WorkspaceInitResult(workspaceConfig: merged, generatedServices: syncResult.serviceCount, warnings: syncResult.warnings)
+        return WorkspaceInitResult(
+            workspaceConfig: merged,
+            generatedServices: syncResult.serviceCount,
+            warnings: syncResult.warnings,
+            sourceAuthRequirements: syncResult.sourceAuthRequirements
+        )
     }
 
     public static func addRepo(workspaceRoot: String, repoURL: URL) throws -> WorkspaceInitResult {
@@ -125,7 +135,12 @@ public enum AIBWorkspaceManager {
 
         try saveWorkspace(workspace, workspaceRoot: workspaceRoot)
         let syncResult = try WorkspaceSyncer.sync(workspaceRoot: workspaceRoot, workspace: workspace)
-        return WorkspaceInitResult(workspaceConfig: workspace, generatedServices: syncResult.serviceCount, warnings: syncResult.warnings)
+        return WorkspaceInitResult(
+            workspaceConfig: workspace,
+            generatedServices: syncResult.serviceCount,
+            warnings: syncResult.warnings,
+            sourceAuthRequirements: syncResult.sourceAuthRequirements
+        )
     }
 
     /// Update the path of an existing repo in workspace.yaml.
@@ -153,7 +168,12 @@ public enum AIBWorkspaceManager {
 
         try saveWorkspace(workspace, workspaceRoot: workspaceRoot)
         let syncResult = try WorkspaceSyncer.sync(workspaceRoot: workspaceRoot, workspace: workspace)
-        return WorkspaceInitResult(workspaceConfig: workspace, generatedServices: syncResult.serviceCount, warnings: syncResult.warnings)
+        return WorkspaceInitResult(
+            workspaceConfig: workspace,
+            generatedServices: syncResult.serviceCount,
+            warnings: syncResult.warnings,
+            sourceAuthRequirements: syncResult.sourceAuthRequirements
+        )
     }
 
     public static func updateRepoRuntime(
@@ -185,7 +205,12 @@ public enum AIBWorkspaceManager {
 
         try saveWorkspace(workspace, workspaceRoot: workspaceRoot)
         let syncResult = try WorkspaceSyncer.sync(workspaceRoot: workspaceRoot, workspace: workspace)
-        return WorkspaceInitResult(workspaceConfig: workspace, generatedServices: syncResult.serviceCount, warnings: syncResult.warnings)
+        return WorkspaceInitResult(
+            workspaceConfig: workspace,
+            generatedServices: syncResult.serviceCount,
+            warnings: syncResult.warnings,
+            sourceAuthRequirements: syncResult.sourceAuthRequirements
+        )
     }
 
     public static func configureServices(
@@ -257,7 +282,12 @@ public enum AIBWorkspaceManager {
 
         try saveWorkspace(workspace, workspaceRoot: workspaceRoot)
         let syncResult = try WorkspaceSyncer.sync(workspaceRoot: workspaceRoot, workspace: workspace)
-        return WorkspaceInitResult(workspaceConfig: workspace, generatedServices: syncResult.serviceCount, warnings: syncResult.warnings)
+        return WorkspaceInitResult(
+            workspaceConfig: workspace,
+            generatedServices: syncResult.serviceCount,
+            warnings: syncResult.warnings,
+            sourceAuthRequirements: syncResult.sourceAuthRequirements
+        )
     }
 
     public static func removeService(
@@ -313,7 +343,12 @@ public enum AIBWorkspaceManager {
 
         try saveWorkspace(workspace, workspaceRoot: workspaceRoot)
         let syncResult = try WorkspaceSyncer.sync(workspaceRoot: workspaceRoot, workspace: workspace)
-        return WorkspaceInitResult(workspaceConfig: workspace, generatedServices: syncResult.serviceCount, warnings: syncResult.warnings)
+        return WorkspaceInitResult(
+            workspaceConfig: workspace,
+            generatedServices: syncResult.serviceCount,
+            warnings: syncResult.warnings,
+            sourceAuthRequirements: syncResult.sourceAuthRequirements
+        )
     }
 
     public static func syncWorkspace(workspaceRoot: String) throws -> WorkspaceSyncResult {

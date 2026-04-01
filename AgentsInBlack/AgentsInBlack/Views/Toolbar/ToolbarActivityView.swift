@@ -158,9 +158,7 @@ struct ToolbarActivityView: View {
                 .frame(width: 6, height: 6)
         case .starting:
             if let progress = model.kernelDownloadProgress {
-                ProgressView(progress)
-                    .progressViewStyle(.linear)
-                    .frame(width: 80)
+                FoundationProgressBarView(progress: progress, width: 80)
             } else {
                 ProgressView()
                     .controlSize(.mini)

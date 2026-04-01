@@ -298,6 +298,21 @@ public enum AIBDeployService {
                 continue
             }
 
+            do {
+                try validateCustomDockerfileContract(
+                    serviceID: service.id.rawValue,
+                    packageManager: meta?.packageManager ?? .unknown,
+                    dockerfile: dockerfile,
+                    sourceDependencies: sourceDependencies,
+                    providerID: provider.providerID
+                )
+            } catch {
+                fatalErrors.append(
+                    "Service '\(service.id.rawValue)': \(error.localizedDescription)"
+                )
+                continue
+            }
+
             let skillArtifacts: [AIBDeployArtifact]
             do {
                 skillArtifacts = try resolveSkillArtifacts(
@@ -427,7 +442,7 @@ public enum AIBDeployService {
                 .filter { !envVars.keys.contains($0.name) }
                 .map(\.name)
             let envWarnings = missingRegularVars.map {
-                "Environment variable '\($0)' referenced in source but not configured in workspace.yaml env."
+                "Service '\(service.id.rawValue)': Environment variable '\($0)' referenced in source but not configured in workspace.yaml env."
             }
 
             let serviceKind = AIBServiceKind(from: service.kind)
@@ -801,8 +816,8 @@ public enum AIBDeployService {
 
 // MARK: - Helpers
 
-private extension AIBDeployService {
-    static func validateDeployableDependencies(
+extension AIBDeployService {
+    private static func validateDeployableDependencies(
         runtime: RuntimeKind,
         repoPath: String,
         workspaceRoot: String,
@@ -826,6 +841,88 @@ private extension AIBDeployService {
                 )
             }
         }
+    }
+
+    static func validateCustomDockerfileContract(
+        serviceID: String,
+        packageManager: PackageManagerKind,
+        dockerfile: AIBDeployArtifact,
+        sourceDependencies: [AIBSourceDependencyFinding],
+        providerID: String
+    ) throws {
+        guard providerID == "gcp-cloudrun", dockerfile.source == .custom else { return }
+        guard let content = dockerfile.utf8String else { return }
+
+        if packageManager == .pnpm, content.localizedCaseInsensitiveContains("npm ci") {
+            throw AIBDeployError(
+                phase: "plan",
+                message: """
+                Custom Dockerfile \(dockerfile.relativePath) uses 'npm ci' but this service is detected as pnpm-managed. \
+                Use pnpm-based install steps or remove the custom Dockerfile so AIB can generate one.
+                """
+            )
+        }
+
+        guard !sourceDependencies.isEmpty else { return }
+
+        let installCommands = dockerfileInstallCommands(content)
+        if let laterStageCommand = installCommands.first(where: { $0.stageIndex > 0 }) {
+            throw AIBDeployError(
+                phase: "plan",
+                message: """
+                Custom Dockerfile \(dockerfile.relativePath) re-installs dependencies in a later stage ('\(laterStageCommand.command)'). \
+                For private Git dependencies, AIB only injects source auth into the initial build stage. Install dependencies once in the first stage and copy node_modules into later stages.
+                """
+            )
+        }
+
+        let lowercasedContent = content.lowercased()
+        let hasSSHClientSupport =
+            lowercasedContent.contains("openssh-client")
+            || lowercasedContent.contains("ssh-client")
+            || lowercasedContent.contains("/usr/bin/ssh")
+            || lowercasedContent.contains(" gitsshcommand")
+            || lowercasedContent.contains("git_ssh_command")
+        if !installCommands.isEmpty, !hasSSHClientSupport {
+            throw AIBDeployError(
+                phase: "plan",
+                message: """
+                Custom Dockerfile \(dockerfile.relativePath) installs private Git dependencies but does not appear to install an SSH client. \
+                Add openssh-client in the auth-enabled dependency stage, or remove the custom Dockerfile so AIB can generate a compatible one.
+                """
+            )
+        }
+    }
+
+    private static func dockerfileInstallCommands(_ content: String) -> [(stageIndex: Int, command: String)] {
+        let installMarkers = [
+            "npm ci",
+            "npm install",
+            "pnpm install",
+            "yarn install",
+            "bun install",
+        ]
+
+        var stageIndex = -1
+        var commands: [(stageIndex: Int, command: String)] = []
+
+        for rawLine in content.components(separatedBy: .newlines) {
+            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !line.isEmpty, !line.hasPrefix("#") else { continue }
+
+            if line.uppercased().hasPrefix("FROM ") {
+                stageIndex += 1
+                continue
+            }
+
+            guard line.uppercased().hasPrefix("RUN ") else { continue }
+            let lowercasedLine = line.lowercased()
+            if installMarkers.contains(where: { lowercasedLine.contains($0) }) {
+                commands.append((stageIndex: max(stageIndex, 0), command: line))
+            }
+        }
+
+        return commands
     }
 
     static let deployedSkillProjectionRoots: [String] = [

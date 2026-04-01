@@ -407,21 +407,70 @@ public struct WorkspaceInitResult: Sendable {
     public var workspaceConfig: AIBWorkspaceConfig
     public var generatedServices: Int
     public var warnings: [String]
+    public var sourceAuthRequirements: [WorkspaceSourceAuthRequirement]
 
-    public init(workspaceConfig: AIBWorkspaceConfig, generatedServices: Int, warnings: [String]) {
+    public init(
+        workspaceConfig: AIBWorkspaceConfig,
+        generatedServices: Int,
+        warnings: [String],
+        sourceAuthRequirements: [WorkspaceSourceAuthRequirement] = []
+    ) {
         self.workspaceConfig = workspaceConfig
         self.generatedServices = generatedServices
         self.warnings = warnings
+        self.sourceAuthRequirements = sourceAuthRequirements
     }
 }
 
 public struct WorkspaceSyncResult: Sendable {
     public var serviceCount: Int
     public var warnings: [String]
+    public var sourceAuthRequirements: [WorkspaceSourceAuthRequirement]
 
-    public init(serviceCount: Int, warnings: [String] = []) {
+    public init(
+        serviceCount: Int,
+        warnings: [String] = [],
+        sourceAuthRequirements: [WorkspaceSourceAuthRequirement] = []
+    ) {
         self.serviceCount = serviceCount
         self.warnings = warnings
+        self.sourceAuthRequirements = sourceAuthRequirements
+    }
+}
+
+public struct WorkspaceSourceAuthRequirement: Sendable, Equatable, Identifiable {
+    public var serviceIDs: [String]
+    public var repoPath: String
+    public var host: String
+    public var findings: [AIBSourceDependencyFinding]
+    public var hasLocalCredential: Bool
+    public var hasCloudCredential: Bool
+    public var suggestedPrivateKeySecretName: String
+    public var suggestedKnownHostsSecretName: String?
+
+    public var id: String {
+        let services = serviceIDs.sorted().joined(separator: ",")
+        return "\(repoPath)|\(host.lowercased())|\(services)"
+    }
+
+    public init(
+        serviceIDs: [String],
+        repoPath: String,
+        host: String,
+        findings: [AIBSourceDependencyFinding],
+        hasLocalCredential: Bool,
+        hasCloudCredential: Bool,
+        suggestedPrivateKeySecretName: String,
+        suggestedKnownHostsSecretName: String? = nil
+    ) {
+        self.serviceIDs = serviceIDs
+        self.repoPath = repoPath
+        self.host = host
+        self.findings = findings
+        self.hasLocalCredential = hasLocalCredential
+        self.hasCloudCredential = hasCloudCredential
+        self.suggestedPrivateKeySecretName = suggestedPrivateKeySecretName
+        self.suggestedKnownHostsSecretName = suggestedKnownHostsSecretName
     }
 }
 

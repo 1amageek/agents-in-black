@@ -46,7 +46,7 @@ struct DeploySecretsInputView: View {
 
     private var secretFieldsSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            ForEach(requiredSecrets, id: \.self) { name in
+            ForEach(Array(requiredSecrets.enumerated()), id: \.offset) { _, name in
                 VStack(alignment: .leading, spacing: 4) {
                     Text(name)
                         .font(.system(.caption, design: .monospaced).weight(.medium))

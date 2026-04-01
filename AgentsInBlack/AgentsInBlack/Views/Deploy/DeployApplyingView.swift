@@ -11,7 +11,7 @@ struct DeployApplyingView: View {
             Text("Deploying...")
                 .font(.headline)
 
-            ProgressView(progress)
+            FoundationProgressBarView(progress: progress, showsPercentage: true)
 
             Spacer()
 

@@ -94,11 +94,18 @@ final class AgentsInBlackAppModel {
     var deployPhase: AIBDeployPhase = .idle
     var showDeploySheet: Bool = false
     var showCloudSettings: Bool = false
+    var workspaceSourceAuthRequirements: [WorkspaceSourceAuthRequirement] = []
+    var sourceAuthQuickSetupRequirement: WorkspaceSourceAuthRequirement?
+    var isProvisioningSourceAuthQuickSetup: Bool = false
+    var sourceAuthQuickSetupErrorMessage: String?
     private var cloudSettingsOpenedForDeploy: Bool = false
     private var deployEventsTask: Task<Void, Never>?
     private let configStore: DeployTargetConfigStore = DefaultDeployTargetConfigStore()
+    private let cloudSourceAuthBootstrapService = CloudSourceAuthBootstrapService()
     private let gcloudContextService = GCloudContextService()
     private let targetSourceAuthKeychainStore = TargetSourceAuthKeychainStore()
+    private var presentedSourceAuthQuickSetupKeys: Set<String> = []
+    private var announcedSourceAuthIssueKeys: Set<String> = []
 
     // MARK: - Deploy Environment Status
     var buildBackendCheckResult: PreflightCheckResult?
@@ -247,6 +254,7 @@ final class AgentsInBlackAppModel {
         let logger = os.Logger(subsystem: "com.aib.app", category: "Workspace")
         logger.info("loadWorkspace: starting at \(url.path)")
         do {
+            let previousWorkspaceRoot = workspace?.rootURL.standardizedFileURL.path
             // Remove repos whose directories no longer exist before loading
             let removed = try AIBWorkspaceCore.removeStaleRepos(workspaceRoot: url.path)
             if !removed.isEmpty {
@@ -254,7 +262,15 @@ final class AgentsInBlackAppModel {
             }
 
             let snapshot = try workspaceDiscovery.loadWorkspace(at: url)
+            let workspaceConfig = try AIBWorkspaceCore.loadWorkspace(workspaceRoot: url.path)
+            let resolvedConfig = try WorkspaceSyncer.resolveConfig(
+                workspaceRoot: url.path,
+                workspace: workspaceConfig
+            )
             logger.info("loadWorkspace: loaded \(snapshot.repos.count) repos, \(snapshot.services.count) services")
+            if previousWorkspaceRoot != snapshot.rootURL.standardizedFileURL.path {
+                clearWorkspaceSourceAuthState()
+            }
             workspace = snapshot
             startDirectoryMonitor(for: url)
             gatewayPort = snapshot.gatewayPort
@@ -284,6 +300,11 @@ final class AgentsInBlackAppModel {
             rebuildAllSidebarStatuses()
             lastErrorMessage = nil
             refreshEnvironmentStatus()
+            applyWorkspaceSourceAuthRequirements(
+                resolvedConfig.sourceAuthRequirements,
+                workspaceRoot: snapshot.rootURL.path,
+                userInitiated: false
+            )
         } catch {
             logger.error("loadWorkspace: failed: \(error)")
             setError("Failed to load workspace: \(error.localizedDescription)")
@@ -376,10 +397,9 @@ final class AgentsInBlackAppModel {
 
         dropLogger.info("[REF] Calling AIBWorkspaceCore.addRepo, workspaceRoot=\(workspace.rootURL.path), repoURL=\(url.path)")
         do {
-            _ = try AIBWorkspaceCore.addRepo(workspaceRoot: workspace.rootURL.path, repoURL: url)
+            let result = try AIBWorkspaceCore.addRepo(workspaceRoot: workspace.rootURL.path, repoURL: url)
             dropLogger.info("[REF] Success, reloading workspace")
-            await loadWorkspace(at: workspace.rootURL)
-            lastErrorMessage = nil
+            await finalizeUserInitiatedWorkspaceUpdate(result, workspaceRoot: workspace.rootURL)
         } catch {
             dropLogger.error("[REF] Failed: \(error.localizedDescription)")
             setError("Failed to add repository: \(error.localizedDescription)")
@@ -405,13 +425,12 @@ final class AgentsInBlackAppModel {
     private func performRelocate(repoName: String, newURL: URL) async {
         guard let workspace else { return }
         do {
-            _ = try AIBWorkspaceCore.relocateRepo(
+            let result = try AIBWorkspaceCore.relocateRepo(
                 workspaceRoot: workspace.rootURL.path,
                 repoName: repoName,
                 newURL: newURL
             )
-            await loadWorkspace(at: workspace.rootURL)
-            lastErrorMessage = nil
+            await finalizeUserInitiatedWorkspaceUpdate(result, workspaceRoot: workspace.rootURL)
         } catch {
             setError("Failed to relocate directory: \(error.localizedDescription)")
         }
@@ -453,7 +472,14 @@ final class AgentsInBlackAppModel {
             )
         }
 
+        let syncResult = try AIBWorkspaceCore.syncWorkspace(workspaceRoot: workspace.rootURL.path)
+        let combinedRequirements = result.sourceAuthRequirements + configResult.sourceAuthRequirements + syncResult.sourceAuthRequirements
         await loadWorkspace(at: workspace.rootURL)
+        applyWorkspaceSourceAuthRequirements(
+            deduplicatedSourceAuthRequirements(combinedRequirements),
+            workspaceRoot: workspace.rootURL.path,
+            userInitiated: true
+        )
         lastErrorMessage = nil
     }
 
@@ -500,8 +526,8 @@ final class AgentsInBlackAppModel {
 
                 if result.exitCode == 0 {
                     dropLogger.info("[CLONE] Success, rescanning workspace")
-                    _ = try AIBWorkspaceCore.rescanWorkspace(workspaceRoot: workspaceRoot)
-                    await loadWorkspace(at: workspace.rootURL)
+                    let syncResult = try AIBWorkspaceCore.rescanWorkspace(workspaceRoot: workspaceRoot)
+                    await finalizeUserInitiatedWorkspaceUpdate(syncResult, workspaceRoot: workspace.rootURL)
                     cloneInProgress = false
                     showCloneSheet = false
                 } else {
@@ -718,6 +744,237 @@ final class AgentsInBlackAppModel {
             targetConfig: localTargetConfig
         ) { [targetSourceAuthKeychainStore] environmentKey in
             try targetSourceAuthKeychainStore.passphrase(for: environmentKey)
+        }
+    }
+
+    private func clearWorkspaceSourceAuthState() {
+        workspaceSourceAuthRequirements = []
+        sourceAuthQuickSetupRequirement = nil
+        sourceAuthQuickSetupErrorMessage = nil
+        isProvisioningSourceAuthQuickSetup = false
+        presentedSourceAuthQuickSetupKeys = []
+        announcedSourceAuthIssueKeys = []
+    }
+
+    private func applyWorkspaceSourceAuthRequirements(
+        _ requirements: [WorkspaceSourceAuthRequirement],
+        workspaceRoot: String,
+        userInitiated: Bool
+    ) {
+        workspaceSourceAuthRequirements = requirements
+
+        guard userInitiated else { return }
+        guard sourceAuthQuickSetupRequirement == nil else { return }
+        guard hasExplicitDeployTargetConfig(workspaceRoot: workspaceRoot, providerID: "gcp-cloudrun") else {
+            return
+        }
+
+        let providerID = (try? DeploymentProviderRegistry.detect(workspaceRoot: workspaceRoot).providerID)
+            ?? DeploymentProviderRegistry.default.providerID
+        guard providerID == "gcp-cloudrun" else { return }
+
+        let cloudProject = resolvedGCPProjectForSourceAuth(workspaceRoot: workspaceRoot)
+
+        for requirement in requirements where !requirement.hasCloudCredential {
+            let quickSetupKey = sourceAuthQuickSetupDedupeKey(
+                providerID: providerID,
+                requirement: requirement
+            )
+
+            if requirement.hasLocalCredential {
+                guard let cloudProject, !cloudProject.isEmpty else {
+                    let issueKey = "missing-project|\(quickSetupKey)"
+                    if announcedSourceAuthIssueKeys.insert(issueKey).inserted {
+                        runtimeAnnouncementCenter.enqueue(RuntimeAnnouncement(
+                            style: .warning,
+                            symbolName: "icloud.slash",
+                            title: "Google Cloud Project Required",
+                            message: "Private Git dependency for \(requirement.serviceIDs.joined(separator: ", ")) needs a Google Cloud project before source auth secrets can be created.",
+                            autoDismissDelay: nil,
+                            dedupeKey: issueKey
+                        ))
+                    }
+                    continue
+                }
+                _ = cloudProject
+
+                guard presentedSourceAuthQuickSetupKeys.insert(quickSetupKey).inserted else {
+                    continue
+                }
+                sourceAuthQuickSetupRequirement = requirement
+                sourceAuthQuickSetupErrorMessage = nil
+                return
+            }
+
+            let issueKey = "missing-local|\(quickSetupKey)"
+            if announcedSourceAuthIssueKeys.insert(issueKey).inserted {
+                runtimeAnnouncementCenter.enqueue(RuntimeAnnouncement(
+                    style: .warning,
+                    symbolName: "key.slash",
+                    title: "Local Source Auth Required",
+                    message: "Private Git dependency for \(requirement.serviceIDs.joined(separator: ", ")) needs a local SSH credential for \(requirement.host) before cloud source auth can be created.",
+                    autoDismissDelay: nil,
+                    dedupeKey: issueKey
+                ))
+            }
+        }
+    }
+
+    private func finalizeUserInitiatedSync(
+        _ syncResult: WorkspaceSyncResult,
+        workspaceRoot: URL
+    ) async {
+        await loadWorkspace(at: workspaceRoot)
+        applyWorkspaceSourceAuthRequirements(
+            syncResult.sourceAuthRequirements,
+            workspaceRoot: workspaceRoot.path,
+            userInitiated: true
+        )
+        lastErrorMessage = nil
+    }
+
+    private func finalizeUserInitiatedWorkspaceUpdate(
+        _ result: WorkspaceInitResult,
+        workspaceRoot: URL
+    ) async {
+        await loadWorkspace(at: workspaceRoot)
+        applyWorkspaceSourceAuthRequirements(
+            result.sourceAuthRequirements,
+            workspaceRoot: workspaceRoot.path,
+            userInitiated: true
+        )
+        lastErrorMessage = nil
+    }
+
+    private func sourceAuthQuickSetupDedupeKey(
+        providerID: String,
+        requirement: WorkspaceSourceAuthRequirement
+    ) -> String {
+        let services = requirement.serviceIDs.sorted().joined(separator: ",")
+        return "\(providerID)|\(requirement.host.lowercased())|\(services)|\(requirement.hasCloudCredential)"
+    }
+
+    private func deduplicatedSourceAuthRequirements(
+        _ requirements: [WorkspaceSourceAuthRequirement]
+    ) -> [WorkspaceSourceAuthRequirement] {
+        var merged: [String: WorkspaceSourceAuthRequirement] = [:]
+
+        for requirement in requirements {
+            let key = requirement.id
+            if var existing = merged[key] {
+                existing.serviceIDs = Array(Set(existing.serviceIDs).union(requirement.serviceIDs)).sorted()
+                var findingsByKey: [String: AIBSourceDependencyFinding] = [:]
+                for finding in existing.findings + requirement.findings {
+                    let findingKey = "\(finding.sourceFile)|\(finding.host)|\(finding.requirement)"
+                    findingsByKey[findingKey] = finding
+                }
+                existing.findings = findingsByKey.values.sorted {
+                    if $0.sourceFile == $1.sourceFile {
+                        return $0.requirement < $1.requirement
+                    }
+                    return $0.sourceFile < $1.sourceFile
+                }
+                existing.hasLocalCredential = existing.hasLocalCredential || requirement.hasLocalCredential
+                existing.hasCloudCredential = existing.hasCloudCredential || requirement.hasCloudCredential
+                if existing.suggestedPrivateKeySecretName.isEmpty {
+                    existing.suggestedPrivateKeySecretName = requirement.suggestedPrivateKeySecretName
+                }
+                if (existing.suggestedKnownHostsSecretName?.isEmpty ?? true) {
+                    existing.suggestedKnownHostsSecretName = requirement.suggestedKnownHostsSecretName
+                }
+                merged[key] = existing
+            } else {
+                merged[key] = requirement
+            }
+        }
+
+        return merged.values.sorted {
+            if $0.repoPath == $1.repoPath {
+                return $0.host.localizedStandardCompare($1.host) == .orderedAscending
+            }
+            return $0.repoPath.localizedStandardCompare($1.repoPath) == .orderedAscending
+        }
+    }
+
+    private func resolvedGCPProjectForSourceAuth(workspaceRoot: String) -> String? {
+        if let configuredGCloudProject, !configuredGCloudProject.isEmpty {
+            return configuredGCloudProject
+        }
+        if let activeGCloudProject, !activeGCloudProject.isEmpty {
+            return activeGCloudProject
+        }
+        return loadConfiguredGCloudProject(
+            workspaceRoot: workspaceRoot,
+            providerID: "gcp-cloudrun"
+        )
+    }
+
+    private func hasExplicitDeployTargetConfig(
+        workspaceRoot: String,
+        providerID: String
+    ) -> Bool {
+        let rootURL = URL(fileURLWithPath: workspaceRoot)
+        let yamlURL = rootURL.appendingPathComponent(".aib/targets/\(providerID).yaml")
+        if FileManager.default.fileExists(atPath: yamlURL.path) {
+            return true
+        }
+
+        let ymlURL = rootURL.appendingPathComponent(".aib/targets/\(providerID).yml")
+        return FileManager.default.fileExists(atPath: ymlURL.path)
+    }
+
+    func dismissSourceAuthQuickSetup() {
+        sourceAuthQuickSetupRequirement = nil
+        sourceAuthQuickSetupErrorMessage = nil
+        isProvisioningSourceAuthQuickSetup = false
+    }
+
+    func provisionSourceAuthQuickSetup() async {
+        guard !isProvisioningSourceAuthQuickSetup else { return }
+        guard let workspace, let requirement = sourceAuthQuickSetupRequirement else { return }
+        guard let projectID = resolvedGCPProjectForSourceAuth(workspaceRoot: workspace.rootURL.path),
+              !projectID.isEmpty else
+        {
+            sourceAuthQuickSetupErrorMessage = "Select a Google Cloud project before creating source auth secrets."
+            return
+        }
+
+        isProvisioningSourceAuthQuickSetup = true
+        sourceAuthQuickSetupErrorMessage = nil
+        defer { isProvisioningSourceAuthQuickSetup = false }
+
+        do {
+            let result = try await cloudSourceAuthBootstrapService.provisionGCPCloudRunSourceAuth(
+                workspaceRoot: workspace.rootURL.path,
+                projectID: projectID,
+                host: requirement.host,
+                preferredPrivateKeySecretName: requirement.suggestedPrivateKeySecretName,
+                preferredKnownHostsSecretName: requirement.suggestedKnownHostsSecretName
+            ) { [targetSourceAuthKeychainStore] environmentKey in
+                try targetSourceAuthKeychainStore.passphrase(for: environmentKey)
+            }
+
+            runtimeAnnouncementCenter.enqueue(RuntimeAnnouncement(
+                style: .success,
+                symbolName: "checkmark.shield.fill",
+                title: "Cloud Source Auth Ready",
+                message: "Updated \(result.privateKeySecretName) for \(requirement.host).",
+                autoDismissDelay: 2.4,
+                dedupeKey: "source-auth-ready|\(requirement.id)"
+            ))
+
+            sourceAuthQuickSetupRequirement = nil
+            sourceAuthQuickSetupErrorMessage = nil
+            refreshEnvironmentStatus()
+
+            let syncResult = try AIBWorkspaceCore.syncWorkspace(workspaceRoot: workspace.rootURL.path)
+            applyWorkspaceSourceAuthRequirements(
+                syncResult.sourceAuthRequirements,
+                workspaceRoot: workspace.rootURL.path,
+                userInitiated: true
+            )
+        } catch {
+            sourceAuthQuickSetupErrorMessage = error.localizedDescription
         }
     }
 
@@ -1195,10 +1452,9 @@ final class AgentsInBlackAppModel {
                 workspaceRoot: workspace.rootURL.path,
                 connectionsByNamespacedServiceID: mapping
             )
-            _ = try AIBWorkspaceCore.syncWorkspace(workspaceRoot: workspace.rootURL.path)
-            await loadWorkspace(at: workspace.rootURL)
+            let syncResult = try AIBWorkspaceCore.syncWorkspace(workspaceRoot: workspace.rootURL.path)
+            await finalizeUserInitiatedSync(syncResult, workspaceRoot: workspace.rootURL)
             hasUnsavedFlowChanges = false
-            lastErrorMessage = nil
         } catch {
             setError("Failed to save Flow connections: \(error.localizedDescription)")
         }
@@ -1217,9 +1473,8 @@ final class AgentsInBlackAppModel {
                 repoPath: repoPath,
                 runtime: runtime
             )
-            _ = try AIBWorkspaceCore.syncWorkspace(workspaceRoot: workspace.rootURL.path)
-            await loadWorkspace(at: workspace.rootURL)
-            lastErrorMessage = nil
+            let syncResult = try AIBWorkspaceCore.syncWorkspace(workspaceRoot: workspace.rootURL.path)
+            await finalizeUserInitiatedSync(syncResult, workspaceRoot: workspace.rootURL)
         } catch {
             setError("Failed to switch runtime: \(error.localizedDescription)")
         }
@@ -1233,13 +1488,18 @@ final class AgentsInBlackAppModel {
                 from: workspace.rootURL,
                 to: repo.rootURL
             )
-            _ = try AIBWorkspaceCore.configureServices(
+            let result = try AIBWorkspaceCore.configureServices(
                 workspaceRoot: workspace.rootURL.path,
                 path: repoPath,
                 runtimes: runtimes
             )
-            _ = try AIBWorkspaceCore.syncWorkspace(workspaceRoot: workspace.rootURL.path)
+            let syncResult = try AIBWorkspaceCore.syncWorkspace(workspaceRoot: workspace.rootURL.path)
             await loadWorkspace(at: workspace.rootURL)
+            applyWorkspaceSourceAuthRequirements(
+                deduplicatedSourceAuthRequirements(result.sourceAuthRequirements + syncResult.sourceAuthRequirements),
+                workspaceRoot: workspace.rootURL.path,
+                userInitiated: true
+            )
             lastErrorMessage = nil
         } catch {
             setError("Failed to configure services: \(error.localizedDescription)")
@@ -1264,9 +1524,8 @@ final class AgentsInBlackAppModel {
                 workspaceRoot: workspace.rootURL.path,
                 namespacedServiceID: namespacedServiceID
             )
-            _ = try AIBWorkspaceCore.syncWorkspace(workspaceRoot: workspace.rootURL.path)
-            await loadWorkspace(at: workspace.rootURL)
-            lastErrorMessage = nil
+            let syncResult = try AIBWorkspaceCore.syncWorkspace(workspaceRoot: workspace.rootURL.path)
+            await finalizeUserInitiatedSync(syncResult, workspaceRoot: workspace.rootURL)
         } catch {
             setError("Failed to remove service: \(error.localizedDescription)")
         }
@@ -1279,9 +1538,8 @@ final class AgentsInBlackAppModel {
                 workspaceRoot: workspace.rootURL.path,
                 namespacedServiceID: namespacedServiceID
             )
-            _ = try AIBWorkspaceCore.syncWorkspace(workspaceRoot: workspace.rootURL.path)
-            await loadWorkspace(at: workspace.rootURL)
-            lastErrorMessage = nil
+            let syncResult = try AIBWorkspaceCore.syncWorkspace(workspaceRoot: workspace.rootURL.path)
+            await finalizeUserInitiatedSync(syncResult, workspaceRoot: workspace.rootURL)
         } catch {
             setError("Failed to remove service: \(error.localizedDescription)")
         }
@@ -1295,9 +1553,8 @@ final class AgentsInBlackAppModel {
                 namespacedServiceID: namespacedServiceID,
                 path: path
             )
-            _ = try AIBWorkspaceCore.syncWorkspace(workspaceRoot: workspace.rootURL.path)
-            await loadWorkspace(at: workspace.rootURL)
-            lastErrorMessage = nil
+            let syncResult = try AIBWorkspaceCore.syncWorkspace(workspaceRoot: workspace.rootURL.path)
+            await finalizeUserInitiatedSync(syncResult, workspaceRoot: workspace.rootURL)
         } catch {
             setError("Failed to update MCP profile: \(error.localizedDescription)")
         }
@@ -1316,9 +1573,8 @@ final class AgentsInBlackAppModel {
                 namespacedServiceID: namespacedServiceID,
                 kind: kindString
             )
-            _ = try AIBWorkspaceCore.syncWorkspace(workspaceRoot: workspace.rootURL.path)
-            await loadWorkspace(at: workspace.rootURL)
-            lastErrorMessage = nil
+            let syncResult = try AIBWorkspaceCore.syncWorkspace(workspaceRoot: workspace.rootURL.path)
+            await finalizeUserInitiatedSync(syncResult, workspaceRoot: workspace.rootURL)
         } catch {
             setError("Failed to update service kind: \(error.localizedDescription)")
         }
@@ -1332,9 +1588,8 @@ final class AgentsInBlackAppModel {
                 namespacedServiceID: namespacedServiceID,
                 model: model
             )
-            _ = try AIBWorkspaceCore.syncWorkspace(workspaceRoot: workspace.rootURL.path)
-            await loadWorkspace(at: workspace.rootURL)
-            lastErrorMessage = nil
+            let syncResult = try AIBWorkspaceCore.syncWorkspace(workspaceRoot: workspace.rootURL.path)
+            await finalizeUserInitiatedSync(syncResult, workspaceRoot: workspace.rootURL)
         } catch {
             setError("Failed to update model: \(error.localizedDescription)")
         }
@@ -1347,9 +1602,8 @@ final class AgentsInBlackAppModel {
         guard let workspace else { return }
         do {
             try AIBWorkspaceCore.importSkill(workspaceRoot: workspace.rootURL.path, skillID: skillID)
-            _ = try AIBWorkspaceCore.syncWorkspace(workspaceRoot: workspace.rootURL.path)
-            await loadWorkspace(at: workspace.rootURL)
-            lastErrorMessage = nil
+            let syncResult = try AIBWorkspaceCore.syncWorkspace(workspaceRoot: workspace.rootURL.path)
+            await finalizeUserInitiatedSync(syncResult, workspaceRoot: workspace.rootURL)
         } catch {
             setError("Failed to import skill: \(error.localizedDescription)")
         }
@@ -1359,9 +1613,8 @@ final class AgentsInBlackAppModel {
         guard let workspace else { return }
         do {
             try AIBWorkspaceCore.removeSkill(workspaceRoot: workspace.rootURL.path, skillID: skillID)
-            _ = try AIBWorkspaceCore.syncWorkspace(workspaceRoot: workspace.rootURL.path)
-            await loadWorkspace(at: workspace.rootURL)
-            lastErrorMessage = nil
+            let syncResult = try AIBWorkspaceCore.syncWorkspace(workspaceRoot: workspace.rootURL.path)
+            await finalizeUserInitiatedSync(syncResult, workspaceRoot: workspace.rootURL)
         } catch {
             setError("Failed to remove skill: \(error.localizedDescription)")
         }
@@ -1384,9 +1637,8 @@ final class AgentsInBlackAppModel {
                 skillID: skillID,
                 namespacedServiceID: namespacedServiceID
             )
-            _ = try AIBWorkspaceCore.syncWorkspace(workspaceRoot: workspace.rootURL.path)
-            await loadWorkspace(at: workspace.rootURL)
-            lastErrorMessage = nil
+            let syncResult = try AIBWorkspaceCore.syncWorkspace(workspaceRoot: workspace.rootURL.path)
+            await finalizeUserInitiatedSync(syncResult, workspaceRoot: workspace.rootURL)
         } catch {
             setError("Failed to assign skill: \(error.localizedDescription)")
         }
@@ -1400,9 +1652,8 @@ final class AgentsInBlackAppModel {
                 skillID: skillID,
                 namespacedServiceID: namespacedServiceID
             )
-            _ = try AIBWorkspaceCore.syncWorkspace(workspaceRoot: workspace.rootURL.path)
-            await loadWorkspace(at: workspace.rootURL)
-            lastErrorMessage = nil
+            let syncResult = try AIBWorkspaceCore.syncWorkspace(workspaceRoot: workspace.rootURL.path)
+            await finalizeUserInitiatedSync(syncResult, workspaceRoot: workspace.rootURL)
         } catch {
             setError("Failed to unassign skill: \(error.localizedDescription)")
         }
@@ -1948,7 +2199,17 @@ final class AgentsInBlackAppModel {
             appendDeployLogLine(level: .info, message: "Applying deploy plan...")
         case .completed(let result):
             storeDeployedURLs(from: result)
-            appendDeployLogLine(level: .info, message: "Deploy completed: \(result.serviceResults.count) service(s)")
+            if result.failedCount == 0 {
+                appendDeployLogLine(
+                    level: .info,
+                    message: "Deploy completed: \(result.succeededCount)/\(result.serviceResults.count) service(s) succeeded"
+                )
+            } else {
+                appendDeployLogLine(
+                    level: .warning,
+                    message: "Deploy completed: \(result.succeededCount)/\(result.serviceResults.count) service(s) succeeded"
+                )
+            }
         case .failed(let error):
             appendDeployLogLine(level: .error, message: "Deploy failed (\(error.phase)): \(error.message)")
         case .cancelled:

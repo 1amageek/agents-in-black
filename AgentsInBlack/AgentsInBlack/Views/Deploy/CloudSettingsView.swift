@@ -1,5 +1,6 @@
 import AIBCore
 import AIBRuntimeCore
+import AIBWorkspace
 import SwiftUI
 
 /// Target configuration panel.
@@ -8,6 +9,7 @@ import SwiftUI
 /// then allows editing deploy target configuration persisted in `.aib/targets/{providerID}.yaml`.
 struct CloudSettingsView: View {
     let workspaceRootPath: String
+    let sourceAuthRequirements: [WorkspaceSourceAuthRequirement]
     let onDismiss: () -> Void
 
     // MARK: - Environment Check State
@@ -72,7 +74,7 @@ struct CloudSettingsView: View {
     private let gcloudContextService = GCloudContextService()
     private let targetSourceAuthKeychainStore = TargetSourceAuthKeychainStore()
     private let localSourceAuthValidationService = LocalSourceAuthValidationService()
-    private let cloudSourceCredentialProvisioningService = CloudSourceCredentialProvisioningService()
+    private let cloudSourceAuthBootstrapService = CloudSourceAuthBootstrapService()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -617,6 +619,10 @@ struct CloudSettingsView: View {
             Text("Source Auth")
                 .font(.callout.weight(.medium))
 
+            if providerID == "gcp-cloudrun", !pendingCloudSourceAuthRequirements.isEmpty {
+                pendingCloudSourceAuthRequirementsView
+            }
+
             TextField("Host", text: $sourceAuthHost)
                 .textFieldStyle(.roundedBorder)
             TextField("Cloud private key secret", text: $cloudPrivateKeySecret)
@@ -655,6 +661,46 @@ struct CloudSettingsView: View {
                 Text(cloudSourceAuthProvisionMessage)
                     .font(.caption)
                     .foregroundStyle(cloudSourceAuthProvisionFailed ? .red : .secondary)
+            }
+        }
+    }
+
+    private var pendingCloudSourceAuthRequirements: [WorkspaceSourceAuthRequirement] {
+        sourceAuthRequirements
+            .filter { !$0.hasCloudCredential }
+            .sorted {
+                if $0.repoPath == $1.repoPath {
+                    return $0.host.localizedStandardCompare($1.host) == .orderedAscending
+                }
+                return $0.repoPath.localizedStandardCompare($1.repoPath) == .orderedAscending
+            }
+    }
+
+    private var pendingCloudSourceAuthRequirementsView: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Detected Private Git Dependencies")
+                .font(.caption.weight(.semibold))
+
+            ForEach(pendingCloudSourceAuthRequirements) { requirement in
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("\(requirement.host) · \(requirement.serviceIDs.joined(separator: ", "))")
+                        .font(.caption.weight(.medium))
+                    Text(requirement.findings.map(\.sourceFile).joined(separator: ", "))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    if requirement.hasLocalCredential {
+                        Text("Ready for 1-click provisioning. Suggested secret: \(requirement.suggestedPrivateKeySecretName)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text("Add a matching local SSH credential in the local target before creating cloud source auth.")
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(10)
+                .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
             }
         }
     }
@@ -808,11 +854,12 @@ struct CloudSettingsView: View {
                 cloudKnownHostsSecret = credential.cloudKnownHostsSecret ?? ""
                 loadLocalSourceCredentialState(from: credential)
             } else {
-                sourceAuthHost = "github.com"
-                persistedSourceAuthHost = "github.com"
+                let suggestedRequirement = pendingCloudSourceAuthRequirements.first
+                sourceAuthHost = suggestedRequirement?.host ?? "github.com"
+                persistedSourceAuthHost = suggestedRequirement?.host ?? "github.com"
                 resetLocalSourceCredentialState()
-                cloudPrivateKeySecret = ""
-                cloudKnownHostsSecret = ""
+                cloudPrivateKeySecret = suggestedRequirement?.suggestedPrivateKeySecretName ?? ""
+                cloudKnownHostsSecret = suggestedRequirement?.suggestedKnownHostsSecretName ?? ""
             }
             if let convenience = config.convenience {
                 useHostCorepackCache = convenience.useHostCorepackCache
@@ -1040,76 +1087,30 @@ struct CloudSettingsView: View {
                 throw AIBDeployError(phase: "gcloud-secrets", message: "Set a Google Cloud project before creating cloud source auth secrets.")
             }
 
-            let localConfig = try configStore.load(workspaceRoot: workspaceRootPath, providerID: "local")
-            guard let localCredential = localConfig.sourceCredentials.first(where: {
-                $0.type == .ssh && $0.host.caseInsensitiveCompare(host) == .orderedSame
-            }) else {
-                throw AIBDeployError(
-                    phase: "gcloud-secrets",
-                    message: "No local SSH source credential for '\(host)' was found in .aib/targets/local.yaml."
-                )
-            }
-
-            guard let localPrivateKeyPath = localCredential.localPrivateKeyPath,
-                  !trimmed(localPrivateKeyPath).isEmpty else
-            {
-                throw AIBDeployError(
-                    phase: "gcloud-secrets",
-                    message: "The local SSH source credential for '\(host)' is missing localPrivateKeyPath."
-                )
-            }
-
-            let resolvedEnvironment = try AIBLocalSourceAuthEnvironmentResolver.resolvedSourceAuthEnvironment(
-                targetConfig: localConfig
-            ) { [targetSourceAuthKeychainStore] environmentKey in
-                if let value = ProcessInfo.processInfo.environment[environmentKey], !value.isEmpty {
-                    return value
-                }
-                return try targetSourceAuthKeychainStore.passphrase(for: environmentKey)
-            }
-            let passphrase = localCredential.localPrivateKeyPassphraseEnv.flatMap { resolvedEnvironment[$0] }
-
-            let privateKeySecretName = trimmed(cloudPrivateKeySecret).isEmpty
-                ? CloudSourceCredentialProvisioningService.suggestedPrivateKeySecretName(
-                    workspaceRoot: workspaceRootPath,
-                    host: host
-                )
-                : trimmed(cloudPrivateKeySecret)
-            let knownHostsSecretName = trimmed(cloudKnownHostsSecret).isEmpty
-                ? CloudSourceCredentialProvisioningService.suggestedKnownHostsSecretName(
-                    workspaceRoot: workspaceRootPath,
-                    host: host
-                )
-                : trimmed(cloudKnownHostsSecret)
-
-            let result = try await cloudSourceCredentialProvisioningService.provisionFromLocalSSH(request: .init(
+            let result = try await cloudSourceAuthBootstrapService.provisionGCPCloudRunSourceAuth(
+                workspaceRoot: workspaceRootPath,
                 projectID: projectID,
                 host: host,
-                localPrivateKeyPath: localPrivateKeyPath,
-                localKnownHostsPath: localCredential.localKnownHostsPath,
-                localPrivateKeyPassphrase: passphrase,
-                privateKeySecretName: privateKeySecretName,
-                knownHostsSecretName: knownHostsSecretName
-            ))
+                preferredPrivateKeySecretName: trimmed(cloudPrivateKeySecret).isEmpty ? nil : trimmed(cloudPrivateKeySecret),
+                preferredKnownHostsSecretName: trimmed(cloudKnownHostsSecret).isEmpty ? nil : trimmed(cloudKnownHostsSecret)
+            ) { [targetSourceAuthKeychainStore] environmentKey in
+                try targetSourceAuthKeychainStore.passphrase(for: environmentKey)
+            }
 
             cloudPrivateKeySecret = result.privateKeySecretName
             cloudKnownHostsSecret = result.knownHostsSecretName ?? ""
             gcpProject = projectID
 
-            let didSave = persistConfig(dismissOnSuccess: false)
-            if didSave {
-                let privateKeyVerb = result.createdPrivateKeySecret ? "Created" : "Updated"
-                let knownHostsVerb = result.createdKnownHostsSecret ? "created" : "updated"
-                if let knownHostsSecretName = result.knownHostsSecretName, !knownHostsSecretName.isEmpty {
-                    cloudSourceAuthProvisionMessage = "\(privateKeyVerb) '\(result.privateKeySecretName)' and \(knownHostsVerb) '\(knownHostsSecretName)'. Target config saved."
-                } else {
-                    cloudSourceAuthProvisionMessage = "\(privateKeyVerb) '\(result.privateKeySecretName)'. Target config saved."
-                }
-                cloudSourceAuthProvisionFailed = false
+            loadConfig(force: true)
+
+            let privateKeyVerb = result.createdPrivateKeySecret ? "Created" : "Updated"
+            let knownHostsVerb = result.createdKnownHostsSecret ? "created" : "updated"
+            if let knownHostsSecretName = result.knownHostsSecretName, !knownHostsSecretName.isEmpty {
+                cloudSourceAuthProvisionMessage = "\(privateKeyVerb) '\(result.privateKeySecretName)' and \(knownHostsVerb) '\(knownHostsSecretName)'. Target config saved."
             } else {
-                cloudSourceAuthProvisionMessage = "Secrets were uploaded, but the target config could not be saved: \(errorMessage ?? "unknown error")."
-                cloudSourceAuthProvisionFailed = true
+                cloudSourceAuthProvisionMessage = "\(privateKeyVerb) '\(result.privateKeySecretName)'. Target config saved."
             }
+            cloudSourceAuthProvisionFailed = false
         } catch {
             cloudSourceAuthProvisionMessage = error.localizedDescription
             cloudSourceAuthProvisionFailed = true

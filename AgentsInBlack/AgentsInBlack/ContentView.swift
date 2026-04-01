@@ -130,7 +130,20 @@ struct ContentView: View {
             if let workspace = model.workspace {
                 CloudSettingsView(
                     workspaceRootPath: workspace.rootURL.path,
+                    sourceAuthRequirements: model.workspaceSourceAuthRequirements,
                     onDismiss: { model.showCloudSettings = false }
+                )
+            }
+        }
+        .sheet(item: $model.sourceAuthQuickSetupRequirement) { requirement in
+            if model.workspace != nil {
+                CloudSourceAuthQuickSetupSheet(
+                    requirement: requirement,
+                    projectID: model.displayDeployGCloudProject,
+                    isProvisioning: model.isProvisioningSourceAuthQuickSetup,
+                    errorMessage: model.sourceAuthQuickSetupErrorMessage,
+                    onConfirm: { Task { await model.provisionSourceAuthQuickSetup() } },
+                    onLater: { model.dismissSourceAuthQuickSetup() }
                 )
             }
         }
