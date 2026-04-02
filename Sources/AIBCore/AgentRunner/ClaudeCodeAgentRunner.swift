@@ -101,4 +101,9 @@ public final class ClaudeCodeAgentRunner: AgentRunner, @unchecked Sendable {
             }
         }
     }
+
+    public func cancel() async {
+        guard let session else { return }
+        await session.cancel()
+    }
 }

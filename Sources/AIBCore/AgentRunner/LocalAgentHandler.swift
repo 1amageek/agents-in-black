@@ -9,6 +9,10 @@ import Logging
 /// using Claude Code CLI (subscription auth) instead of the container.
 /// Returns nil for other paths so the gateway falls through to the container proxy.
 public enum LocalAgentHandler {
+    public static func cancelAllAsyncRuns() async {
+        await LocalAgentAsyncRunRegistry.shared.cancelAll()
+    }
+
 
     /// Build a local handler for an agent service.
     public static func makeHandler(
@@ -35,6 +39,16 @@ public enum LocalAgentHandler {
 
             case ("POST", "/agent/chat"):
                 log.info("[local] \(request.method) \(path) → Claude Code", metadata: ["service_id": "\(serviceIDString)"])
+                if prefersAsyncResponse(request.headers) {
+                    return try await handleAsyncChat(
+                        request: request,
+                        model: model,
+                        serviceID: serviceIDString,
+                        pluginRootPath: pluginRootPath,
+                        executionDirectory: executionDirectory,
+                        logger: log
+                    )
+                }
                 return try await handleChat(
                     request: request,
                     runner: runner,
@@ -116,41 +130,21 @@ public enum LocalAgentHandler {
         executionDirectory: String?,
         logger: Logger
     ) async throws -> LocalResponse {
-        guard let json = try? JSONSerialization.jsonObject(with: request.body) as? [String: Any],
-              let prompt = json["prompt"] as? String else {
-            let errBody = try! JSONSerialization.data(withJSONObject: ["error": "prompt is required"])
-            return LocalResponse(
-                statusCode: 400,
-                headers: [("Content-Type", "application/json")],
-                body: errBody
+        let preparedRun: PreparedChatRun
+        do {
+            preparedRun = try prepareChatRun(
+                request: request,
+                serviceID: serviceID,
+                pluginRootPath: pluginRootPath,
+                executionDirectory: executionDirectory
             )
-        }
-
-        // Inject X-Context header into MCP config when context is provided
-        let requestContext = json["context"] as? [String: Any]
-        let baseMCPConfigPath = pluginRootPath.map { ClaudeCodePluginBundle.mcpConfigPath(pluginRootPath: $0) }
-        let effectiveMCPConfigPath: String?
-        var tempMCPConfigURL: URL?
-        if let requestContext, let basePath = baseMCPConfigPath {
-            let (path, url) = try injectContextIntoMCPConfig(basePath: basePath, context: requestContext)
-            effectiveMCPConfigPath = path
-            tempMCPConfigURL = url
-        } else {
-            effectiveMCPConfigPath = baseMCPConfigPath
+        } catch let error as ChatRequestPreparationError {
+            return error.response
         }
 
         defer {
-            if let url = tempMCPConfigURL {
-                try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
-            }
+            cleanupPreparedChatRun(preparedRun)
         }
-
-        let context = AgentRunnerContext(
-            serviceID: serviceID,
-            pluginRootPath: pluginRootPath,
-            mcpConfigPath: effectiveMCPConfigPath,
-            executionDirectory: executionDirectory
-        )
 
         // Collect SSE events
         var sseBody = Data()
@@ -163,7 +157,7 @@ public enum LocalAgentHandler {
             eventID += 1
         }
 
-        for try await event in runner.send(message: prompt, context: context) {
+        for try await event in runner.send(message: preparedRun.prompt, context: preparedRun.context) {
             switch event {
             case .textDelta(let text):
                 let payload = try JSONSerialization.data(withJSONObject: ["text": text])
@@ -208,6 +202,112 @@ public enum LocalAgentHandler {
                 ("Connection", "keep-alive"),
             ],
             body: sseBody
+        )
+    }
+
+    private static func handleAsyncChat(
+        request: LocalRequest,
+        model: String?,
+        serviceID: String,
+        pluginRootPath: String?,
+        executionDirectory: String?,
+        logger: Logger
+    ) async throws -> LocalResponse {
+        let preparedRun: PreparedChatRun
+        do {
+            preparedRun = try prepareChatRun(
+                request: request,
+                serviceID: serviceID,
+                pluginRootPath: pluginRootPath,
+                executionDirectory: executionDirectory
+            )
+        } catch let error as ChatRequestPreparationError {
+            return error.response
+        }
+
+        logger.info(
+            "[local] accepted async chat request",
+            metadata: [
+                "service_id": "\(serviceID)",
+                "prompt_chars": "\(preparedRun.prompt.count)",
+            ]
+        )
+
+        let runID = UUID()
+        let task = Task.detached(priority: .userInitiated) {
+            let runner = ClaudeCodeAgentRunner(model: model)
+
+            defer {
+                cleanupPreparedChatRun(preparedRun)
+                Task {
+                    await LocalAgentAsyncRunRegistry.shared.finish(runID: runID)
+                }
+            }
+
+            await withTaskCancellationHandler {
+                do {
+                    for try await event in runner.send(message: preparedRun.prompt, context: preparedRun.context) {
+                        switch event {
+                        case .textDelta:
+                            break
+                        case .textComplete(let fullText):
+                            logger.info(
+                                "[claude] async text complete chars=\(fullText.count)",
+                                metadata: ["service_id": "\(serviceID)"]
+                            )
+                        case .toolUse(let name):
+                            logger.info("[claude] tool_use: \(name)", metadata: ["service_id": "\(serviceID)"])
+                        case .sessionID(let sid):
+                            logger.info("[claude] session: \(sid.prefix(8))", metadata: ["service_id": "\(serviceID)"])
+                        case .done(let result):
+                            let cost = result.totalCostUSD.map { String(format: "$%.4f", $0) } ?? "-"
+                            let turns = result.numTurns.map { "\($0)" } ?? "-"
+                            let duration = result.durationMS.map { "\($0)ms" } ?? "-"
+                            logger.info(
+                                "[claude] async done turns=\(turns) cost=\(cost) duration=\(duration)",
+                                metadata: ["service_id": "\(serviceID)"]
+                            )
+                        case .error(let message):
+                            logger.error("[claude] async error: \(message)", metadata: ["service_id": "\(serviceID)"])
+                        }
+                    }
+                } catch {
+                    logger.error(
+                        "[claude] async run failed: \(error.localizedDescription)",
+                        metadata: ["service_id": "\(serviceID)"]
+                    )
+                }
+            } onCancel: {
+                Task {
+                    await runner.cancel()
+                }
+            }
+        }
+
+        let registration = await LocalAgentAsyncRunRegistry.shared.register(
+            runID: runID,
+            serviceID: serviceID,
+            duplicateKey: preparedRun.duplicateRunKey,
+            task: task
+        )
+        if registration.replacedRunID != nil {
+            logger.warning(
+                "[local] replaced existing async chat run",
+                metadata: [
+                    "service_id": "\(serviceID)",
+                    "run_key": "\(preparedRun.duplicateRunKey ?? "-")",
+                ]
+            )
+        }
+
+        let body = try JSONSerialization.data(withJSONObject: ["accepted": true])
+        return LocalResponse(
+            statusCode: 202,
+            headers: [
+                ("Content-Type", "application/json"),
+                ("Preference-Applied", "respond-async"),
+            ],
+            body: body
         )
     }
 
@@ -299,6 +399,98 @@ public enum LocalAgentHandler {
             headers: [("Content-Type", "application/json")],
             body: body
         )
+    }
+
+    private struct PreparedChatRun {
+        var prompt: String
+        var context: AgentRunnerContext
+        var tempMCPConfigURL: URL?
+        var duplicateRunKey: String?
+    }
+
+    private struct ChatRequestPreparationError: Error {
+        var response: LocalResponse
+    }
+
+    private static func prepareChatRun(
+        request: LocalRequest,
+        serviceID: String,
+        pluginRootPath: String?,
+        executionDirectory: String?
+    ) throws -> PreparedChatRun {
+        guard let json = try? JSONSerialization.jsonObject(with: request.body) as? [String: Any],
+              let prompt = json["prompt"] as? String else {
+            let errBody = try JSONSerialization.data(withJSONObject: ["error": "prompt is required"])
+            throw ChatRequestPreparationError(
+                response: LocalResponse(
+                    statusCode: 400,
+                    headers: [("Content-Type", "application/json")],
+                    body: errBody
+                )
+            )
+        }
+
+        let requestContext = json["context"] as? [String: Any]
+        let baseMCPConfigPath = pluginRootPath.map { ClaudeCodePluginBundle.mcpConfigPath(pluginRootPath: $0) }
+        let effectiveMCPConfigPath: String?
+        let tempMCPConfigURL: URL?
+        if let requestContext, let basePath = baseMCPConfigPath {
+            let injected = try injectContextIntoMCPConfig(basePath: basePath, context: requestContext)
+            effectiveMCPConfigPath = injected.path
+            tempMCPConfigURL = injected.tempURL
+        } else {
+            effectiveMCPConfigPath = baseMCPConfigPath
+            tempMCPConfigURL = nil
+        }
+
+        return PreparedChatRun(
+            prompt: prompt,
+            context: AgentRunnerContext(
+                serviceID: serviceID,
+                pluginRootPath: pluginRootPath,
+                mcpConfigPath: effectiveMCPConfigPath,
+                executionDirectory: executionDirectory
+            ),
+            tempMCPConfigURL: tempMCPConfigURL,
+            duplicateRunKey: duplicateRunKey(
+                serviceID: serviceID,
+                requestContext: requestContext,
+                prompt: prompt
+            )
+        )
+    }
+
+    private static func cleanupPreparedChatRun(_ preparedRun: PreparedChatRun) {
+        if let url = preparedRun.tempMCPConfigURL {
+            try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+        }
+    }
+
+    private static func prefersAsyncResponse(_ headers: [(String, String)]) -> Bool {
+        headers.contains { name, value in
+            name.caseInsensitiveCompare("Prefer") == .orderedSame
+                && value.localizedCaseInsensitiveContains("respond-async")
+        }
+    }
+
+    private static func duplicateRunKey(
+        serviceID: String,
+        requestContext: [String: Any]?,
+        prompt: String
+    ) -> String? {
+        if let proposalID = requestContext?["proposalId"] as? String,
+           !proposalID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        {
+            return "\(serviceID):proposal:\(proposalID)"
+        }
+
+        if let organizationID = requestContext?["organizationId"] as? String,
+           !organizationID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        {
+            return "\(serviceID):organization:\(organizationID):prompt:\(prompt.hashValue)"
+        }
+
+        return nil
     }
 
     // MARK: - Context Injection

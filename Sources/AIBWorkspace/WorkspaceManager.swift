@@ -411,6 +411,7 @@ public enum AIBWorkspaceManager {
         services[serviceIndex].kind = kind
         workspace.repos[repoIndex].services = services
 
+        try validateWorkspaceMutation(workspaceRoot: workspaceRoot, workspace: workspace)
         try saveWorkspace(workspace, workspaceRoot: workspaceRoot)
     }
 
@@ -440,6 +441,13 @@ public enum AIBWorkspaceManager {
         workspace.repos[repoIndex].services = services
 
         try saveWorkspace(workspace, workspaceRoot: workspaceRoot)
+    }
+
+    private static func validateWorkspaceMutation(
+        workspaceRoot: String,
+        workspace: AIBWorkspaceConfig
+    ) throws {
+        _ = try WorkspaceSyncer.resolveConfig(workspaceRoot: workspaceRoot, workspace: workspace)
     }
 
     public static func updateServiceChatConfig(

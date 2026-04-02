@@ -150,8 +150,12 @@ public struct ClaudeCodeConfiguration: Sendable {
     func shellCommand(prompt: String, resumeSessionID: String? = nil) -> String {
         let args = arguments(prompt: prompt, resumeSessionID: resumeSessionID)
         let escaped = args.map { shellEscape($0) }
-        // unset Claude nesting vars, then exec claude
-        return "unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT; exec \(shellEscape(executablePath)) \(escaped.joined(separator: " "))"
+        // Unset nested Claude markers and API-based auth env vars after login-shell init,
+        // then exec claude so local agent runs are forced through OAuth subscription auth.
+        return """
+        unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL;
+        exec \(shellEscape(executablePath)) \(escaped.joined(separator: " "))
+        """
     }
 
     /// Shell-escape a string using single quotes.

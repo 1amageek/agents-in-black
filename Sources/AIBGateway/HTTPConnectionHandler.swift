@@ -25,7 +25,11 @@ struct HTTPConnectionHandler: Sendable {
             }
         } catch {
             guard !Task.isCancelled else { return }
-            logger.error("Connection error", metadata: ["error": "\(error)"])
+            if GatewayConnectionErrorClassifier.isExpectedClientDisconnect(error) {
+                logger.info("Connection closed by peer", metadata: ["error": "\(error)"])
+            } else {
+                logger.error("Connection error", metadata: ["error": "\(error)"])
+            }
         }
     }
 
@@ -126,8 +130,8 @@ struct HTTPConnectionHandler: Sendable {
                 return
             }
 
+            let response: UpstreamResponse
             do {
-                let response: UpstreamResponse
                 if let handler = await control.localHandler(for: match.entry.serviceID) {
                     let localReq = LocalRequest(
                         method: head.method.rawValue,
@@ -144,7 +148,7 @@ struct HTTPConnectionHandler: Sendable {
                         response = UpstreamResponse(
                             status: HTTPResponseStatus(statusCode: Int(localResp.statusCode)),
                             headers: respHeaders,
-                            body: ByteBuffer(data: localResp.body)
+                            body: .buffered(ByteBuffer(data: localResp.body))
                         )
                     } else {
                         response = try await proxy(head: head, body: body, match: match, trace: trace)
@@ -153,25 +157,6 @@ struct HTTPConnectionHandler: Sendable {
                     response = try await proxy(head: head, body: body, match: match, trace: trace)
                 }
                 await control.release(serviceID: match.entry.serviceID)
-                try await writeUpstreamResponse(
-                    outbound: outbound,
-                    version: head.version,
-                    upstream: response,
-                    match: match,
-                    trace: trace,
-                    accessLog: .init(
-                        ts: ISO8601.fractionalString(from: .now),
-                        requestID: trace.requestID,
-                        traceID: extractTraceID(trace),
-                        serviceID: match.entry.serviceID.rawValue,
-                        method: head.method.rawValue,
-                        path: head.uri,
-                        status: Int(response.status.code),
-                        latencyMS: elapsedMS(since: startedAt),
-                        bytesIn: body.readableBytes,
-                        bytesOut: response.body.readableBytes
-                    )
-                )
             } catch {
                 await control.release(serviceID: match.entry.serviceID)
                 try await writeSimpleResponse(
@@ -193,7 +178,28 @@ struct HTTPConnectionHandler: Sendable {
                         error: "\(error)"
                     )
                 )
+                return
             }
+
+            let bytesOut = try await writeUpstreamResponse(
+                outbound: outbound,
+                version: head.version,
+                upstream: response,
+                match: match,
+                trace: trace
+            )
+            logAccess(.init(
+                ts: ISO8601.fractionalString(from: .now),
+                requestID: trace.requestID,
+                traceID: extractTraceID(trace),
+                serviceID: match.entry.serviceID.rawValue,
+                method: head.method.rawValue,
+                path: head.uri,
+                status: Int(response.status.code),
+                latencyMS: elapsedMS(since: startedAt),
+                bytesIn: body.readableBytes,
+                bytesOut: bytesOut
+            ))
         }
     }
 
@@ -202,7 +208,12 @@ struct HTTPConnectionHandler: Sendable {
     private struct UpstreamResponse: Sendable {
         var status: HTTPResponseStatus
         var headers: HTTPHeaders
-        var body: ByteBuffer
+        var body: UpstreamBody
+    }
+
+    private enum UpstreamBody: Sendable {
+        case buffered(ByteBuffer)
+        case streamed(HTTPClientResponse.Body)
     }
 
     private func proxy(
@@ -232,8 +243,13 @@ struct HTTPConnectionHandler: Sendable {
 
         let timeout = gatewayConfig.timeouts.request.asTimeAmount
         let response = try await httpClient.execute(request, timeout: timeout)
+        let contentType = response.headers.first(name: "Content-Type")?.lowercased()
+        if contentType?.contains("text/event-stream") == true {
+            return UpstreamResponse(status: response.status, headers: response.headers, body: .streamed(response.body))
+        }
+
         let responseBody = try await response.body.collect(upTo: 16 * 1024 * 1024)
-        return UpstreamResponse(status: response.status, headers: response.headers, body: responseBody)
+        return UpstreamResponse(status: response.status, headers: response.headers, body: .buffered(responseBody))
     }
 
     // MARK: - Response Writing
@@ -268,18 +284,28 @@ struct HTTPConnectionHandler: Sendable {
         version: HTTPVersion,
         upstream: UpstreamResponse,
         match: RouteMatch,
-        trace: TraceContext,
-        accessLog: AccessLogEntry
-    ) async throws {
+        trace: TraceContext
+    ) async throws -> Int {
         var headers = rewriteResponseHeaders(upstream.headers, match: match)
         headers.replaceOrAdd(name: "X-Request-Id", value: trace.requestID)
         let responseHead = HTTPResponseHead(version: version, status: upstream.status, headers: headers)
-        try await outbound.write(contentsOf: [
-            .head(responseHead),
-            .body(upstream.body),
-            .end(nil),
-        ])
-        logAccess(accessLog)
+        try await outbound.write(.head(responseHead))
+
+        var bytesOut = 0
+        switch upstream.body {
+        case .buffered(let body):
+            bytesOut = body.readableBytes
+            try await outbound.write(.body(body))
+
+        case .streamed(let body):
+            for try await chunk in body {
+                bytesOut += chunk.readableBytes
+                try await outbound.write(.body(chunk))
+            }
+        }
+
+        try await outbound.write(.end(nil))
+        return bytesOut
     }
 
     // MARK: - Header Utilities

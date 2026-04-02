@@ -122,6 +122,9 @@ public final class AIBEmulatorController {
     }
 
     public func shutdown() {
+        Task {
+            await LocalAgentHandler.cancelAllAsyncRuns()
+        }
         requestActivityTask?.cancel()
         requestActivityTask = nil
         cancelAllInactiveTimers()
@@ -148,6 +151,7 @@ public final class AIBEmulatorController {
         guard gateway == nil, supervisor == nil else {
             throw EmulatorControllerError.alreadyRunning
         }
+        await LocalAgentHandler.cancelAllAsyncRuns()
         try ContainerCLIPolicy.ensureInstalled()
         emit(.lifecycleChanged(.starting))
 
@@ -209,6 +213,21 @@ public final class AIBEmulatorController {
                     processController: pc,
                     logger: configLogger
                 )
+            }
+
+            let hasAgentServices = loaded.config.services.contains { $0.kind == .agent }
+            if hasAgentServices {
+                let authStatus = await ClaudeCodeConfiguration().checkAuthStatus()
+                guard authStatus.isOAuthAuthenticated else {
+                    throw NSError(
+                        domain: "AIBEmulatorController",
+                        code: 1,
+                        userInfo: [
+                            NSLocalizedDescriptionKey:
+                                "Claude Code must be logged in with subscription OAuth (claude.ai) for local agent execution. API key auth is not allowed."
+                        ]
+                    )
+                }
             }
 
             // Register local handlers for agent services so requests are processed
@@ -274,6 +293,7 @@ public final class AIBEmulatorController {
             )
             requestActivityTask?.cancel()
             requestActivityTask = nil
+            await LocalAgentHandler.cancelAllAsyncRuns()
             cancelAllInactiveTimers()
             activeServiceIDs = []
             serviceSnapshotPollTask?.cancel()
@@ -315,6 +335,7 @@ public final class AIBEmulatorController {
 
         requestActivityTask?.cancel()
         requestActivityTask = nil
+        await LocalAgentHandler.cancelAllAsyncRuns()
         cancelAllInactiveTimers()
         activeServiceIDs = []
         emit(.activeServicesChanged([]))

@@ -265,6 +265,99 @@ func resolveConfigFlattensWorkspaceServices() throws {
 }
 
 @Test(.timeLimit(.minutes(1)))
+func updateServiceKindRejectsInvalidConnectionTargetMutation() throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("aib-update-kind-guard-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer {
+        do {
+            try FileManager.default.removeItem(at: root)
+        } catch {
+        }
+    }
+
+    let agentRepo = root.appendingPathComponent("agent", isDirectory: true)
+    try FileManager.default.createDirectory(at: agentRepo.appendingPathComponent(".git"), withIntermediateDirectories: true)
+    try """
+    {"name":"agent","scripts":{"dev":"pnpm dev"}}
+    """.write(to: agentRepo.appendingPathComponent("package.json"), atomically: true, encoding: .utf8)
+
+    let proposalRepo = root.appendingPathComponent("proposal-mcp", isDirectory: true)
+    try FileManager.default.createDirectory(at: proposalRepo.appendingPathComponent(".git"), withIntermediateDirectories: true)
+    try """
+    {"name":"proposal-mcp","scripts":{"dev":"pnpm dev"},"dependencies":{"@modelcontextprotocol/sdk":"^1.0.0"}}
+    """.write(to: proposalRepo.appendingPathComponent("package.json"), atomically: true, encoding: .utf8)
+
+    let workspace = AIBWorkspaceConfig(
+        workspaceName: "test",
+        repos: [
+            WorkspaceRepo(
+                name: "agent",
+                path: "agent",
+                runtime: .node,
+                framework: .hono,
+                packageManager: .pnpm,
+                status: .discoverable,
+                detectionConfidence: .high,
+                services: [
+                    WorkspaceRepoServiceConfig(
+                        id: "node",
+                        kind: "agent",
+                        mountPath: "/agent/node",
+                        run: ["pnpm", "dev"],
+                        watchMode: "internal",
+                        connections: WorkspaceRepoConnectionsConfig(
+                            mcpServers: [WorkspaceRepoConnectionTarget(serviceRef: "proposal-mcp/main")]
+                        )
+                    ),
+                ]
+            ),
+            WorkspaceRepo(
+                name: "proposal-mcp",
+                path: "proposal-mcp",
+                runtime: .node,
+                framework: .hono,
+                packageManager: .pnpm,
+                status: .discoverable,
+                detectionConfidence: .high,
+                services: [
+                    WorkspaceRepoServiceConfig(
+                        id: "main",
+                        kind: "mcp",
+                        mountPath: "/proposal-mcp",
+                        run: ["pnpm", "dev"],
+                        watchMode: "internal",
+                        mcp: WorkspaceRepoMCPConfig(transport: "streamable_http", path: "/mcp")
+                    ),
+                ]
+            ),
+        ]
+    )
+    try AIBWorkspaceManager.saveWorkspace(workspace, workspaceRoot: root.path)
+
+    do {
+        try AIBWorkspaceManager.updateServiceKind(
+            workspaceRoot: root.path,
+            namespacedServiceID: "proposal-mcp/main",
+            kind: "agent"
+        )
+        Issue.record("Expected invalid service kind update to throw")
+    } catch let error as ValidationError {
+        #expect(error.message == "Generated services config invalid")
+        #expect(error.metadata["errors"]?.contains("must be kind=mcp, got agent") == true)
+    }
+
+    let reloaded = try AIBWorkspaceManager.loadWorkspace(workspaceRoot: root.path)
+    let proposalService = try #require(
+        reloaded.repos
+            .first(where: { $0.namespace == "proposal-mcp" })?
+            .services?
+            .first(where: { $0.id == "main" })
+    )
+    #expect(proposalService.kind == "mcp")
+}
+
+@Test(.timeLimit(.minutes(1)))
 func workspaceSyncWritesRuntimeConnectionArtifacts() throws {
     let root = FileManager.default.temporaryDirectory
         .appendingPathComponent("aib-workspace-connections-\(UUID().uuidString)", isDirectory: true)

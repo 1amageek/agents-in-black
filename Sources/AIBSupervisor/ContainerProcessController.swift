@@ -8,6 +8,10 @@ import Foundation
 import Logging
 import Synchronization
 
+func normalizeHostExecutionEnvironmentValue(_ value: String) -> String {
+    value.replacingOccurrences(of: "host.container.internal", with: "127.0.0.1")
+}
+
 /// Process controller that runs each service in a Linux VM using apple/containerization.
 ///
 /// Uses the Containerization framework directly — no daemon or XPC service required.
@@ -1674,7 +1678,7 @@ public actor ContainerProcessController: ProcessController {
         }
 
         for (key, value) in service.env {
-            env[key] = value
+            env[key] = normalizeHostExecutionEnvironmentValue(value)
         }
         return env
     }
@@ -1698,7 +1702,7 @@ public actor ContainerProcessController: ProcessController {
             env["AIB_MODULES_DIR"] = modulesDir
         }
         for (key, value) in service.env {
-            env[key] = value
+            env[key] = normalizeHostExecutionEnvironmentValue(value)
         }
         return env
     }

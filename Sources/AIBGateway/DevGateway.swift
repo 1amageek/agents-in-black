@@ -42,7 +42,10 @@ public final class DevGateway: Sendable {
         self.control = control
         self.logger = logger
         self.eventLoopGroup = MultiThreadedEventLoopGroup(numberOfThreads: System.coreCount)
-        self.httpClient = HTTPClient(eventLoopGroupProvider: .shared(self.eventLoopGroup))
+        self.httpClient = HTTPClient(
+            eventLoopGroupProvider: .shared(self.eventLoopGroup),
+            configuration: GatewayHTTPClientConfiguration.make(from: gatewayConfig)
+        )
         self.phase = Mutex(.idle)
     }
 

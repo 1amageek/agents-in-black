@@ -334,7 +334,7 @@ public enum AIBRuntimeCoreService {
             resolved.config.services[result.index].env["AIB_BUILD_MODE"] = targetConfig.buildMode.rawValue
             resolved.config.services[result.index].env["AIB_ACTIVE_TARGET"] = "local"
             if targetConfig.buildMode == .convenience {
-                logger.warning("Local emulator is running in convenience mode (not Cloud Run-aligned)", metadata: [
+                logger.info("Local emulator is running in convenience mode (not Cloud Run-aligned)", metadata: [
                     "service_id": .string(result.serviceID),
                 ])
             }
