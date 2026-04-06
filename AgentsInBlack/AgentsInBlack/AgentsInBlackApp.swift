@@ -41,6 +41,14 @@ struct AgentsInBlackApp: App {
                 .keyboardShortcut("i", modifiers: [.command, .option])
             }
 
+            CommandGroup(replacing: .appInfo) {
+                Button("About Agents In Black") {
+                    NSApplication.shared.orderFrontStandardAboutPanel(options: [
+                        .applicationVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "",
+                    ])
+                }
+            }
+
             CommandMenu("Target") {
                 Button("Target Settings\u{2026}") {
                     model.openCloudSettings()
