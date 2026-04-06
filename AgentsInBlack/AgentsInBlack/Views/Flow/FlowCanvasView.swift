@@ -12,6 +12,7 @@ struct FlowCanvasView: View {
     @State private var canvasSize: CGSize = .zero
     @State private var hasFittedInitialContent = false
     @State private var useCloudEndpoint: Bool = false
+    @State private var droppedTextByNodeID: [String: String] = [:]
 
     var body: some View {
         canvas
@@ -57,8 +58,8 @@ struct FlowCanvasView: View {
                     .nodeAccessory(placement: .bottom) { node in
                         nodeAccessoryContent(for: node, canvasSize: geometry.size)
                     }
-                    .dropDestination(for: [.agentSkill]) { phase in
-                        handleSkillDrop(phase)
+                    .dropDestination(for: [.agentSkill, .fileURL]) { phase in
+                        handleCanvasDrop(phase)
                     }
                     .environment(\.flowNodeVisualsByID, nodeVisualsByID)
                     .focusEffectDisabled()
@@ -90,23 +91,27 @@ struct FlowCanvasView: View {
         .frame(minHeight: 400)
     }
 
-    // MARK: - Skill Drop Handling
+    // MARK: - Canvas Drop Handling
 
-    private func handleSkillDrop(_ phase: DropPhase) -> Bool {
+    private func handleCanvasDrop(_ phase: DropPhase) -> Bool {
         switch phase {
-        case .updated(_, _, let target):
+        case .updated(let providers, _, let target):
             guard case .node(let nodeID) = target,
-                  let service = model.service(by: nodeID) else { return false }
-            return service.serviceKind == .agent
+                  let service = model.service(by: nodeID),
+                  service.serviceKind == .agent else { return false }
+            let hasSkill = providers.contains { $0.hasItemConformingToTypeIdentifier(UTType.agentSkill.identifier) }
+            let hasFile = providers.contains { $0.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) }
+            return hasSkill || hasFile
 
         case .performed(let providers, _, let target):
             guard case .node(let nodeID) = target,
                   let service = model.service(by: nodeID),
                   service.serviceKind == .agent else { return false }
 
-            let typeID = UTType.agentSkill.identifier
-            for provider in providers {
-                provider.loadDataRepresentation(forTypeIdentifier: typeID) { data, error in
+            // Skill drop
+            let skillTypeID = UTType.agentSkill.identifier
+            for provider in providers where provider.hasItemConformingToTypeIdentifier(skillTypeID) {
+                provider.loadDataRepresentation(forTypeIdentifier: skillTypeID) { data, error in
                     guard let data else { return }
                     guard let skill = try? JSONDecoder().decode(Skill.self, from: data) else { return }
                     Task { @MainActor in
@@ -117,11 +122,59 @@ struct FlowCanvasView: View {
                     }
                 }
             }
+
+            // File drop — insert content into the node's InputBar
+            let fileTypeID = UTType.fileURL.identifier
+            for provider in providers where provider.hasItemConformingToTypeIdentifier(fileTypeID) {
+                provider.loadItem(forTypeIdentifier: fileTypeID) { item, error in
+                    guard let data = item as? Data,
+                          let url = URL(dataRepresentation: data, relativeTo: nil) else { return }
+                    guard url.pathExtension.lowercased() == "txt" else { return }
+                    guard let content = try? String(contentsOf: url, encoding: .utf8) else { return }
+                    let fileName = url.lastPathComponent
+                    let insertText = "File: \(fileName)\n\n\(content)"
+                    Task { @MainActor in
+                        store.selectNode(nodeID, exclusive: true)
+                        droppedTextByNodeID[nodeID] = insertText
+                    }
+                }
+            }
             return true
 
         case .exited:
             return false
         }
+    }
+
+    // MARK: - Message Sending
+
+    private func sendMessage(_ text: String, to service: AIBServiceModel) {
+        let hasCloud = model.deployedURL(for: service) != nil
+        let isCloud = useCloudEndpoint && hasCloud
+        let isEmulatorRunning = model.emulatorState.isRunning
+
+        if !isEmulatorRunning && !hasCloud {
+            let chatSession = model.createSession(for: service, activate: true)
+            chatSession.composerText = ""
+            store.clearSelection()
+            model.openPiPChat(serviceID: service.id, sessionID: chatSession.id)
+            chatSession.appendGuide(
+                userText: text,
+                message: "No endpoint available. Start the emulator or deploy to Cloud Run first."
+            )
+            return
+        }
+
+        let chatSession: ChatSession
+        if isCloud, let deployedURL = model.deployedURL(for: service) {
+            chatSession = model.createRemoteSession(for: service, deployedURL: deployedURL, activate: true)
+        } else {
+            chatSession = model.createSession(for: service, activate: true)
+        }
+        chatSession.composerText = text
+        store.clearSelection()
+        model.openPiPChat(serviceID: service.id, sessionID: chatSession.id)
+        Task { await chatSession.send() }
     }
 
     // MARK: - Node Accessory
@@ -131,32 +184,15 @@ struct FlowCanvasView: View {
         if let service = model.service(by: node.id), model.canOpenChat(for: service) {
             let hasCloud = model.deployedURL(for: service) != nil
             let isCloud = useCloudEndpoint && hasCloud
-            NodeAccessoryInputBar(service: service, isCloudMode: isCloud) { text in
-                let isEmulatorRunning = model.emulatorState.isRunning
-
-                // No endpoint available — show guidance instead of sending
-                if !isEmulatorRunning && !hasCloud {
-                    let chatSession = model.createSession(for: service, activate: true)
-                    chatSession.composerText = ""
-                    store.clearSelection()
-                    model.openPiPChat(serviceID: service.id, sessionID: chatSession.id)
-                    chatSession.appendGuide(
-                        userText: text,
-                        message: "No endpoint available. Start the emulator or deploy to Cloud Run first."
-                    )
-                    return
-                }
-
-                let chatSession: ChatSession
-                if isCloud, let deployedURL = model.deployedURL(for: service) {
-                    chatSession = model.createRemoteSession(for: service, deployedURL: deployedURL, activate: true)
-                } else {
-                    chatSession = model.createSession(for: service, activate: true)
-                }
-                chatSession.composerText = text
-                store.clearSelection()
-                model.openPiPChat(serviceID: service.id, sessionID: chatSession.id)
-                Task { await chatSession.send() }
+            NodeAccessoryInputBar(
+                service: service,
+                isCloudMode: isCloud,
+                droppedText: Binding(
+                    get: { droppedTextByNodeID[node.id] },
+                    set: { droppedTextByNodeID[node.id] = $0 }
+                )
+            ) { text in
+                sendMessage(text, to: service)
             }
         }
     }

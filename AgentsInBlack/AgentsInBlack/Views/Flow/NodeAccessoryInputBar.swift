@@ -9,28 +9,46 @@ import SwiftUI
 struct NodeAccessoryInputBar: View {
     let service: AIBServiceModel
     var isCloudMode: Bool = false
+    @Binding var droppedText: String?
     let onSend: (String) -> Void
 
     @State private var text: String = ""
-    @FocusState private var isFocused: Bool
+    @State private var textHeight: CGFloat = 30
+    @State private var isFocused: Bool = false
 
     @Environment(\.colorScheme) private var colorScheme
 
+    private let minHeight: CGFloat = 30
+    private let maxHeight: CGFloat = 320
+
+    private var clampedHeight: CGFloat {
+        min(max(textHeight, minHeight), maxHeight)
+    }
+
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(alignment: .bottom, spacing: 6) {
             if isCloudMode {
                 Image(systemName: "cloud.fill")
                     .font(.system(size: 12))
                     .foregroundStyle(.cyan)
+                    .padding(.bottom, 8)
             }
 
-            TextField("Message \(displayName)...", text: $text)
-                .textFieldStyle(.plain)
-                .font(.system(.body))
-                .focused($isFocused)
-                .onSubmit {
-                    send()
+            GrowingTextView(
+                text: $text,
+                contentHeight: $textHeight,
+                isFocused: $isFocused,
+                onReturn: { send() }
+            )
+            .frame(height: clampedHeight)
+            .overlay(alignment: .leading) {
+                if text.isEmpty && !isFocused {
+                    Text("Message \(displayName)...")
+                        .foregroundStyle(.placeholder)
+                        .allowsHitTesting(false)
+                        .padding(.leading, 4)
                 }
+            }
 
             Button {
                 send()
@@ -41,13 +59,14 @@ struct NodeAccessoryInputBar: View {
             }
             .buttonStyle(.plain)
             .disabled(!canSend)
+            .padding(.bottom, 4)
         }
         .padding(.leading, 12)
         .padding(.trailing, 6)
         .padding(.vertical, 6)
-        .background(.thickMaterial, in: Capsule())
+        .background(.thickMaterial, in: RoundedRectangle(cornerRadius: 16))
         .overlay(
-            Capsule().strokeBorder(
+            RoundedRectangle(cornerRadius: 16).strokeBorder(
                 isCloudMode
                     ? Color.cyan.opacity(0.5)
                     : (colorScheme == .dark ? Color.white.opacity(0.3) : Color.black.opacity(0.2)),
@@ -56,6 +75,11 @@ struct NodeAccessoryInputBar: View {
         )
         .shadow(color: .black.opacity(0.15), radius: 6, y: 2)
         .frame(width: 260)
+        .onChange(of: droppedText) { _, newValue in
+            guard let newValue else { return }
+            text = newValue
+            droppedText = nil
+        }
     }
 
     // MARK: - Helpers
