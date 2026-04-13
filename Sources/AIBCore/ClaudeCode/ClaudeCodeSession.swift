@@ -103,6 +103,8 @@ public actor ClaudeCodeSession {
                             break
                         case .assistant:
                             break
+                        case .user:
+                            break
                         case .result(let res):
                             logger.info("[claude] done turns=\(res.numTurns) cost=$\(String(format: "%.4f", res.totalCostUSD)) duration=\(res.durationMS)ms")
                         }

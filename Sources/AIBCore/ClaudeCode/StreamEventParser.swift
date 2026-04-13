@@ -21,7 +21,9 @@ struct StreamEventParser {
             return .assistant(parseAssistant(json))
         case "result":
             return .result(parseResult(json))
-        case "user", "rate_limit_event":
+        case "user":
+            return .user(parseUser(json))
+        case "rate_limit_event":
             throw ParserError.ignoredType(type)
         default:
             throw ParserError.unknownType(type)
@@ -129,6 +131,32 @@ struct StreamEventParser {
             model: message["model"] as? String ?? "",
             content: content,
             parentToolUseID: json["parent_tool_use_id"] as? String
+        )
+    }
+
+    // MARK: - User (Tool Results)
+
+    private func parseUser(_ json: [String: Any]) -> UserMessage {
+        let message = json["message"] as? [String: Any] ?? [:]
+        let rawContent = message["content"] as? [[String: Any]] ?? []
+
+        let toolResults: [ToolResult] = rawContent.compactMap { block in
+            guard block["type"] as? String == "tool_result" else { return nil }
+            let toolUseID = block["tool_use_id"] as? String ?? ""
+            let content: String
+            if let text = block["content"] as? String {
+                content = text
+            } else if let parts = block["content"] as? [[String: Any]] {
+                content = parts.compactMap { $0["text"] as? String }.joined()
+            } else {
+                content = ""
+            }
+            return ToolResult(toolUseID: toolUseID, content: content)
+        }
+
+        return UserMessage(
+            sessionID: json["session_id"] as? String ?? "",
+            toolResults: toolResults
         )
     }
 

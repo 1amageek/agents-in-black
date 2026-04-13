@@ -23,7 +23,7 @@ public struct A2AAgentRunner: AgentRunner, Sendable {
                     let result = try await client.sendMessage(text: message, contextId: context.conversationID)
 
                     if let newContextId = result.contextId {
-                        continuation.yield(.sessionID(newContextId))
+                        continuation.yield(.system(AgentRunnerSystemInfo(sessionID: newContextId)))
                     }
                     continuation.yield(.textComplete(result.responseText))
                     continuation.yield(.done(AgentRunnerResult(conversationID: result.contextId)))

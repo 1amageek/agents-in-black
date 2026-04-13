@@ -7,6 +7,7 @@ public enum StreamEvent: Sendable {
     case system(SystemEvent)
     case streamEvent(StreamDelta)
     case assistant(AssistantMessage)
+    case user(UserMessage)
     case result(ResultEvent)
 }
 
@@ -57,6 +58,18 @@ public struct AssistantMessage: Sendable {
 public enum ContentBlock: Sendable {
     case text(String)
     case toolUse(id: String, name: String, input: String)
+}
+
+// MARK: - User Message (Tool Results)
+
+public struct UserMessage: Sendable {
+    public var sessionID: String
+    public var toolResults: [ToolResult]
+}
+
+public struct ToolResult: Sendable {
+    public var toolUseID: String
+    public var content: String
 }
 
 // MARK: - Result

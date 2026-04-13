@@ -163,16 +163,30 @@ public enum LocalAgentHandler {
                 let payload = try JSONSerialization.data(withJSONObject: ["text": text])
                 appendSSE(event: "text", data: payload)
 
-            case .textComplete:
-                break
+            case .textComplete(let fullText):
+                logger.info(
+                    "[claude] text complete chars=\(fullText.count)\n\(fullText)",
+                    metadata: ["service_id": "\(serviceID)"]
+                )
 
             case .toolUse(let name):
                 logger.info("[claude] tool_use: \(name)", metadata: ["service_id": "\(serviceID)"])
                 let payload = try JSONSerialization.data(withJSONObject: ["name": name, "input": [:] as [String: Any]])
                 appendSSE(event: "tool_use", data: payload)
 
-            case .sessionID(let sid):
-                logger.info("[claude] session: \(sid.prefix(8))", metadata: ["service_id": "\(serviceID)"])
+            case .toolUseComplete(let name, let input):
+                logger.info("[claude] tool_call: \(name)\n\(formatToolInput(input))", metadata: ["service_id": "\(serviceID)"])
+
+            case .toolResult(let toolUseID, let content):
+                logger.info("[claude] tool_response: id=\(toolUseID.prefix(12)) chars=\(content.count)\n\(content.prefix(1000))", metadata: ["service_id": "\(serviceID)"])
+
+            case .system(let info):
+                let mcpStatus = zip(info.mcpServerNames, info.mcpServerStatuses)
+                    .map { "\($0)=\($1)" }.joined(separator: ", ")
+                logger.info(
+                    "[claude] system session=\(info.sessionID.prefix(8)) model=\(info.model) tools=\(info.tools.count) mcp=[\(mcpStatus)] mode=\(info.permissionMode)",
+                    metadata: ["service_id": "\(serviceID)"]
+                )
 
             case .done(let result):
                 let cost = result.totalCostUSD.map { String(format: "$%.4f", $0) } ?? "-"
@@ -252,13 +266,22 @@ public enum LocalAgentHandler {
                             break
                         case .textComplete(let fullText):
                             logger.info(
-                                "[claude] async text complete chars=\(fullText.count)",
+                                "[claude] async text complete chars=\(fullText.count)\n\(fullText)",
                                 metadata: ["service_id": "\(serviceID)"]
                             )
                         case .toolUse(let name):
                             logger.info("[claude] tool_use: \(name)", metadata: ["service_id": "\(serviceID)"])
-                        case .sessionID(let sid):
-                            logger.info("[claude] session: \(sid.prefix(8))", metadata: ["service_id": "\(serviceID)"])
+                        case .toolUseComplete(let name, let input):
+                            logger.info("[claude] tool_call: \(name)\n\(formatToolInput(input))", metadata: ["service_id": "\(serviceID)"])
+                        case .toolResult(let toolUseID, let content):
+                            logger.info("[claude] tool_response: id=\(toolUseID.prefix(12)) chars=\(content.count)\n\(content.prefix(1000))", metadata: ["service_id": "\(serviceID)"])
+                        case .system(let info):
+                            let mcpStatus = zip(info.mcpServerNames, info.mcpServerStatuses)
+                                .map { "\($0)=\($1)" }.joined(separator: ", ")
+                            logger.info(
+                                "[claude] system session=\(info.sessionID.prefix(8)) model=\(info.model) tools=\(info.tools.count) mcp=[\(mcpStatus)] mode=\(info.permissionMode)",
+                                metadata: ["service_id": "\(serviceID)"]
+                            )
                         case .done(let result):
                             let cost = result.totalCostUSD.map { String(format: "$%.4f", $0) } ?? "-"
                             let turns = result.numTurns.map { "\($0)" } ?? "-"
@@ -530,5 +553,18 @@ public enum LocalAgentHandler {
 
         // Log is handled by the caller
         return (tempFile.path, tempFile)
+    }
+
+    /// Format a JSON input string for readable log output.
+    /// Parses the JSON and re-serializes with pretty printing and unescaped slashes.
+    private static func formatToolInput(_ input: String, maxLength: Int = 500) -> String {
+        guard let data = input.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data),
+              let pretty = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .withoutEscapingSlashes, .sortedKeys]),
+              let str = String(data: pretty, encoding: .utf8) else {
+            return String(input.prefix(maxLength))
+        }
+        let result = String(str.prefix(maxLength))
+        return result
     }
 }

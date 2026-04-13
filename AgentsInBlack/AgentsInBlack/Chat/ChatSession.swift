@@ -75,7 +75,6 @@ final class ChatSession: Identifiable {
 
         let startedAt = Date()
         var completeText: String?
-        var latestResult: AgentRunnerResult?
 
         do {
             logHandler?("[claude] send prompt (\(text.count) chars)\n")
@@ -91,16 +90,23 @@ final class ChatSession: Identifiable {
                     logHandler?("[claude] tool_use: \(name)\n")
                     appendMessage(.info("Using tool: \(name)"))
 
-                case .sessionID(let sid):
-                    logHandler?("[claude] session: \(sid.prefix(8))\n")
-                    runnerContext.conversationID = sid
+                case .toolUseComplete(let name, let input):
+                    logHandler?("[claude] tool_call: \(name) input=\(input.prefix(500))\n")
+
+                case .toolResult(let toolUseID, let content):
+                    logHandler?("[claude] tool_response: id=\(toolUseID.prefix(12)) chars=\(content.count)\n\(content.prefix(1000))\n")
+
+                case .system(let info):
+                    let mcpStatus = zip(info.mcpServerNames, info.mcpServerStatuses)
+                        .map { "\($0)=\($1)" }.joined(separator: ", ")
+                    logHandler?("[claude] system session=\(info.sessionID.prefix(8)) model=\(info.model) tools=\(info.tools.count) mcp=[\(mcpStatus)] mode=\(info.permissionMode)\n")
+                    runnerContext.conversationID = info.sessionID
 
                 case .done(let result):
                     let cost = result.totalCostUSD.map { String(format: "$%.4f", $0) } ?? "-"
                     let turns = result.numTurns.map { "\($0)" } ?? "-"
                     let duration = result.durationMS.map { "\($0)ms" } ?? "-"
                     logHandler?("[claude] done turns=\(turns) cost=\(cost) duration=\(duration)\n")
-                    latestResult = result
                     if let cid = result.conversationID {
                         runnerContext.conversationID = cid
                     }

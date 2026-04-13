@@ -52,12 +52,42 @@ public enum AgentRunnerEvent: Sendable {
     case textComplete(String)
     /// Tool use started (for display in UI).
     case toolUse(name: String)
-    /// Session/conversation ID for multi-turn continuation.
-    case sessionID(String)
+    /// Complete tool use with input arguments.
+    case toolUseComplete(name: String, input: String)
+    /// Tool result data returned from a tool call.
+    case toolResult(toolUseID: String, content: String)
+    /// System info from the Claude Code session (session ID, model, tools, MCP servers).
+    case system(AgentRunnerSystemInfo)
     /// Execution metadata on completion.
     case done(AgentRunnerResult)
     /// Error during execution.
     case error(String)
+}
+
+/// System-level information from the Claude Code session.
+public struct AgentRunnerSystemInfo: Sendable {
+    public var sessionID: String
+    public var model: String
+    public var tools: [String]
+    public var mcpServerNames: [String]
+    public var mcpServerStatuses: [String]
+    public var permissionMode: String
+
+    public init(
+        sessionID: String,
+        model: String = "",
+        tools: [String] = [],
+        mcpServerNames: [String] = [],
+        mcpServerStatuses: [String] = [],
+        permissionMode: String = ""
+    ) {
+        self.sessionID = sessionID
+        self.model = model
+        self.tools = tools
+        self.mcpServerNames = mcpServerNames
+        self.mcpServerStatuses = mcpServerStatuses
+        self.permissionMode = permissionMode
+    }
 }
 
 /// Summary of a completed agent run.

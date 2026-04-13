@@ -64,7 +64,14 @@ public final class ClaudeCodeAgentRunner: AgentRunner, @unchecked Sendable {
                     for try await event in await codeSession.send(message) {
                         switch event {
                         case .system(let sys):
-                            continuation.yield(.sessionID(sys.sessionID))
+                            continuation.yield(.system(AgentRunnerSystemInfo(
+                                sessionID: sys.sessionID,
+                                model: sys.model,
+                                tools: sys.tools,
+                                mcpServerNames: sys.mcpServers.map(\.name),
+                                mcpServerStatuses: sys.mcpServers.map(\.status),
+                                permissionMode: sys.permissionMode
+                            )))
 
                         case .streamEvent(let delta):
                             switch delta.event {
@@ -77,8 +84,17 @@ public final class ClaudeCodeAgentRunner: AgentRunner, @unchecked Sendable {
                                 break
                             }
 
-                        case .assistant:
-                            break
+                        case .assistant(let msg):
+                            for block in msg.content {
+                                if case .toolUse(_, let name, let input) = block {
+                                    continuation.yield(.toolUseComplete(name: name, input: input))
+                                }
+                            }
+
+                        case .user(let msg):
+                            for tr in msg.toolResults {
+                                continuation.yield(.toolResult(toolUseID: tr.toolUseID, content: tr.content))
+                            }
 
                         case .result(let res):
                             continuation.yield(.done(AgentRunnerResult(
