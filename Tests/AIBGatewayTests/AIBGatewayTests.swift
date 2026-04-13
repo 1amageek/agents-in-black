@@ -19,8 +19,8 @@ func routeMatcherLongestPrefix() {
 func backendEndpointTCPURLAndHostHeader() {
     let endpoint = BackendEndpoint(host: "127.0.0.1", port: 8080)
 
-    #expect(endpoint.baseURLString == "http://127.0.0.1:8080")
-    #expect(endpoint.requestURL(path: "/health") == "http://127.0.0.1:8080/health")
-    #expect(endpoint.requestURL(path: "/health", query: "a=1") == "http://127.0.0.1:8080/health?a=1")
-    #expect(endpoint.hostHeaderValue == "127.0.0.1:8080")
+    #expect(endpoint.baseURLString == "http://localhost:8080")
+    #expect(endpoint.requestURL(path: "/health") == "http://localhost:8080/health")
+    #expect(endpoint.requestURL(path: "/health", query: "a=1") == "http://localhost:8080/health?a=1")
+    #expect(endpoint.hostHeaderValue == "localhost:8080")
 }

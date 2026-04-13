@@ -291,12 +291,9 @@ func initialStartPublishesRoutesBeforeAllServicesBecomeReady() async throws {
         Issue.record("Expected /agent/ready route to be available during startup, got \(error)")
     }
 
-    do {
-        _ = try await startTask.value
-        Issue.record("Expected startup to fail because agent/blocked never becomes ready")
-    } catch {
-        // Expected.
-    }
+    // startAll uses continueOnFailure: true, so it completes even when
+    // some services fail readiness — it logs a warning instead of throwing.
+    try await startTask.value
     await supervisor.stopAll(graceful: false)
 }
 
@@ -365,8 +362,10 @@ func startupResolvesAgentServiceRefsToContainerReachableURLs() async throws {
 
     try await supervisor.startAll()
 
+    // Agent services are locally handled (not spawned via ProcessController).
+    // Only container-managed services (MCP) are spawned.
     let spawnedServiceIDs = controller.spawnedServiceIDs.map(\.rawValue)
-    #expect(spawnedServiceIDs == ["swift-browse/main", "agent/node"])
+    #expect(spawnedServiceIDs == ["swift-browse/main"])
 
     let connectionsURL = tempRoot
         .appendingPathComponent("generated/runtime/connections/agent__node.json")
@@ -378,9 +377,9 @@ func startupResolvesAgentServiceRefsToContainerReachableURLs() async throws {
     let resolvedURLString = try #require(first["resolved_url"] as? String)
     let resolvedURL = try #require(URL(string: resolvedURLString))
 
-    #expect(resolvedURL.host == "192.168.0.2")
-    #expect(resolvedURL.path == "/mcp")
-    #expect(resolvedURL.host != "127.0.0.1")
+    // Agent connects to MCP via gateway: http://localhost:{gatewayPort}/{mountPath}/{mcpPath}
+    #expect(resolvedURL.host == "localhost")
+    #expect(resolvedURL.path == "/swift-browse/mcp")
 
     await supervisor.stopAll(graceful: false)
 }

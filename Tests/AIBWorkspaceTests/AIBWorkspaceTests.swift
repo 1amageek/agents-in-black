@@ -1643,7 +1643,7 @@ func deployPlanAllowsPrivateGitSSHDependenciesWhenCloudCredentialConfigured() as
           repo: git@github.com:salescore-inc/valuemap-api.git
           type: git
     """.write(to: repo.appendingPathComponent("pnpm-lock.yaml"), atomically: true, encoding: .utf8)
-    try "FROM node:22-slim\nWORKDIR /app\nCOPY package.json pnpm-lock.yaml ./\nRUN corepack enable pnpm && pnpm install\nCOPY . .\nCMD [\"node\", \"index.js\"]\n"
+    try "FROM node:22-slim\nRUN apt-get update && apt-get install -y openssh-client\nWORKDIR /app\nCOPY package.json pnpm-lock.yaml ./\nRUN corepack enable pnpm && pnpm install\nCOPY . .\nCMD [\"node\", \"index.js\"]\n"
         .write(to: repo.appendingPathComponent("Dockerfile.node"), atomically: true, encoding: .utf8)
 
     let workspace = AIBWorkspaceConfig(
