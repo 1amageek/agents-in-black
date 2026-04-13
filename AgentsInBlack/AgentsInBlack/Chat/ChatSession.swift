@@ -68,62 +68,108 @@ final class ChatSession: Identifiable {
         isSending = true
         streamingText = ""
 
-        defer {
-            isSending = false
-            streamingText = nil
-        }
+        logHandler?("[claude] send prompt (\(text.count) chars)\n")
 
+        let stream = runner.send(message: text, context: runnerContext)
         let startedAt = Date()
-        var completeText: String?
 
         do {
-            logHandler?("[claude] send prompt (\(text.count) chars)\n")
-            for try await event in runner.send(message: text, context: runnerContext) {
-                switch event {
-                case .textDelta(let delta):
-                    streamingText = (streamingText ?? "") + delta
-
-                case .textComplete(let fullText):
-                    completeText = fullText
-
-                case .toolUse(let name):
-                    logHandler?("[claude] tool_use: \(name)\n")
-                    appendMessage(.info("Using tool: \(name)"))
-
-                case .toolUseComplete(let name, let input):
-                    logHandler?("[claude] tool_call: \(name) input=\(input.prefix(500))\n")
-
-                case .toolResult(let toolUseID, let content):
-                    logHandler?("[claude] tool_response: id=\(toolUseID.prefix(12)) chars=\(content.count)\n\(content.prefix(1000))\n")
-
-                case .system(let info):
-                    let mcpStatus = zip(info.mcpServerNames, info.mcpServerStatuses)
-                        .map { "\($0)=\($1)" }.joined(separator: ", ")
-                    logHandler?("[claude] system session=\(info.sessionID.prefix(8)) model=\(info.model) tools=\(info.tools.count) mcp=[\(mcpStatus)] mode=\(info.permissionMode)\n")
-                    runnerContext.conversationID = info.sessionID
-
-                case .done(let result):
-                    let cost = result.totalCostUSD.map { String(format: "$%.4f", $0) } ?? "-"
-                    let turns = result.numTurns.map { "\($0)" } ?? "-"
-                    let duration = result.durationMS.map { "\($0)ms" } ?? "-"
-                    logHandler?("[claude] done turns=\(turns) cost=\(cost) duration=\(duration)\n")
-                    if let cid = result.conversationID {
-                        runnerContext.conversationID = cid
-                    }
-
-                case .error(let message):
-                    logHandler?("[claude] error: \(message)\n")
-                    appendMessage(.error(message))
-                }
-            }
-
-            let latency = Int(Date().timeIntervalSince(startedAt) * 1000)
-            let responseText = completeText ?? streamingText ?? ""
-            if !responseText.isEmpty {
-                appendMessage(.assistant(responseText), latencyMs: latency)
-            }
+            try await consumeStream(stream, startedAt: startedAt)
         } catch {
             appendMessage(.error(error.localizedDescription))
+        }
+
+        isSending = false
+        streamingText = nil
+    }
+
+    /// Iterate the runner stream off MainActor, dispatching UI updates individually.
+    /// This prevents the stream processing loop from monopolizing the main thread.
+    nonisolated private func consumeStream(
+        _ stream: AsyncThrowingStream<AgentRunnerEvent, Error>,
+        startedAt: Date
+    ) async throws {
+        var completeText: String?
+
+        for try await event in stream {
+            switch event {
+            case .textDelta(let delta):
+                await appendStreamingText(delta)
+
+            case .textComplete(let fullText):
+                completeText = fullText
+
+            case .toolUse(let name):
+                let log = "[claude] tool_use: \(name)\n"
+                await emitLogAndAppendInfo(log: log, info: "Using tool: \(name)")
+
+            case .toolUseComplete(let name, let input):
+                let log = "[claude] tool_call: \(name) input=\(input.prefix(500))\n"
+                await emitLog(log)
+
+            case .toolResult(let toolUseID, let content):
+                let log = "[claude] tool_response: id=\(toolUseID.prefix(12)) chars=\(content.count)\n\(String(content.prefix(1000)))\n"
+                await emitLog(log)
+
+            case .system(let info):
+                let mcpStatus = zip(info.mcpServerNames, info.mcpServerStatuses)
+                    .map { "\($0)=\($1)" }.joined(separator: ", ")
+                let log = "[claude] system session=\(info.sessionID.prefix(8)) model=\(info.model) tools=\(info.tools.count) mcp=[\(mcpStatus)] mode=\(info.permissionMode)\n"
+                await emitLogAndSetConversationID(log: log, conversationID: info.sessionID)
+
+            case .done(let result):
+                let cost = result.totalCostUSD.map { String(format: "$%.4f", $0) } ?? "-"
+                let turns = result.numTurns.map { "\($0)" } ?? "-"
+                let duration = result.durationMS.map { "\($0)ms" } ?? "-"
+                let log = "[claude] done turns=\(turns) cost=\(cost) duration=\(duration)\n"
+                await emitLog(log)
+                if let cid = result.conversationID {
+                    await setConversationID(cid)
+                }
+
+            case .error(let message):
+                let log = "[claude] error: \(message)\n"
+                await emitLogAndAppendError(log: log, message: message)
+            }
+        }
+
+        let latency = Int(Date().timeIntervalSince(startedAt) * 1000)
+        await finalizeResponse(completeText: completeText, latencyMs: latency)
+    }
+
+    // MARK: - Stream Event Handlers
+
+    private func appendStreamingText(_ delta: String) {
+        streamingText = (streamingText ?? "") + delta
+    }
+
+    private func emitLog(_ line: String) {
+        logHandler?(line)
+    }
+
+    private func emitLogAndAppendInfo(log: String, info: String) {
+        logHandler?(log)
+        appendMessage(.info(info))
+    }
+
+    private func emitLogAndSetConversationID(log: String, conversationID: String) {
+        logHandler?(log)
+        runnerContext.conversationID = conversationID
+    }
+
+    private func setConversationID(_ id: String) {
+        runnerContext.conversationID = id
+    }
+
+    private func emitLogAndAppendError(log: String, message: String) {
+        logHandler?(log)
+        appendMessage(.error(message))
+    }
+
+    private func finalizeResponse(completeText: String?, latencyMs: Int) {
+        let responseText = completeText ?? streamingText ?? ""
+        if !responseText.isEmpty {
+            appendMessage(.assistant(responseText), latencyMs: latencyMs)
         }
     }
 
