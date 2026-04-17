@@ -2,68 +2,60 @@ import AppKit
 import SwiftUI
 
 struct UtilityMonospacedOutputView: View {
-    let output: String
+    let lines: [LogLine]
     let emptyMessage: String
-    let scrollAnchorID: String
     var filterText: String = ""
     var noMatchesMessage: String = "No lines match the current filter."
 
     var body: some View {
         ScrollViewReader { proxy in
+            let visible = filteredLines
             ScrollView {
-                Text(coloredOutput)
-                    .font(.system(.callout, design: .monospaced))
-                    .lineSpacing(3)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(12)
-                    .id(scrollAnchorID)
+                content(visible: visible)
             }
             .background(Color(nsColor: .textBackgroundColor))
-            .onChange(of: output) {
+            .onChange(of: visible.last?.id) { _, newID in
+                guard let newID else { return }
                 withAnimation(.easeOut(duration: 0.15)) {
-                    proxy.scrollTo(scrollAnchorID, anchor: .bottom)
+                    proxy.scrollTo(newID, anchor: .bottom)
                 }
             }
         }
     }
 
-    // MARK: - Colored Output
-
-    private var coloredOutput: AttributedString {
-        if output.isEmpty {
-            var attr = AttributedString(emptyMessage)
-            attr.foregroundColor = .secondary
-            return attr
-        }
-
-        let query = normalizedFilter
-        let lines: [Substring]
-        if query.isEmpty {
-            lines = output.split(separator: "\n", omittingEmptySubsequences: false)
+    @ViewBuilder
+    private func content(visible: [LogLine]) -> some View {
+        if lines.isEmpty {
+            placeholder(emptyMessage)
+        } else if visible.isEmpty {
+            placeholder(noMatchesMessage)
         } else {
-            lines = output.split(separator: "\n", omittingEmptySubsequences: false)
-                .filter { String($0).localizedStandardContains(query) }
-            if lines.isEmpty {
-                var attr = AttributedString(noMatchesMessage)
-                attr.foregroundColor = .secondary
-                return attr
+            LazyVStack(alignment: .leading, spacing: 3) {
+                ForEach(visible) { line in
+                    Text(line.text)
+                        .font(.system(.callout, design: .monospaced))
+                        .foregroundStyle(Self.lineColor(line.text))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .id(line.id)
+                }
             }
+            .textSelection(.enabled)
+            .padding(12)
         }
-
-        var result = AttributedString()
-        for (index, line) in lines.enumerated() {
-            let lineStr = String(line)
-            let suffix = index < lines.count - 1 ? "\n" : ""
-            var attrLine = AttributedString(lineStr + suffix)
-            attrLine.foregroundColor = Self.lineColor(lineStr)
-            result.append(attrLine)
-        }
-        return result
     }
 
-    private var normalizedFilter: String {
-        filterText.trimmingCharacters(in: .whitespacesAndNewlines)
+    private func placeholder(_ text: String) -> some View {
+        Text(text)
+            .foregroundStyle(.secondary)
+            .font(.system(.callout, design: .monospaced))
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(12)
+    }
+
+    private var filteredLines: [LogLine] {
+        let query = filterText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return lines }
+        return lines.filter { $0.text.localizedStandardContains(query) }
     }
 
     // MARK: - Log Level Color
@@ -71,26 +63,22 @@ struct UtilityMonospacedOutputView: View {
     private static func lineColor(_ line: String) -> Color {
         let linePrefix = String(line.prefix(60))
 
-        // error / critical
         if linePrefix.contains(" error ") || linePrefix.contains("[error]")
             || linePrefix.contains(" critical ") || linePrefix.contains("[critical]")
         {
             return .red
         }
 
-        // warning
         if linePrefix.contains(" warning ") || linePrefix.contains("[warning]") {
             return .yellow
         }
 
-        // debug / trace
         if linePrefix.contains(" debug ") || linePrefix.contains("[debug]")
             || linePrefix.contains(" trace ") || linePrefix.contains("[trace]")
         {
             return .secondary
         }
 
-        // JSON gateway logs — HTTP 5xx / 4xx
         if line.contains("\"status\":5") {
             return .red
         }

@@ -6,7 +6,7 @@ struct EmulatorOutputView: View {
     var filterText: String = ""
 
     var body: some View {
-        let output = model.aibLogOutput()
+        let lines = model.aibLogOutput()
 
         VStack(spacing: 0) {
             if showsHeader {
@@ -34,9 +34,8 @@ struct EmulatorOutputView: View {
                 Divider()
             }
             UtilityMonospacedOutputView(
-                output: output,
+                lines: lines,
                 emptyMessage: emptyMessage,
-                scrollAnchorID: "emulator-output-bottom",
                 filterText: filterText
             )
         }

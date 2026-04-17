@@ -62,8 +62,8 @@ final class AgentsInBlackAppModel {
 
     var emulatorState: EmulatorState = .stopped
     var kernelDownloadProgress: Progress?
-    var emulatorOutput: String = ""
-    var serviceLogOutputByServiceID: [String: String] = [:]
+    var aibLogBuffer: LogBuffer = LogBuffer(maxLines: 5_000, idNamespace: "aib")
+    var serviceLogBuffersByServiceID: [String: LogBuffer] = [:]
     var serviceSnapshotsByID: [String: AIBServiceRuntimeSnapshot] = [:]
     var activeServiceIDs: Set<String> = []
     var mcpConnectionStatusByConnectionID: [String: MCPConnectionRuntimeStatus] = [:]
@@ -635,10 +635,13 @@ final class AgentsInBlackAppModel {
     }
 
     private func startEmulator() async {
-        guard let workspace else {
+        guard workspace != nil else {
             setError("Open a workspace first.")
             return
         }
+        // Rescan workspace before starting so newly added skills and config changes are picked up.
+        await refreshWorkspace()
+        guard let workspace else { return }
         let workspaceYAMLPath = workspace.rootURL
             .appendingPathComponent(".aib/workspace.yaml")
             .standardizedFileURL
@@ -680,8 +683,8 @@ final class AgentsInBlackAppModel {
         let effectiveGatewayPort = chooseGatewayPort(preferred: gatewayPort)
         gatewayPort = effectiveGatewayPort
         emulatorState = .starting
-        emulatorOutput = ""
-        serviceLogOutputByServiceID = [:]
+        aibLogBuffer.clear()
+        serviceLogBuffersByServiceID.removeAll()
         serviceSnapshotsByID = [:]
         mcpConnectionStatusByConnectionID = [:]
         runtimeIssues = []
@@ -1148,12 +1151,7 @@ final class AgentsInBlackAppModel {
         let namespacedID = service.namespacedID
         session.logHandler = { [weak self] line in
             guard let self else { return }
-            var output = self.serviceLogOutputByServiceID[namespacedID, default: ""]
-            output.append(line)
-            if output.count > 120_000 {
-                output.removeFirst(output.count - 120_000)
-            }
-            self.serviceLogOutputByServiceID[namespacedID] = output
+            self.appendServiceLog(line, to: namespacedID)
         }
         var sessions = chatSessionsByService[service.id] ?? []
         sessions.insert(session, at: 0)
@@ -2261,59 +2259,52 @@ final class AgentsInBlackAppModel {
         }
     }
 
-    func aibLogOutput() -> String {
-        emulatorOutput
+    func aibLogOutput() -> [LogLine] {
+        aibLogBuffer.lines
     }
 
     func clearAIBLogs() {
-        emulatorOutput = ""
+        aibLogBuffer.clear()
     }
 
     func toggleUtilityPanelVisibility() {
         showUtilityPanel.toggle()
     }
 
-    func selectedServiceLogOutput() -> String {
-        guard let service = primaryWorkbenchService() else { return "" }
-        return serviceLogOutputByServiceID[service.namespacedID, default: ""]
-    }
-
-    func selectedScopedRuntimeLogOutput() -> String {
+    func selectedScopedRuntimeLogOutput() -> [LogLine] {
         if let service = primaryWorkbenchService() {
-            return serviceLogOutputByServiceID[service.namespacedID, default: ""]
+            return serviceLogBuffersByServiceID[service.namespacedID]?.lines ?? []
         }
-        guard let repo = selectedRepo(), let workspace else { return "" }
+        guard let repo = selectedRepo(), let workspace else { return [] }
         let namespacedIDs = Set(workspace.services.filter { $0.repoID == repo.id }.map(\.namespacedID))
-        guard !namespacedIDs.isEmpty else { return "" }
-        return serviceLogOutputByServiceID
+        guard !namespacedIDs.isEmpty else { return [] }
+        return serviceLogBuffersByServiceID
             .filter { namespacedIDs.contains($0.key) }
             .sorted { $0.key.localizedStandardCompare($1.key) == .orderedAscending }
-            .map(\.value)
-            .joined(separator: "")
+            .flatMap { $0.value.lines }
     }
 
-    func utilityServiceRuntimeLogOutput() -> String {
+    func utilityServiceRuntimeLogOutput() -> [LogLine] {
         switch utilityServiceLogTarget {
         case .selection:
             return selectedScopedRuntimeLogOutput()
         case .allServices:
-            return serviceLogOutputByServiceID
+            return serviceLogBuffersByServiceID
                 .sorted { $0.key.localizedStandardCompare($1.key) == .orderedAscending }
-                .map(\.value)
-                .joined(separator: "")
+                .flatMap { $0.value.lines }
         case .service(let namespacedID):
-            return serviceLogOutputByServiceID[namespacedID, default: ""]
+            return serviceLogBuffersByServiceID[namespacedID]?.lines ?? []
         }
     }
 
     func clearSelectedScopedRuntimeLogs() {
         if let service = primaryWorkbenchService() {
-            serviceLogOutputByServiceID[service.namespacedID] = ""
+            serviceLogBuffersByServiceID[service.namespacedID]?.clear()
             return
         }
         guard let repo = selectedRepo(), let workspace else { return }
         for serviceID in workspace.services.filter({ $0.repoID == repo.id }).map(\.namespacedID) {
-            serviceLogOutputByServiceID[serviceID] = ""
+            serviceLogBuffersByServiceID[serviceID]?.clear()
         }
     }
 
@@ -2322,11 +2313,11 @@ final class AgentsInBlackAppModel {
         case .selection:
             clearSelectedScopedRuntimeLogs()
         case .allServices:
-            for key in serviceLogOutputByServiceID.keys {
-                serviceLogOutputByServiceID[key] = ""
+            for key in serviceLogBuffersByServiceID.keys {
+                serviceLogBuffersByServiceID[key]?.clear()
             }
         case .service(let namespacedID):
-            serviceLogOutputByServiceID[namespacedID] = ""
+            serviceLogBuffersByServiceID[namespacedID]?.clear()
         }
     }
 
@@ -2350,10 +2341,6 @@ final class AgentsInBlackAppModel {
             .sorted { $0.namespacedID.localizedStandardCompare($1.namespacedID) == .orderedAscending }
         items.append(contentsOf: services.map { (.service($0.namespacedID), $0.namespacedID) })
         return items
-    }
-
-    func serviceLogOutput(for service: AIBServiceModel) -> String {
-        serviceLogOutputByServiceID[service.namespacedID, default: ""]
     }
 
     func serviceSnapshot(for service: AIBServiceModel) -> AIBServiceRuntimeSnapshot? {
@@ -2560,18 +2547,12 @@ final class AgentsInBlackAppModel {
     }
 
     private func appendAIBSystemLogLine(_ message: String) {
-        emulatorOutput.append("\(isoTimestampString()) [aib][app][info] \(message)\n")
-        if emulatorOutput.count > 200_000 {
-            emulatorOutput.removeFirst(emulatorOutput.count - 200_000)
-        }
+        aibLogBuffer.append("\(isoTimestampString()) [aib][app][info] \(message)\n")
     }
 
     private func setError(_ message: String) {
         lastErrorMessage = message
-        emulatorOutput.append("\(isoTimestampString()) [aib][app][error] \(message)\n")
-        if emulatorOutput.count > 200_000 {
-            emulatorOutput.removeFirst(emulatorOutput.count - 200_000)
-        }
+        aibLogBuffer.append("\(isoTimestampString()) [aib][app][error] \(message)\n")
     }
 
     private func appendDeployLogLine(
@@ -2586,10 +2567,14 @@ final class AgentsInBlackAppModel {
         } else {
             elapsedLabel = ""
         }
-        emulatorOutput.append("\(isoTimestampString(from: timestamp)) [aib][deploy][\(level)]\(elapsedLabel) \(message)\n")
-        if emulatorOutput.count > 200_000 {
-            emulatorOutput.removeFirst(emulatorOutput.count - 200_000)
-        }
+        aibLogBuffer.append("\(isoTimestampString(from: timestamp)) [aib][deploy][\(level)]\(elapsedLabel) \(message)\n")
+    }
+
+    private func appendServiceLog(_ text: String, to namespacedID: String) {
+        var buffer = serviceLogBuffersByServiceID[namespacedID]
+            ?? LogBuffer(maxLines: 2_000, idNamespace: namespacedID)
+        buffer.append(text)
+        serviceLogBuffersByServiceID[namespacedID] = buffer
     }
 
     private func isoTimestampString(from date: Date = .now) -> String {
@@ -2935,19 +2920,11 @@ final class AgentsInBlackAppModel {
     private func handleEmulatorEvent(_ event: AIBEmulatorEvent) {
         switch event {
         case .log(let entry):
-            emulatorOutput.append(entry.formattedLine)
-            if emulatorOutput.count > 200_000 {
-                emulatorOutput.removeFirst(emulatorOutput.count - 200_000)
-            }
+            aibLogBuffer.append(entry.formattedLine)
             registerIssue(from: entry)
             updateMCPConnectionStatus(from: entry)
             if let serviceID = extractServiceID(from: entry) {
-                var output = serviceLogOutputByServiceID[serviceID, default: ""]
-                output.append(entry.formattedLine)
-                if output.count > 120_000 {
-                    output.removeFirst(output.count - 120_000)
-                }
-                serviceLogOutputByServiceID[serviceID] = output
+                appendServiceLog(entry.formattedLine, to: serviceID)
             }
         case .lifecycleChanged(let lifecycle):
             handleLifecycleTransitionForAnnouncement(next: lifecycle)

@@ -228,11 +228,10 @@ private struct ServiceRuntimeLogsPaneView: View {
     @Bindable var model: AgentsInBlackAppModel
 
     var body: some View {
-        let output = model.utilityServiceRuntimeLogOutput()
+        let lines = model.utilityServiceRuntimeLogOutput()
         UtilityMonospacedOutputView(
-            output: output,
+            lines: lines,
             emptyMessage: emptyMessage,
-            scrollAnchorID: "service-runtime-output-bottom",
             filterText: model.utilityPanelFilterText
         )
     }
