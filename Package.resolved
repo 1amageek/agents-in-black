@@ -1,5 +1,5 @@
 {
-  "originHash" : "a5b2492b4cd21454e90a2a8d2c6ff172c066871e47c1c4dd88fc122c5a8a17b0",
+  "originHash" : "68ab44bf3645e4032cbe193b406b203282d686d229bea9291eadcbe7c4df3b0f",
   "pins" : [
     {
       "identity" : "async-http-client",
@@ -249,8 +249,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/1amageek/swift-skills.git",
       "state" : {
-        "revision" : "523cdcb839719d957470b9e3a0f073238ae2db47",
-        "version" : "0.1.0"
+        "revision" : "839d832cec69863b0217d985cb0a9bf330017f8d",
+        "version" : "0.2.0"
       }
     },
     {

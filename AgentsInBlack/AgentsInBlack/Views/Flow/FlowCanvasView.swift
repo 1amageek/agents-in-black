@@ -52,7 +52,7 @@ struct FlowCanvasView: View {
     private var canvas: some View {
         GeometryReader { geometry in
             ZStack {
-                FlowCanvas(store: store) { node in
+                FlowCanvas(store: store) { node, _ in
                         FlowServiceNodeContent(node: node)
                     }
                     .nodeAccessory(placement: .bottom) { node in

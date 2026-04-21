@@ -22,7 +22,7 @@ let package = Package(
         .package(url: "https://github.com/swift-server/async-http-client.git", from: "1.25.0"),
         .package(url: "https://github.com/apple/swift-log.git", from: "1.6.0"),
         .package(url: "https://github.com/1amageek/swift-yaml.git", from: "1.0.0"),
-        .package(url: "https://github.com/1amageek/swift-skills.git", from: "0.1.0"),
+        .package(url: "https://github.com/1amageek/swift-skills.git", from: "0.2.0"),
         .package(url: "https://github.com/1amageek/containerization.git", revision: "5d048bb"),
         .package(url: "https://github.com/1amageek/container.git", revision: "0ec965e"),
         .package(url: "https://github.com/mattt/JSONSchema.git", from: "1.3.0"),
