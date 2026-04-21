@@ -125,8 +125,12 @@ final class _GrowingBackingTextView: NSTextView {
     }
 
     override func keyDown(with event: NSEvent) {
-        // Return without Shift triggers send; Shift+Return inserts newline
-        if event.keyCode == 36 && !event.modifierFlags.contains(.shift) {
+        // Return without Shift triggers send; Shift+Return inserts newline.
+        // Skip when IME composition is in progress — Return must confirm the
+        // marked text instead of submitting.
+        if event.keyCode == 36
+            && !event.modifierFlags.contains(.shift)
+            && !hasMarkedText() {
             coordinator?.parent.onReturn?()
             return
         }
