@@ -242,11 +242,12 @@ public final class AIBEmulatorController {
                     ? resolvedPluginRootPath
                     : nil
                 let executionDirectory = service.cwd
+                let resolvedModel = service.env["MODEL"]
                 let handler = LocalAgentHandler.makeHandler(
                     serviceID: service.id,
                     pluginRootPath: pluginRootPath,
                     executionDirectory: executionDirectory,
-                    model: nil,
+                    model: resolvedModel,
                     logger: logger
                 )
                 await gatewayControl.registerLocalHandler(serviceID: service.id, handler: handler)
@@ -254,6 +255,9 @@ public final class AIBEmulatorController {
                 if let pluginRootPath {
                     metadata["plugin_root"] = "\(pluginRootPath)"
                     metadata["claude_plugin_command"] = "\(ClaudeCodePluginBundle.manualLaunchCommand(pluginRootPath: pluginRootPath))"
+                }
+                if let resolvedModel {
+                    metadata["model"] = "\(resolvedModel)"
                 }
                 logger.info("Registered local Claude Code handler", metadata: metadata)
             }
