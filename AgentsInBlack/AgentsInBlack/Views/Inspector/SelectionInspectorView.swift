@@ -751,45 +751,53 @@ private struct AgentModelSection: View {
     @Bindable var model: AgentsInBlackAppModel
     var service: AIBServiceModel
 
-    @State private var editModel: String = ""
-    @State private var hasAppeared = false
-
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Divider()
             Text("Model")
                 .font(.headline)
 
-            TextField("e.g. claude-sonnet-4-6", text: $editModel)
-                .textFieldStyle(.roundedBorder)
-                .font(.system(.callout, design: .monospaced))
+            Picker("Model", selection: selectionBinding) {
+                Text("Default (\(AIBServiceModel.defaultAgentModel))")
+                    .tag(String?.none)
 
-            if hasChanges {
-                Button("Save") {
-                    Task {
-                        await model.updateServiceModel(
-                            namespacedServiceID: service.namespacedID,
-                            model: editModel
-                        )
+                Section("Latest") {
+                    ForEach(ClaudeModelCatalog.latest) { entry in
+                        Text(entry.displayName).tag(Optional(entry.id))
                     }
                 }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
+
+                Section("Legacy") {
+                    ForEach(ClaudeModelCatalog.legacy) { entry in
+                        Text(entry.displayName).tag(Optional(entry.id))
+                    }
+                }
+
+                if let configured = service.configuredModel,
+                   ClaudeModelCatalog.entry(for: configured) == nil {
+                    Section("Custom") {
+                        Text(configured).tag(Optional(configured))
+                    }
+                }
             }
-        }
-        .onAppear {
-            guard !hasAppeared else { return }
-            hasAppeared = true
-            editModel = service.configuredModel ?? ""
-        }
-        .onChange(of: service.configuredModel) { _, newValue in
-            editModel = newValue ?? ""
+            .labelsHidden()
+            .pickerStyle(.menu)
         }
     }
 
-    private var hasChanges: Bool {
-        let current = service.configuredModel ?? ""
-        return editModel != current
+    private var selectionBinding: Binding<String?> {
+        Binding(
+            get: { service.configuredModel },
+            set: { newValue in
+                guard newValue != service.configuredModel else { return }
+                Task {
+                    await model.updateServiceModel(
+                        namespacedServiceID: service.namespacedID,
+                        model: newValue
+                    )
+                }
+            }
+        )
     }
 }
 
