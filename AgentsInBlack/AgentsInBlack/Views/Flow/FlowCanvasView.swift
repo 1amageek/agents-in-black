@@ -494,10 +494,12 @@ struct FlowCanvasView: View {
 
     private func makeFlowNodes(from nodes: [FlowNodeModel]) -> [FlowNode<String>] {
         nodes.map { node in
+            let hasModelRow = node.serviceKind == .agent && node.model != nil
+            let height: CGFloat = hasModelRow ? 72 : 58
             return FlowNode(
                 id: node.id,
                 position: node.position,
-                size: CGSize(width: 170, height: 58),
+                size: CGSize(width: 210, height: height),
                 data: node.namespacedID,
                 handles: handles(for: node.serviceKind)
             )
@@ -774,50 +776,55 @@ private struct FlowServiceNodeContent: View {
         model: String? = nil,
         localRunner: String? = nil
     ) -> some View {
-        HStack(spacing: 6) {
-            Image(systemName: AIBFlowPalette.symbol(for: kind))
-                .font(.system(size: 16, weight: .medium))
-                .foregroundStyle(tint)
-                .frame(width: 18)
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Image(systemName: AIBFlowPalette.symbol(for: kind))
+                    .font(.system(size: 16, weight: .medium))
+                    .foregroundStyle(tint)
+                    .frame(width: 18)
 
-            VStack(alignment: .leading, spacing: 1) {
-                Text(parts.primary)
-                    .font(.system(size: 11, design: .monospaced).weight(.semibold))
-                    .foregroundStyle(.primary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-
-                if let secondary = parts.secondary {
-                    Text(secondary)
-                        .font(.system(size: 9))
-                        .foregroundStyle(.tertiary)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(parts.primary)
+                        .font(.system(size: 11, design: .monospaced).weight(.semibold))
+                        .foregroundStyle(.primary)
                         .lineLimit(1)
+                        .truncationMode(.tail)
+
+                    if let secondary = parts.secondary {
+                        Text(secondary)
+                            .font(.system(size: 9))
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                    }
                 }
 
-                if let model {
-                    HStack(spacing: 3) {
-                        Text(model)
-                            .font(.system(size: 8, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
+                Spacer(minLength: 0)
 
-                        if let localRunner {
-                            Text(localRunner)
-                                .font(.system(size: 7, weight: .medium))
-                                .foregroundStyle(.white)
-                                .padding(.horizontal, 4)
-                                .padding(.vertical, 1)
-                                .background(.green.opacity(0.8), in: Capsule())
-                        }
-                    }
+                if let localRunner {
+                    Text(localRunner)
+                        .font(.system(size: 8, weight: .medium))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1.5)
+                        .background(.green.opacity(0.85), in: Capsule())
                 }
             }
 
-            Spacer(minLength: 0)
+            if let model {
+                HStack(spacing: 4) {
+                    Image(systemName: "cpu")
+                        .font(.system(size: 9, weight: .regular))
+                        .foregroundStyle(.tertiary)
+                    Text(model)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+            }
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 2)
+        .padding(.vertical, 6)
         .frame(width: node.size.width, height: node.size.height)
         .background {
             RoundedRectangle(cornerRadius: 8)
