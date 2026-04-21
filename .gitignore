@@ -9,3 +9,6 @@ DerivedData/
 .netrc
 demo/**/.build/
 demo/.aib/generated/
+
+# asc-mcp project-local company config (contains absolute key paths)
+.asc-companies.json
