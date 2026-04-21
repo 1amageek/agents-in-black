@@ -864,6 +864,92 @@ func skillServiceAssignmentYAMLRoundTrip() throws {
 }
 
 @Test(.timeLimit(.minutes(1)))
+func serviceModelYAMLRoundTrip() throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("aib-service-model-rt-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let workspace = AIBWorkspaceConfig(
+        workspaceName: "test",
+        repos: [
+            WorkspaceRepo(
+                name: "agent-a",
+                path: "agent-a",
+                runtime: .swift,
+                framework: .unknown,
+                packageManager: .swiftpm,
+                status: .discoverable,
+                detectionConfidence: .high,
+                services: [
+                    WorkspaceRepoServiceConfig(
+                        id: "main",
+                        kind: "agent",
+                        mountPath: "/agents/a",
+                        run: ["swift", "run"],
+                        model: "claude-opus-4-7"
+                    ),
+                ]
+            ),
+        ]
+    )
+
+    let configPath = root.appendingPathComponent("workspace.yaml").path
+    try WorkspaceYAMLCodec.saveWorkspace(workspace, to: configPath)
+    let loaded = try WorkspaceYAMLCodec.loadWorkspace(at: configPath)
+
+    let service = loaded.repos.first?.services?.first
+    #expect(service?.model == "claude-opus-4-7")
+}
+
+@Test(.timeLimit(.minutes(1)))
+func updateServiceModelPersistsToYAML() throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("aib-update-model-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let agentRepo = root.appendingPathComponent("agent-a", isDirectory: true)
+    try FileManager.default.createDirectory(at: agentRepo.appendingPathComponent(".git"), withIntermediateDirectories: true)
+    try "// swift-tools-version: 6.0\nimport PackageDescription\n"
+        .write(to: agentRepo.appendingPathComponent("Package.swift"), atomically: true, encoding: .utf8)
+
+    _ = try AIBWorkspaceManager.initWorkspace(
+        options: .init(workspaceRoot: root.path, scanPath: root.path, force: false, scanEnabled: true)
+    )
+
+    var workspace = try AIBWorkspaceManager.loadWorkspace(workspaceRoot: root.path)
+    workspace.repos[0].enabled = true
+    workspace.repos[0].services = [
+        WorkspaceRepoServiceConfig(
+            id: "main",
+            kind: "agent",
+            mountPath: "/agents/a",
+            run: ["swift", "run"]
+        )
+    ]
+    try AIBWorkspaceManager.saveWorkspace(workspace, workspaceRoot: root.path)
+
+    let namespace = workspace.repos[0].servicesNamespace ?? workspace.repos[0].name
+    try AIBWorkspaceManager.updateServiceModel(
+        workspaceRoot: root.path,
+        namespacedServiceID: "\(namespace)/main",
+        model: "claude-opus-4-7"
+    )
+
+    let reloaded = try AIBWorkspaceManager.loadWorkspace(workspaceRoot: root.path)
+    #expect(reloaded.repos[0].services?.first?.model == "claude-opus-4-7")
+
+    try AIBWorkspaceManager.updateServiceModel(
+        workspaceRoot: root.path,
+        namespacedServiceID: "\(namespace)/main",
+        model: nil
+    )
+    let cleared = try AIBWorkspaceManager.loadWorkspace(workspaceRoot: root.path)
+    #expect(cleared.repos[0].services?.first?.model == nil)
+}
+
+@Test(.timeLimit(.minutes(1)))
 func skillAssignmentPreservesInResolveConfig() throws {
     let root = FileManager.default.temporaryDirectory
         .appendingPathComponent("aib-skill-resolve-\(UUID().uuidString)", isDirectory: true)

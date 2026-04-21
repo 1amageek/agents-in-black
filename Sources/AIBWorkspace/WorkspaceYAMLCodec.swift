@@ -320,7 +320,8 @@ private struct WorkspaceFileDTO: Codable {
             a2a: s.a2a.map { A2ADTO(cardPath: $0.cardPath, rpcPath: $0.rpcPath) },
             ui: s.ui.map { UIDTO(primaryMode: $0.primaryMode, chat: $0.chat.map { UIChatDTO(method: $0.method, path: $0.path, requestContentType: $0.requestContentType, requestMessageJSONPath: $0.requestMessageJSONPath, requestContextJSONPath: $0.requestContextJSONPath, responseMessageJSONPath: $0.responseMessageJSONPath, streaming: $0.streaming) }) },
             endpoints: s.endpoints,
-            skills: s.skills
+            skills: s.skills,
+            model: s.model
         )
     }
 
