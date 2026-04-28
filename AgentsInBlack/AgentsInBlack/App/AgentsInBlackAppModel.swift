@@ -1189,7 +1189,7 @@ final class AgentsInBlackAppModel {
 
     /// Whether Claude Code CLI is installed and available for local agent execution.
     var isClaudeCodeAvailable: Bool {
-        ClaudeCodeConfiguration().isInstalled
+        ClaudeCodeAgentRunner.isHostAvailable
     }
 
     /// Create the local runner for a service using Claude Code CLI (subscription auth).

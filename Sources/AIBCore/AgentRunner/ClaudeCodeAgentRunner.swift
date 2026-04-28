@@ -1,4 +1,5 @@
 import AIBRuntimeCore
+import ClaudeCode
 import Foundation
 
 /// Agent runner that executes Claude Code CLI locally using subscription auth.
@@ -13,13 +14,35 @@ public final class ClaudeCodeAgentRunner: AgentRunner, @unchecked Sendable {
         self.model = model
     }
 
+    // MARK: - AgentRunner metadata
+
+    public static let displayName = "Claude Code"
+
+    public static var isHostAvailable: Bool {
+        ClaudeCodeConfiguration().isInstalled
+    }
+
+    /// Authentication status of the Claude Code CLI.
+    ///
+    /// Specific to runners that require interactive sign-in. Used by
+    /// ``AIBEmulatorController`` to refuse start when agent services are
+    /// configured but the CLI is not signed in via OAuth.
+    public static func checkAuthStatus() async -> AgentRunnerAuthStatus {
+        let raw = await ClaudeCodeConfiguration().checkAuthStatus()
+        return AgentRunnerAuthStatus(
+            loggedIn: raw.loggedIn,
+            isOAuthAuthenticated: raw.isOAuthAuthenticated,
+            authMethod: raw.authMethod
+        )
+    }
+
     public func send(
         message: String,
         context: AgentRunnerContext
     ) -> AsyncThrowingStream<AgentRunnerEvent, Error> {
         var config = ClaudeCodeConfiguration()
         if let model {
-            config.model = model
+            config.model = .custom(model)
         }
         if let execDir = context.executionDirectory {
             config.workingDirectory = URL(fileURLWithPath: execDir)
@@ -36,8 +59,8 @@ public final class ClaudeCodeAgentRunner: AgentRunner, @unchecked Sendable {
         // Use AIB-generated MCP config exclusively.
         // Set DISABLE_MCP_GLOBAL_CONFIG to prevent inheriting user's global/project MCP servers.
         if let mcpPath = effectiveMCPConfigPath {
-            config.mcpConfigPath = mcpPath
-            config.additionalEnvironment["DISABLE_MCP_GLOBAL_CONFIG"] = "1"
+            config.mcpConfigPath = URL(fileURLWithPath: mcpPath)
+            config.environment["DISABLE_MCP_GLOBAL_CONFIG"] = "1"
         }
 
         if let pluginRootPath = effectivePluginRootPath {
@@ -72,6 +95,9 @@ public final class ClaudeCodeAgentRunner: AgentRunner, @unchecked Sendable {
                                 mcpServerStatuses: sys.mcpServers.map(\.status),
                                 permissionMode: sys.permissionMode
                             )))
+
+                        case .systemStatus:
+                            break
 
                         case .streamEvent(let delta):
                             switch delta.event {

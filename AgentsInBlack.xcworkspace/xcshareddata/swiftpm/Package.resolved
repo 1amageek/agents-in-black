@@ -92,6 +92,15 @@
       }
     },
     {
+      "identity" : "swift-claude-code",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/1amageek/swift-claude-code.git",
+      "state" : {
+        "revision" : "7300311eba80e38e4ffab222edac6778865c601c",
+        "version" : "0.1.0"
+      }
+    },
+    {
       "identity" : "swift-collections",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/apple/swift-collections.git",

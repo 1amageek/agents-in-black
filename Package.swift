@@ -27,6 +27,7 @@ let package = Package(
         .package(url: "https://github.com/1amageek/container.git", revision: "0ec965e"),
         .package(url: "https://github.com/mattt/JSONSchema.git", from: "1.3.0"),
         .package(url: "https://github.com/apple/swift-collections.git", from: "1.1.0"),
+        .package(url: "https://github.com/1amageek/swift-claude-code.git", from: "0.1.0"),
     ],
     targets: [
         .target(
@@ -41,6 +42,7 @@ let package = Package(
                 .product(name: "YAML", package: "swift-yaml"),
                 .product(name: "JSONSchema", package: "JSONSchema"),
                 .product(name: "OrderedCollections", package: "swift-collections"),
+                .product(name: "ClaudeCode", package: "swift-claude-code"),
             ]
         ),
         .target(

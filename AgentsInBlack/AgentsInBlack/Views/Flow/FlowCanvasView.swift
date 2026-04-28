@@ -665,8 +665,8 @@ struct FlowCanvasView: View {
                 }
                 let runnerLabel: String? = node.serviceKind == .agent
                     && model.emulatorState.isRunning
-                    && ClaudeCodeConfiguration().isInstalled
-                    ? "Claude Code" : nil
+                    && ClaudeCodeAgentRunner.isHostAvailable
+                    ? ClaudeCodeAgentRunner.displayName : nil
                 return (
                     node.id,
                     FlowNodeVisual(

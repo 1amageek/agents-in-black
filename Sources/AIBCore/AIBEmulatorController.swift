@@ -3,6 +3,7 @@ import AIBGateway
 import AIBRuntimeCore
 import AIBSupervisor
 import AIBWorkspace
+import ClaudeCode
 import Darwin
 import Foundation
 import Logging
@@ -217,7 +218,7 @@ public final class AIBEmulatorController {
 
             let hasAgentServices = loaded.config.services.contains { $0.kind == .agent }
             if hasAgentServices {
-                let authStatus = await ClaudeCodeConfiguration().checkAuthStatus()
+                let authStatus = await ClaudeCodeAgentRunner.checkAuthStatus()
                 guard authStatus.isOAuthAuthenticated else {
                     throw NSError(
                         domain: "AIBEmulatorController",

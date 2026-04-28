@@ -11,15 +11,6 @@
       }
     },
     {
-      "identity" : "container",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/1amageek/container.git",
-      "state" : {
-        "branch" : "0ec965e",
-        "revision" : "0ec965e0546a29de3c3f46cea39b4a543787d8f1"
-      }
-    },
-    {
       "identity" : "containerization",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/1amageek/containerization.git",
@@ -98,6 +89,15 @@
       "state" : {
         "revision" : "24ccdeeeed4dfaae7955fcac9dbf5489ed4f1a25",
         "version" : "1.18.0"
+      }
+    },
+    {
+      "identity" : "swift-claude-code",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/1amageek/swift-claude-code.git",
+      "state" : {
+        "revision" : "7300311eba80e38e4ffab222edac6778865c601c",
+        "version" : "0.1.0"
       }
     },
     {

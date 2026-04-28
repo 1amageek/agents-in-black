@@ -1,5 +1,5 @@
 {
-  "originHash" : "68ab44bf3645e4032cbe193b406b203282d686d229bea9291eadcbe7c4df3b0f",
+  "originHash" : "4521432ad12de4139d9c194cc278ee1ddb942983fbe4d857b36fe1a5514b3ff4",
   "pins" : [
     {
       "identity" : "async-http-client",
@@ -98,6 +98,15 @@
       "state" : {
         "revision" : "24ccdeeeed4dfaae7955fcac9dbf5489ed4f1a25",
         "version" : "1.18.0"
+      }
+    },
+    {
+      "identity" : "swift-claude-code",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/1amageek/swift-claude-code.git",
+      "state" : {
+        "revision" : "7300311eba80e38e4ffab222edac6778865c601c",
+        "version" : "0.1.0"
       }
     },
     {

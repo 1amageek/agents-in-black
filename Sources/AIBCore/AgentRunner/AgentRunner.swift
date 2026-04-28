@@ -6,6 +6,16 @@ import Foundation
 /// - ``A2AAgentRunner``: sends messages via A2A HTTP/JSON-RPC (deployed or container agents).
 /// - ``ClaudeCodeAgentRunner``: runs Claude Code CLI locally using subscription auth (no API cost).
 public protocol AgentRunner: Sendable {
+    /// Human-readable name shown in UI (e.g. "Claude Code", "A2A").
+    static var displayName: String { get }
+
+    /// Whether host-level prerequisites for this runner are satisfied.
+    ///
+    /// - Local CLI runners: whether the CLI executable is present on the host.
+    /// - Remote runners (HTTP-based): always `true`. Endpoint reachability is
+    ///   checked at send time, not as a precondition.
+    static var isHostAvailable: Bool { get }
+
     func send(
         message: String,
         context: AgentRunnerContext

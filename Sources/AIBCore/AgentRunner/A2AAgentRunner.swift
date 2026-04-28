@@ -12,6 +12,14 @@ public struct A2AAgentRunner: AgentRunner, Sendable {
         self.rpcPath = rpcPath
     }
 
+    // MARK: - AgentRunner metadata
+
+    public static let displayName = "A2A"
+
+    /// HTTP-based runner has no host-level prerequisite. Endpoint reachability
+    /// is verified at send time.
+    public static let isHostAvailable = true
+
     public func send(
         message: String,
         context: AgentRunnerContext
