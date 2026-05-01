@@ -24,6 +24,18 @@ public struct GCloudProject: Sendable, Hashable, Identifiable {
     }
 }
 
+public struct GCloudRegion: Sendable, Hashable, Identifiable {
+    public let locationId: String
+    public let displayName: String?
+
+    public var id: String { locationId }
+
+    public init(locationId: String, displayName: String?) {
+        self.locationId = locationId
+        self.displayName = displayName
+    }
+}
+
 public struct GCloudContextSnapshot: Sendable, Equatable {
     public let activeAccount: String?
     public let accounts: [GCloudAccount]
@@ -45,15 +57,24 @@ public struct GCloudContextSnapshot: Sendable, Equatable {
 
 public struct GCloudContextService: Sendable {
     public typealias CommandRunner = @Sendable (String) async throws -> ShellProbe.Result
+    public typealias LoginCommandRunner = @Sendable () async throws -> ShellProbe.Result
 
     private let runCommand: CommandRunner
+    private let runLoginCommand: LoginCommandRunner
 
     public init(
         runCommand: @escaping CommandRunner = { command in
             try await ShellProbe.run(command: command)
+        },
+        runLoginCommand: @escaping LoginCommandRunner = {
+            try await ShellProbe.run(
+                command: "gcloud auth login --brief",
+                timeout: .seconds(300)
+            )
         }
     ) {
         self.runCommand = runCommand
+        self.runLoginCommand = runLoginCommand
     }
 
     public func fetchContext() async throws -> GCloudContextSnapshot {
@@ -88,6 +109,17 @@ public struct GCloudContextService: Sendable {
         try await runConfigSetCommand(key: "project", value: projectID)
     }
 
+    public func signIn() async throws {
+        let result = try await runLoginCommand()
+        guard result.exitCode == 0 else {
+            throw commandFailure(
+                phase: "gcloud-auth",
+                result: result,
+                fallback: "Failed to sign in to Google Cloud."
+            )
+        }
+    }
+
     func fetchAccounts() async throws -> [AccountDTO] {
         let result = try await runCommand("gcloud auth list --format=json 2>/dev/null")
         guard result.exitCode == 0 else {
@@ -106,6 +138,22 @@ public struct GCloudContextService: Sendable {
 
         let data = Data(result.stdout.utf8)
         return try Self.parseProjects(from: data)
+    }
+
+    public func fetchRegions(projectID: String) async throws -> [GCloudRegion] {
+        let projectArg = Self.shellQuote(projectID)
+        let command = "gcloud run regions list --project=\(projectArg) --format='json(locationId,displayName)' --quiet 2>/dev/null"
+        let result = try await runCommand(command)
+        guard result.exitCode == 0 else {
+            throw commandFailure(
+                phase: "gcloud-regions",
+                result: result,
+                fallback: "Failed to list Cloud Run regions."
+            )
+        }
+
+        let data = Data(result.stdout.utf8)
+        return try Self.parseRegions(from: data)
     }
 
     func fetchConfigValue(for key: String) async throws -> String? {
@@ -161,6 +209,18 @@ public struct GCloudContextService: Sendable {
             }
     }
 
+    static func parseRegions(from data: Data) throws -> [GCloudRegion] {
+        let decoder = JSONDecoder()
+        return try decoder.decode([RegionDTO].self, from: data)
+            .compactMap { region in
+                guard !region.locationId.isEmpty else { return nil }
+                return GCloudRegion(locationId: region.locationId, displayName: region.displayName)
+            }
+            .sorted { lhs, rhs in
+                lhs.locationId.localizedStandardCompare(rhs.locationId) == .orderedAscending
+            }
+    }
+
     static func normalizeConfigValue(_ value: String) -> String? {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, trimmed != "(unset)" else { return nil }
@@ -203,5 +263,10 @@ extension GCloudContextService {
             case projectID = "projectId"
             case name
         }
+    }
+
+    struct RegionDTO: Decodable, Sendable {
+        let locationId: String
+        let displayName: String?
     }
 }

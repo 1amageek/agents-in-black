@@ -91,6 +91,7 @@ final class AgentsInBlackAppModel {
 
     // MARK: - Deploy
     let deployController = AIBDeployController()
+    let deploymentsController = AIBDeploymentsController()
     var deployPhase: AIBDeployPhase = .idle
     var showDeploySheet: Bool = false
     var showCloudSettings: Bool = false
@@ -120,6 +121,7 @@ final class AgentsInBlackAppModel {
     var configuredGCloudProject: String?
     var gcloudContextErrorMessage: String?
     var isRefreshingGCloudContext: Bool = false
+    var isSigningInGCloudAccount: Bool = false
     var isSwitchingGCloudAccount: Bool = false
     var isSwitchingGCloudProject: Bool = false
     private var gcloudContextTask: Task<Void, Never>?
@@ -175,6 +177,7 @@ final class AgentsInBlackAppModel {
         stopDirectoryMonitor()
         emulatorController.shutdown()
         deployController.shutdown()
+        deploymentsController.reset()
     }
 
     func openWorkspacePicker() {
@@ -602,6 +605,10 @@ final class AgentsInBlackAppModel {
             break
         case .skill:
             break
+        case .deployments:
+            selectedSidebarSection = .workspace
+            detailSurfaceMode = .deployments
+            refreshDeploymentsInventory()
         }
     }
 
@@ -1085,6 +1092,8 @@ final class AgentsInBlackAppModel {
         case .issue:
             return nil
         case .skill:
+            return nil
+        case .deployments:
             return nil
         case nil:
             return nil
@@ -1805,7 +1814,7 @@ final class AgentsInBlackAppModel {
     }
 
     var isSwitchingDeployGCloudContext: Bool {
-        isSwitchingGCloudAccount || isSwitchingGCloudProject
+        isSigningInGCloudAccount || isSwitchingGCloudAccount || isSwitchingGCloudProject
     }
 
     var displayDeployGCloudProject: String? {
@@ -1933,6 +1942,76 @@ final class AgentsInBlackAppModel {
         showDeploySheet = false
     }
 
+    // MARK: - Deployments Inventory
+
+    /// Resolve `(provider, targetConfig, plan?)` for the current workspace.
+    /// `plan` is `nil` when the workspace cannot produce a valid plan yet
+    /// (no workspace, or plan generation throws). The list view still works
+    /// in that case — every live service shows up as an orphan.
+    func currentDeploymentsContext() async -> (
+        provider: any DeploymentProvider,
+        targetConfig: AIBDeployTargetConfig,
+        plan: AIBDeployPlan?
+    )? {
+        guard let workspace else {
+            print("[Deployments] currentDeploymentsContext: no workspace loaded")
+            return nil
+        }
+        do {
+            let provider = try DeploymentProviderRegistry.detect(workspaceRoot: workspace.rootURL.path)
+            let targetConfig = try AIBDeployService.loadTargetConfig(
+                workspaceRoot: workspace.rootURL.path,
+                providerID: provider.providerID
+            )
+            try provider.validateTargetConfig(targetConfig)
+            print("[Deployments] context resolved provider=\(provider.providerID) region=\(targetConfig.region) project=\(targetConfig.providerConfig["gcpProject"] ?? "-")")
+            let plan: AIBDeployPlan?
+            do {
+                plan = try await AIBDeployService.generatePlan(
+                    workspaceRoot: workspace.rootURL.path,
+                    targetConfig: targetConfig,
+                    provider: provider
+                )
+            } catch {
+                print("[Deployments] generatePlan failed: \(error.localizedDescription) — proceeding without plan (every live service treated as orphan)")
+                plan = nil
+            }
+            return (provider, targetConfig, plan)
+        } catch {
+            print("[Deployments] currentDeploymentsContext failed: \(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    func refreshDeploymentsInventory() {
+        print("[Deployments] refreshDeploymentsInventory called")
+        Task { [weak self] in
+            guard let self, let context = await self.currentDeploymentsContext() else {
+                print("[Deployments] no context — resetting controller (list will be empty)")
+                self?.deploymentsController.reset()
+                return
+            }
+            self.deploymentsController.refresh(
+                provider: context.provider,
+                targetConfig: context.targetConfig,
+                plan: context.plan
+            )
+        }
+    }
+
+    func deleteDeployment(serviceName: String, region: String) {
+        Task { [weak self] in
+            guard let self, let context = await self.currentDeploymentsContext() else { return }
+            self.deploymentsController.delete(
+                serviceName: serviceName,
+                region: region,
+                provider: context.provider,
+                targetConfig: context.targetConfig,
+                plan: context.plan
+            )
+        }
+    }
+
     /// Cleanup deploy state. Called exclusively from `.sheet(onDismiss:)`.
     func cleanupDeployState() {
         deployController.reset()
@@ -1982,6 +2061,28 @@ final class AgentsInBlackAppModel {
             workspaceRoot: workspace.rootURL.path,
             providerID: providerID
         )
+    }
+
+    func signInGCloudAccount() async {
+        guard let workspace else { return }
+        guard canSwitchDeployGCloudContext else { return }
+        guard !isSigningInGCloudAccount else { return }
+
+        isSigningInGCloudAccount = true
+        gcloudContextErrorMessage = nil
+        defer { isSigningInGCloudAccount = false }
+
+        do {
+            try await gcloudContextService.signIn()
+            await applyRefreshedGCloudContext(
+                workspaceRoot: workspace.rootURL.path,
+                providerID: "gcp-cloudrun"
+            )
+            restartDeployPipelineForContextChange()
+            refreshEnvironmentStatus()
+        } catch {
+            gcloudContextErrorMessage = "Failed to sign in to Google Cloud: \(error.localizedDescription)"
+        }
     }
 
     func switchGCloudAccount(to account: String) async {
@@ -2100,6 +2201,7 @@ final class AgentsInBlackAppModel {
         configuredGCloudProject = nil
         gcloudContextErrorMessage = nil
         isRefreshingGCloudContext = false
+        isSigningInGCloudAccount = false
         isSwitchingGCloudAccount = false
         isSwitchingGCloudProject = false
     }

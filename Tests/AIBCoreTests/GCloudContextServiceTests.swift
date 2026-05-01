@@ -100,3 +100,21 @@ func gcloudProjectSwitchUsesConfigSetCommand() async throws {
     let commands = await runner.capturedCommands()
     #expect(commands == ["gcloud config set project target-project"])
 }
+
+@Test(.timeLimit(.minutes(1)))
+func gcloudSignInUsesInjectedLoginCommand() async throws {
+    let service = GCloudContextService(
+        runCommand: { command in
+            throw TestFailure("Unexpected command: \(command)")
+        },
+        runLoginCommand: {
+            .init(
+                exitCode: 0,
+                stdout: "You are now logged in.",
+                stderr: ""
+            )
+        }
+    )
+
+    try await service.signIn()
+}

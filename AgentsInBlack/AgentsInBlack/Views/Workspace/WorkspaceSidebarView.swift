@@ -15,6 +15,7 @@ struct WorkspaceSidebarView: View {
     var body: some View {
         List(selection: $model.selection) {
             actorTopologyRow
+            deploymentsRow
             if model.showIssuesInSidebar {
                 issuesSection
             }
@@ -139,6 +140,33 @@ struct WorkspaceSidebarView: View {
             }
             .padding(.trailing, 8)
         }
+    }
+
+    private var deploymentsRow: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "icloud.fill")
+                .foregroundStyle(.purple)
+                .frame(width: 16)
+            Text("Deployments")
+            Spacer(minLength: 8)
+            let driftCount = model.deploymentsController.drift.entries.filter { entry in
+                if case .inSync = entry.status { return false } else { return true }
+            }.count
+            if driftCount > 0 {
+                Text("\(driftCount)")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(.orange, in: Capsule())
+                    .help("\(driftCount) service(s) drifted from workspace")
+            }
+        }
+        .contentShape(Rectangle())
+        .onTapGesture {
+            model.select(.deployments)
+        }
+        .tag(SelectionTarget.deployments)
     }
 
     private var actorTopologyRow: some View {

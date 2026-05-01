@@ -17,19 +17,22 @@ public struct PreflightCheckResult: Sendable, Identifiable {
     public var status: Status
     public var remediationURL: URL?
     public var remediationCommand: String?
+    public var diagnostics: [String]
 
     public init(
         id: PreflightCheckID,
         title: String,
         status: Status,
         remediationURL: URL? = nil,
-        remediationCommand: String? = nil
+        remediationCommand: String? = nil,
+        diagnostics: [String] = []
     ) {
         self.id = id
         self.title = title
         self.status = status
         self.remediationURL = remediationURL
         self.remediationCommand = remediationCommand
+        self.diagnostics = diagnostics
     }
 
     public var isPassed: Bool {

@@ -8,6 +8,8 @@ public struct BuildBackendAvailabilityChecker: PreflightChecker {
     public init() {}
 
     public func run() async -> PreflightCheckResult {
+        var diagnostics: [String] = []
+
         func summarized(_ output: String) -> String {
             let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
             if trimmed.isEmpty {
@@ -21,36 +23,45 @@ public struct BuildBackendAvailabilityChecker: PreflightChecker {
         }
 
         do {
-            let installed = try await ShellProbe.run(command: "command -v container >/dev/null 2>&1")
+            let installedCommand = "command -v container"
+            let installed = try await ShellProbe.run(command: installedCommand)
+            diagnostics.append(contentsOf: PreflightDiagnostics.lines(command: installedCommand, result: installed))
             if installed.exitCode != 0 {
                 return PreflightCheckResult(
                     id: checkID,
                     title: title,
                     status: .failed("apple/container CLI is not installed."),
-                    remediationCommand: "Open Target Settings and click Install Latest apple/container."
+                    remediationCommand: "Open Target Settings and click Install Latest apple/container.",
+                    diagnostics: diagnostics
                 )
             }
 
             // Fast path when builder is already healthy.
-            let builderStatus = try await ShellProbe.run(command: "container builder status >/dev/null 2>&1")
+            let builderStatusCommand = "container builder status"
+            let builderStatus = try await ShellProbe.run(command: builderStatusCommand)
+            diagnostics.append(contentsOf: PreflightDiagnostics.lines(command: builderStatusCommand, result: builderStatus))
             if builderStatus.exitCode == 0 {
                 return PreflightCheckResult(
                     id: checkID,
                     title: title,
-                    status: .passed(detail: "apple-container")
+                    status: .passed(detail: "apple-container"),
+                    diagnostics: diagnostics
                 )
             }
 
             // Try to start builder so preflight reflects deploy-time behavior.
+            let builderStartCommand = "container builder start"
             let builderStart = try await ShellProbe.run(
-                command: "container builder start 2>&1",
+                command: builderStartCommand,
                 timeout: .seconds(30)
             )
+            diagnostics.append(contentsOf: PreflightDiagnostics.lines(command: builderStartCommand, result: builderStart))
             if builderStart.exitCode == 0 {
                 return PreflightCheckResult(
                     id: checkID,
                     title: title,
-                    status: .passed(detail: "apple-container")
+                    status: .passed(detail: "apple-container"),
+                    diagnostics: diagnostics
                 )
             }
 
@@ -58,10 +69,12 @@ public struct BuildBackendAvailabilityChecker: PreflightChecker {
                 .filter { !$0.isEmpty }
                 .joined(separator: "\n")
             if output.localizedCaseInsensitiveContains("default kernel not configured") {
+                let kernelSetupCommand = "container system kernel set --recommended"
                 let kernelSetup = try await ShellProbe.run(
-                    command: "container system kernel set --recommended 2>&1",
+                    command: kernelSetupCommand,
                     timeout: .seconds(600)
                 )
+                diagnostics.append(contentsOf: PreflightDiagnostics.lines(command: kernelSetupCommand, result: kernelSetup))
                 if kernelSetup.exitCode != 0 {
                     let kernelOutput = [kernelSetup.stdout, kernelSetup.stderr]
                         .filter { !$0.isEmpty }
@@ -70,20 +83,26 @@ public struct BuildBackendAvailabilityChecker: PreflightChecker {
                         id: checkID,
                         title: title,
                         status: .failed("apple/container kernel auto-setup failed: \(summarized(kernelOutput))"),
-                        remediationCommand: "container system kernel set --recommended && container builder start"
+                        remediationCommand: "container system kernel set --recommended && container builder start",
+                        diagnostics: diagnostics
                     )
                 }
 
+                let retryStartCommand = "container builder start"
                 let retryStart = try await ShellProbe.run(
-                    command: "container builder start 2>&1",
+                    command: retryStartCommand,
                     timeout: .seconds(60)
                 )
-                let retryStatus = try await ShellProbe.run(command: "container builder status >/dev/null 2>&1")
+                diagnostics.append(contentsOf: PreflightDiagnostics.lines(command: retryStartCommand, result: retryStart))
+                let retryStatusCommand = "container builder status"
+                let retryStatus = try await ShellProbe.run(command: retryStatusCommand)
+                diagnostics.append(contentsOf: PreflightDiagnostics.lines(command: retryStatusCommand, result: retryStatus))
                 if retryStart.exitCode == 0 || retryStatus.exitCode == 0 {
                     return PreflightCheckResult(
                         id: checkID,
                         title: title,
-                        status: .passed(detail: "apple-container (kernel auto-configured)")
+                        status: .passed(detail: "apple-container (kernel auto-configured)"),
+                        diagnostics: diagnostics
                     )
                 }
 
@@ -94,7 +113,8 @@ public struct BuildBackendAvailabilityChecker: PreflightChecker {
                     id: checkID,
                     title: title,
                     status: .failed("apple/container builder failed after kernel setup: \(summarized(retryOutput))"),
-                    remediationCommand: "container builder start"
+                    remediationCommand: "container builder start",
+                    diagnostics: diagnostics
                 )
             }
 
@@ -103,13 +123,15 @@ public struct BuildBackendAvailabilityChecker: PreflightChecker {
                 id: checkID,
                 title: title,
                 status: .failed("apple/container builder failed to start: \(detail)"),
-                remediationCommand: "container system start && container builder start"
+                remediationCommand: "container system start && container builder start",
+                diagnostics: diagnostics
             )
         } catch {
             return PreflightCheckResult(
                 id: checkID,
                 title: title,
-                status: .failed("Failed to verify build backend: \(error.localizedDescription)")
+                status: .failed("Failed to verify build backend: \(error.localizedDescription)"),
+                diagnostics: diagnostics
             )
         }
     }

@@ -39,6 +39,12 @@ struct DeploySecretsInputView: View {
             Text("The following secrets were detected in source code. Enter their values to include them in the deployment.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+
+            if hasGeneratableSecrets {
+                Text("Internal signing/session secrets can be generated here. External provider keys must be pasted from the provider.")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
         }
     }
 
@@ -48,8 +54,24 @@ struct DeploySecretsInputView: View {
         VStack(alignment: .leading, spacing: 12) {
             ForEach(Array(requiredSecrets.enumerated()), id: \.offset) { _, name in
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(name)
-                        .font(.system(.caption, design: .monospaced).weight(.medium))
+                    HStack(spacing: 8) {
+                        Text(name)
+                            .font(.system(.caption, design: .monospaced).weight(.medium))
+
+                        Spacer()
+
+                        if DeploySecretValueGenerator.canGenerate(name: name) {
+                            Button {
+                                secretValues[name] = DeploySecretValueGenerator.generateHexSecret()
+                            } label: {
+                                Label("Generate", systemImage: "sparkles")
+                                    .font(.caption)
+                            }
+                            .buttonStyle(.borderless)
+                            .help("Generate a random 32-byte hex secret")
+                        }
+                    }
+
                     SecureField("Enter value for \(name)", text: binding(for: name))
                         .textFieldStyle(.roundedBorder)
                         .font(.system(.body, design: .monospaced))
@@ -121,6 +143,10 @@ struct DeploySecretsInputView: View {
             guard let value = secretValues[name] else { return true }
             return value.isEmpty
         }.count
+    }
+
+    private var hasGeneratableSecrets: Bool {
+        requiredSecrets.contains { DeploySecretValueGenerator.canGenerate(name: $0) }
     }
 
     private func binding(for name: String) -> Binding<String> {

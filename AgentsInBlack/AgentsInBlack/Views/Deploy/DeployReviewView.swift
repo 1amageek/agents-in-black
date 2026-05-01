@@ -68,27 +68,47 @@ struct DeployReviewView: View {
                         title: "Account",
                         value: model.activeGCloudAccount ?? "No active Google account"
                     ) {
-                        Menu("Switch") {
-                            ForEach(model.gcloudAccounts) { account in
-                                Button {
-                                    Task {
-                                        await model.switchGCloudAccount(to: account.account)
-                                    }
-                                } label: {
-                                    if account.account == model.activeGCloudAccount {
-                                        Label(account.account, systemImage: "checkmark")
-                                    } else {
-                                        Text(account.account)
+                        HStack(spacing: 8) {
+                            Button {
+                                Task {
+                                    await model.signInGCloudAccount()
+                                }
+                            } label: {
+                                if model.isSigningInGCloudAccount {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                } else {
+                                    Text("Sign In")
+                                }
+                            }
+                            .disabled(
+                                !model.canSwitchDeployGCloudContext
+                                    || model.isRefreshingGCloudContext
+                                    || model.isSwitchingDeployGCloudContext
+                            )
+
+                            Menu("Switch") {
+                                ForEach(model.gcloudAccounts) { account in
+                                    Button {
+                                        Task {
+                                            await model.switchGCloudAccount(to: account.account)
+                                        }
+                                    } label: {
+                                        if account.account == model.activeGCloudAccount {
+                                            Label(account.account, systemImage: "checkmark")
+                                        } else {
+                                            Text(account.account)
+                                        }
                                     }
                                 }
                             }
+                            .disabled(
+                                !model.canSwitchDeployGCloudContext
+                                    || model.isRefreshingGCloudContext
+                                    || model.isSwitchingDeployGCloudContext
+                                    || model.gcloudAccounts.isEmpty
+                            )
                         }
-                        .disabled(
-                            !model.canSwitchDeployGCloudContext
-                                || model.isRefreshingGCloudContext
-                                || model.isSwitchingDeployGCloudContext
-                                || model.gcloudAccounts.isEmpty
-                        )
                     }
 
                     Divider().padding(.leading, 12)

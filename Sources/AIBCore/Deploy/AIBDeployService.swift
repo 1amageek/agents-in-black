@@ -195,6 +195,146 @@ public enum AIBDeployService {
         }
     }
 
+    // MARK: - Deployments Inventory
+
+    /// List every service currently deployed to this provider/project.
+    public static func listDeployments(
+        provider: any DeploymentProvider,
+        targetConfig: AIBDeployTargetConfig
+    ) async throws -> [DeployedServiceInfo] {
+        try provider.validateTargetConfig(targetConfig)
+        return try await provider.listDeployedServices(targetConfig: targetConfig)
+    }
+
+    /// Delete a single deployed service.
+    public static func deleteDeployment(
+        provider: any DeploymentProvider,
+        serviceName: String,
+        region: String,
+        targetConfig: AIBDeployTargetConfig
+    ) async throws {
+        try provider.validateTargetConfig(targetConfig)
+        try await provider.deleteDeployedService(
+            serviceName: serviceName,
+            region: region,
+            targetConfig: targetConfig
+        )
+    }
+
+    /// Compare a workspace plan against the live inventory and produce a drift report.
+    /// - Parameters:
+    ///   - plan: the workspace's intended state. May be nil when the workspace has no
+    ///     valid plan yet — in that case every deployed service becomes an orphan.
+    ///   - deployedServices: the live inventory from `listDeployments`.
+    ///   - provider: used to compute the registry image tag for image-staleness detection.
+    public static func computeDrift(
+        plan: AIBDeployPlan?,
+        deployedServices: [DeployedServiceInfo],
+        provider: any DeploymentProvider
+    ) -> DeploymentDriftReport {
+        // Cloud Run service names are scoped per region, so the live inventory
+        // can contain multiple entries with the same name but different regions
+        // (e.g., us-central1 leftovers + a fresh asia-northeast1 deployment).
+        // We therefore key by (region, name) and walk the array directly rather
+        // than building a name-keyed dictionary, which would crash on duplicates.
+        var consumedKeys: Set<String> = []
+        var entries: [DeploymentDriftEntry] = []
+
+        if let plan {
+            for service in plan.services {
+                let expectedName = service.deployedServiceName
+                let expectedRegion = service.region
+
+                // 1. Exact (name, region) match → inSync or imageStale.
+                if let live = deployedServices.first(where: { live in
+                    live.name == expectedName && live.region == expectedRegion
+                }) {
+                    consumedKeys.insert(Self.driftKey(name: live.name, region: live.region))
+
+                    let expectedImage = provider.registryImageTag(
+                        service: service,
+                        targetConfig: plan.targetConfig
+                    )
+                    if let liveImage = live.image,
+                       !Self.imagesMatch(live: liveImage, expected: expectedImage) {
+                        entries.append(DeploymentDriftEntry(
+                            serviceName: expectedName,
+                            serviceRef: service.id,
+                            deployed: live,
+                            status: .imageStale(
+                                deployedImage: liveImage,
+                                expectedImage: expectedImage
+                            )
+                        ))
+                    } else {
+                        entries.append(DeploymentDriftEntry(
+                            serviceName: expectedName,
+                            serviceRef: service.id,
+                            deployed: live,
+                            status: .inSync
+                        ))
+                    }
+                    continue
+                }
+
+                // 2. Same name in a different region → regionMismatch.
+                //    Pick a not-yet-consumed live with the same name; remaining
+                //    same-name lives stay available for the orphan pass below.
+                if let live = deployedServices.first(where: { live in
+                    live.name == expectedName
+                    && !consumedKeys.contains(Self.driftKey(name: live.name, region: live.region))
+                }) {
+                    consumedKeys.insert(Self.driftKey(name: live.name, region: live.region))
+                    entries.append(DeploymentDriftEntry(
+                        serviceName: expectedName,
+                        serviceRef: service.id,
+                        deployed: live,
+                        status: .regionMismatch(
+                            deployedRegion: live.region,
+                            expectedRegion: expectedRegion
+                        )
+                    ))
+                    continue
+                }
+
+                // 3. No live with this name in any region → missing.
+                entries.append(DeploymentDriftEntry(
+                    serviceName: expectedName,
+                    serviceRef: service.id,
+                    deployed: nil,
+                    status: .missing
+                ))
+            }
+        }
+
+        // Anything live we did not consume is an orphan.
+        for live in deployedServices
+        where !consumedKeys.contains(Self.driftKey(name: live.name, region: live.region)) {
+            entries.append(DeploymentDriftEntry(
+                serviceName: live.name,
+                serviceRef: nil,
+                deployed: live,
+                status: .orphan
+            ))
+        }
+
+        return DeploymentDriftReport(entries: entries)
+    }
+
+    static func driftKey(name: String, region: String) -> String {
+        "\(region)/\(name)"
+    }
+
+    /// Cloud Run reports image refs with the resolved digest appended (`...:latest@sha256:...`).
+    /// Treat a deployed image as matching the expected tag when its prefix up to `@` equals it,
+    /// or vice versa.
+    private static func imagesMatch(live: String, expected: String) -> Bool {
+        if live == expected { return true }
+        let liveBase = live.split(separator: "@", maxSplits: 1).first.map(String.init) ?? live
+        let expectedBase = expected.split(separator: "@", maxSplits: 1).first.map(String.init) ?? expected
+        return liveBase == expectedBase
+    }
+
     // MARK: - Plan Generation
 
     /// Generate a deploy plan from the workspace topology using the given provider.

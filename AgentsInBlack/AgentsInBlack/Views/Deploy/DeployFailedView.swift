@@ -11,6 +11,7 @@ struct DeployFailedView: View {
     @State private var appleContainerInstallFailed: Bool = false
     @State private var updatedReport: PreflightReport?
     @State private var copiedError: Bool = false
+    @State private var copiedDiagnosticsID: PreflightCheckID?
 
     var body: some View {
         ScrollView {
@@ -192,6 +193,11 @@ struct DeployFailedView: View {
                 .padding(.leading, 24)
             }
 
+            if !result.diagnostics.isEmpty {
+                diagnosticsSection(for: result)
+                    .padding(.leading, 24)
+            }
+
             if result.id == .buildBackendAvailable {
                 let isCLINotInstalled: Bool = {
                     if case .failed(let msg) = result.status {
@@ -253,6 +259,44 @@ struct DeployFailedView: View {
         }
     }
 
+    private func diagnosticsSection(for result: PreflightCheckResult) -> some View {
+        DisclosureGroup {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text("Preflight log")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.secondary)
+
+                    Spacer()
+
+                    Button {
+                        copyDiagnosticsToPasteboard(result)
+                    } label: {
+                        Label(
+                            copiedDiagnosticsID == result.id ? "Copied" : "Copy",
+                            systemImage: copiedDiagnosticsID == result.id ? "checkmark" : "doc.on.doc"
+                        )
+                        .font(.caption2)
+                    }
+                    .buttonStyle(.borderless)
+                }
+
+                Text(result.diagnostics.joined(separator: "\n"))
+                    .font(.system(.caption2, design: .monospaced))
+                    .foregroundStyle(.primary)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(8)
+                    .background(Color(.textBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(.separator))
+            }
+            .padding(.top, 6)
+        } label: {
+            Text("Diagnostics")
+                .font(.caption.weight(.medium))
+        }
+    }
+
     private var formattedErrorText: String {
         var lines = ["Phase: \(error.phase)"]
         if let serviceID = error.serviceID, !serviceID.isEmpty {
@@ -260,6 +304,15 @@ struct DeployFailedView: View {
         }
         lines.append("")
         lines.append(error.message)
+        if let report = updatedReport ?? preflightReport {
+            let diagnosticLines = report.failedChecks.flatMap { result -> [String] in
+                guard !result.diagnostics.isEmpty else { return [] }
+                return ["", "[\(result.title)]"] + result.diagnostics
+            }
+            if !diagnosticLines.isEmpty {
+                lines.append(contentsOf: diagnosticLines)
+            }
+        }
         return lines.joined(separator: "\n")
     }
 
@@ -275,6 +328,23 @@ struct DeployFailedView: View {
                 return
             }
             copiedError = false
+        }
+    }
+
+    private func copyDiagnosticsToPasteboard(_ result: PreflightCheckResult) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(result.diagnostics.joined(separator: "\n"), forType: .string)
+        copiedDiagnosticsID = result.id
+
+        Task { @MainActor in
+            do {
+                try await Task.sleep(for: .seconds(1.5))
+            } catch {
+                return
+            }
+            if copiedDiagnosticsID == result.id {
+                copiedDiagnosticsID = nil
+            }
         }
     }
 

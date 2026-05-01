@@ -102,6 +102,22 @@ public protocol DeploymentProvider: Sendable {
         targetConfig: AIBDeployTargetConfig
     ) async -> Set<String>
 
+    /// List every service currently deployed under this provider/project.
+    /// Includes services in any region — drift detection compares against `targetConfig.region`.
+    /// Throws `AIBDeployError` on tool / auth failure so callers can surface it in the UI.
+    func listDeployedServices(
+        targetConfig: AIBDeployTargetConfig
+    ) async throws -> [DeployedServiceInfo]
+
+    /// Delete a deployed service by name in the given region.
+    /// Idempotent: succeeds quietly if the service is already gone.
+    /// Throws `AIBDeployError` on tool / auth failure or unexpected provider error.
+    func deleteDeployedService(
+        serviceName: String,
+        region: String,
+        targetConfig: AIBDeployTargetConfig
+    ) async throws
+
     /// Parse the deployed URL from command output.
     func parseDeployedURL(from output: String) -> String?
 
@@ -130,4 +146,24 @@ extension DeploymentProvider {
         serviceName: String,
         targetConfig: AIBDeployTargetConfig
     ) async -> Set<String> { [] }
+
+    public func listDeployedServices(
+        targetConfig: AIBDeployTargetConfig
+    ) async throws -> [DeployedServiceInfo] {
+        throw AIBDeployError(
+            phase: "deployments",
+            message: "Provider '\(providerID)' does not support listing deployed services."
+        )
+    }
+
+    public func deleteDeployedService(
+        serviceName: String,
+        region: String,
+        targetConfig: AIBDeployTargetConfig
+    ) async throws {
+        throw AIBDeployError(
+            phase: "deployments",
+            message: "Provider '\(providerID)' does not support deleting deployed services."
+        )
+    }
 }

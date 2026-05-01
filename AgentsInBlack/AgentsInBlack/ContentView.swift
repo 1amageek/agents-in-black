@@ -192,6 +192,8 @@ struct ContentView: View {
                     FlowCanvasView(model: model)
                 case .workbench:
                     ServiceWorkbenchView(model: model)
+                case .deployments:
+                    DeploymentsManagementView(model: model)
                 }
             } content: {
                 UtilityPanelView(model: model)

@@ -740,6 +740,107 @@ public struct GCPCloudRunProvider: DeploymentProvider, Sendable {
         }
     }
 
+    // MARK: - List / Delete Deployed Services
+
+    public func listDeployedServices(
+        targetConfig: AIBDeployTargetConfig
+    ) async throws -> [DeployedServiceInfo] {
+        let gcpProject = requiredGCPProject(from: targetConfig)
+
+        // List services across all regions so the UI can show drift (e.g., us-central1
+        // leftovers when the workspace targets asia-northeast1).
+        let command = "gcloud run services list"
+            + " --project=\(gcpProject)"
+            + " --format=json"
+            + " --quiet"
+
+        print("[Deployments] gcloud command: \(command)")
+
+        let result: ShellProbe.Result
+        do {
+            result = try await ShellProbe.run(command: command, timeout: .seconds(60))
+        } catch {
+            print("[Deployments] gcloud run services list threw: \(error.localizedDescription)")
+            throw AIBDeployError(
+                phase: "deployments",
+                message: "Failed to list Cloud Run services: \(error.localizedDescription)"
+            )
+        }
+
+        print("[Deployments] gcloud exit=\(result.exitCode) stdoutBytes=\(result.stdout.count) stderrBytes=\(result.stderr.count)")
+        if !result.stderr.isEmpty {
+            print("[Deployments] gcloud stderr: \(result.stderr.prefix(500))")
+        }
+
+        guard result.exitCode == 0 else {
+            throw AIBDeployError(
+                phase: "deployments",
+                message: "gcloud run services list exited with status \(result.exitCode). \(result.stderr)"
+            )
+        }
+
+        guard !result.stdout.isEmpty,
+              let data = result.stdout.data(using: .utf8) else {
+            print("[Deployments] gcloud stdout empty — returning []")
+            return []
+        }
+
+        let parsed: Any
+        do {
+            parsed = try JSONSerialization.jsonObject(with: data)
+        } catch {
+            throw AIBDeployError(
+                phase: "deployments",
+                message: "Failed to parse Cloud Run services list JSON: \(error.localizedDescription)"
+            )
+        }
+
+        guard let array = parsed as? [[String: Any]] else {
+            print("[Deployments] gcloud JSON not a top-level array — returning []")
+            return []
+        }
+        let services = array.compactMap { Self.parseService(from: $0) }
+        print("[Deployments] gcloud JSON parsed: rawEntries=\(array.count) parsedServices=\(services.count)")
+        return services
+    }
+
+    public func deleteDeployedService(
+        serviceName: String,
+        region: String,
+        targetConfig: AIBDeployTargetConfig
+    ) async throws {
+        let gcpProject = requiredGCPProject(from: targetConfig)
+
+        let nameForShell = shellQuote(serviceName)
+        let regionForShell = shellQuote(region)
+        let projectForShell = shellQuote(gcpProject)
+        let script = """
+        set -euo pipefail
+        if ! gcloud run services describe \(nameForShell) --region \(regionForShell) --project \(projectForShell) >/dev/null 2>&1; then
+          echo "Service \(serviceName) does not exist in \(region); nothing to delete."
+          exit 0
+        fi
+        gcloud run services delete \(nameForShell) --region \(regionForShell) --project \(projectForShell) --quiet
+        """
+
+        let result: ShellProbe.Result
+        do {
+            result = try await ShellProbe.run(command: script, timeout: .seconds(120))
+        } catch {
+            throw AIBDeployError(
+                phase: "deployments",
+                message: "Failed to delete \(serviceName) in \(region): \(error.localizedDescription)"
+            )
+        }
+
+        guard result.exitCode == 0 else {
+            throw AIBDeployError(
+                phase: "deployments",
+                message: "gcloud run services delete exited with status \(result.exitCode). \(result.stderr)"
+            )
+        }
+    }
+
     // MARK: - Parse Output
 
     public func parseDeployedURL(from output: String) -> String? {
@@ -786,6 +887,81 @@ public struct GCPCloudRunProvider: DeploymentProvider, Sendable {
         default:
             return false
         }
+    }
+
+    /// Parse a single service entry from `gcloud run services list --format=json` output.
+    /// Returns nil when the entry is missing the minimum identifying fields.
+    static func parseService(from json: [String: Any]) -> DeployedServiceInfo? {
+        let metadata = json["metadata"] as? [String: Any] ?? [:]
+        let spec = json["spec"] as? [String: Any] ?? [:]
+        let template = spec["template"] as? [String: Any] ?? [:]
+        let templateSpec = template["spec"] as? [String: Any] ?? [:]
+        let containers = templateSpec["containers"] as? [[String: Any]] ?? []
+        let firstContainer = containers.first ?? [:]
+        let status = json["status"] as? [String: Any] ?? [:]
+        let labels = metadata["labels"] as? [String: Any] ?? [:]
+
+        guard let name = metadata["name"] as? String, !name.isEmpty else { return nil }
+
+        // Region is published by Cloud Run as the `cloud.googleapis.com/location` label.
+        let region = (labels["cloud.googleapis.com/location"] as? String) ?? ""
+        guard !region.isEmpty else { return nil }
+
+        let url = (status["url"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        let image = (firstContainer["image"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        let timeoutSeconds = templateSpec["timeoutSeconds"].flatMap { value -> Int? in
+            if let intVal = value as? Int { return intVal }
+            if let strVal = value as? String { return Int(strVal) }
+            if let dblVal = value as? Double { return Int(dblVal) }
+            return nil
+        }
+        let envEntries = firstContainer["env"] as? [[String: Any]] ?? []
+        let envVarNames: Set<String> = Set(envEntries.compactMap { $0["name"] as? String })
+
+        let revisionName = (status["latestReadyRevisionName"] as? String)
+            ?? (status["latestCreatedRevisionName"] as? String)
+
+        let generation: Int? = {
+            if let intVal = metadata["generation"] as? Int { return intVal }
+            if let strVal = metadata["generation"] as? String { return Int(strVal) }
+            if let dblVal = metadata["generation"] as? Double { return Int(dblVal) }
+            return nil
+        }()
+
+        let lastDeployedAt: Date? = {
+            // Look for the most recent condition's lastTransitionTime.
+            let conditions = status["conditions"] as? [[String: Any]] ?? []
+            let latestTransition = conditions
+                .compactMap { $0["lastTransitionTime"] as? String }
+                .compactMap(Self.parseISO8601)
+                .max()
+            if let latestTransition { return latestTransition }
+            if let creation = metadata["creationTimestamp"] as? String,
+               let parsed = Self.parseISO8601(creation) {
+                return parsed
+            }
+            return nil
+        }()
+
+        return DeployedServiceInfo(
+            name: name,
+            region: region,
+            url: url,
+            image: image,
+            lastDeployedAt: lastDeployedAt,
+            revisionName: revisionName,
+            generation: generation,
+            timeoutSeconds: timeoutSeconds,
+            envVarNames: envVarNames
+        )
+    }
+
+    private static func parseISO8601(_ raw: String) -> Date? {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = formatter.date(from: raw) { return date }
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.date(from: raw)
     }
 
     private static func extractEnvArray(from json: [String: Any]) -> [[String: Any]]? {

@@ -25,11 +25,14 @@ struct CloudSettingsView: View {
 
     @State private var gcloudAccounts: [GCloudAccount] = []
     @State private var gcloudProjects: [GCloudProject] = []
+    @State private var gcloudRegions: [GCloudRegion] = []
     @State private var activeGCloudAccount: String?
     @State private var activeGCloudProject: String?
     @State private var isRefreshingGCloudContext: Bool = false
+    @State private var isSigningInGCloudAccount: Bool = false
     @State private var isSwitchingGCloudAccount: Bool = false
     @State private var isSwitchingGCloudProject: Bool = false
+    @State private var isSwitchingGCloudRegion: Bool = false
     @State private var gcloudContextErrorMessage: String?
 
     // MARK: - Config State
@@ -405,25 +408,45 @@ struct CloudSettingsView: View {
                             title: "Account",
                             value: activeGCloudAccount ?? "No active Google account"
                         ) {
-                            Menu("Switch") {
-                                ForEach(gcloudAccounts) { account in
-                                    Button {
-                                        Task { await switchAccount(to: account.account) }
-                                    } label: {
-                                        if account.account == activeGCloudAccount {
-                                            Label(account.account, systemImage: "checkmark")
-                                        } else {
-                                            Text(account.account)
+                            HStack(spacing: 8) {
+                                Button {
+                                    Task { await signInAccount() }
+                                } label: {
+                                    if isSigningInGCloudAccount {
+                                        ProgressView()
+                                            .controlSize(.small)
+                                    } else {
+                                        Text("Sign In")
+                                    }
+                                }
+                                .disabled(
+                                    isRefreshingGCloudContext
+                                    || isSigningInGCloudAccount
+                                    || isSwitchingGCloudAccount
+                                    || isSwitchingGCloudProject
+                                )
+
+                                Menu("Switch") {
+                                    ForEach(gcloudAccounts) { account in
+                                        Button {
+                                            Task { await switchAccount(to: account.account) }
+                                        } label: {
+                                            if account.account == activeGCloudAccount {
+                                                Label(account.account, systemImage: "checkmark")
+                                            } else {
+                                                Text(account.account)
+                                            }
                                         }
                                     }
                                 }
+                                .disabled(
+                                    isRefreshingGCloudContext
+                                    || isSigningInGCloudAccount
+                                    || isSwitchingGCloudAccount
+                                    || isSwitchingGCloudProject
+                                    || gcloudAccounts.isEmpty
+                                )
                             }
-                            .disabled(
-                                isRefreshingGCloudContext
-                                || isSwitchingGCloudAccount
-                                || isSwitchingGCloudProject
-                                || gcloudAccounts.isEmpty
-                            )
                         }
 
                         Divider().padding(.leading, 12)
@@ -448,6 +471,7 @@ struct CloudSettingsView: View {
                             }
                             .disabled(
                                 isRefreshingGCloudContext
+                                || isSigningInGCloudAccount
                                 || isSwitchingGCloudAccount
                                 || isSwitchingGCloudProject
                                 || gcloudProjects.isEmpty
@@ -457,7 +481,33 @@ struct CloudSettingsView: View {
                         Divider().padding(.leading, 12)
 
                         configContextRow(title: "Region", value: region) {
-                            EmptyView()
+                            Menu("Switch") {
+                                ForEach(gcloudRegions) { gcloudRegion in
+                                    Button {
+                                        Task { await switchRegion(to: gcloudRegion.locationId) }
+                                    } label: {
+                                        let label: String = {
+                                            if let displayName = gcloudRegion.displayName, !displayName.isEmpty {
+                                                return "\(gcloudRegion.locationId) (\(displayName))"
+                                            }
+                                            return gcloudRegion.locationId
+                                        }()
+                                        if gcloudRegion.locationId == region {
+                                            Label(label, systemImage: "checkmark")
+                                        } else {
+                                            Text(label)
+                                        }
+                                    }
+                                }
+                            }
+                            .disabled(
+                                isRefreshingGCloudContext
+                                || isSigningInGCloudAccount
+                                || isSwitchingGCloudAccount
+                                || isSwitchingGCloudProject
+                                || isSwitchingGCloudRegion
+                                || gcloudRegions.isEmpty
+                            )
                         }
                     }
                     .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
@@ -1137,6 +1187,39 @@ struct CloudSettingsView: View {
         } catch {
             gcloudContextErrorMessage = error.localizedDescription
         }
+
+        await refreshGCloudRegions()
+    }
+
+    private func refreshGCloudRegions() async {
+        guard providerID == "gcp-cloudrun" else { return }
+        let projectID = trimmed(gcpProject)
+        guard !projectID.isEmpty else {
+            gcloudRegions = []
+            return
+        }
+
+        do {
+            gcloudRegions = try await gcloudContextService.fetchRegions(projectID: projectID)
+        } catch {
+            gcloudRegions = []
+            gcloudContextErrorMessage = error.localizedDescription
+        }
+    }
+
+    private func signInAccount() async {
+        guard !isSigningInGCloudAccount else { return }
+        isSigningInGCloudAccount = true
+        gcloudContextErrorMessage = nil
+        defer { isSigningInGCloudAccount = false }
+
+        do {
+            try await gcloudContextService.signIn()
+            await refreshGCloudContext()
+            await runEnvironmentChecks()
+        } catch {
+            gcloudContextErrorMessage = "Failed to sign in: \(error.localizedDescription)"
+        }
     }
 
     private func switchAccount(to account: String) async {
@@ -1165,6 +1248,19 @@ struct CloudSettingsView: View {
             await refreshGCloudContext()
         } catch {
             gcloudContextErrorMessage = "Failed to switch project: \(error.localizedDescription)"
+        }
+    }
+
+    private func switchRegion(to newRegion: String) async {
+        guard region != newRegion else { return }
+        isSwitchingGCloudRegion = true
+        gcloudContextErrorMessage = nil
+        defer { isSwitchingGCloudRegion = false }
+
+        let previous = region
+        region = newRegion
+        if !persistConfig(dismissOnSuccess: false) {
+            region = previous
         }
     }
 

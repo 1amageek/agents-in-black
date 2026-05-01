@@ -7,4 +7,5 @@ enum SelectionTarget: Hashable {
     case file(String)
     case issue(UUID)
     case skill(String)
+    case deployments
 }

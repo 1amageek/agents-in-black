@@ -34,6 +34,7 @@ struct FlowConnectionModel: Identifiable, Hashable {
 enum DetailSurfaceMode: String, CaseIterable, Identifiable {
     case topology = "Topology"
     case workbench = "Workbench"
+    case deployments = "Deployments"
 
     var id: String { rawValue }
 }

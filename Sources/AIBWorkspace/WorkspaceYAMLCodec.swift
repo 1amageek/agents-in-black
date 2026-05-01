@@ -18,11 +18,11 @@ public enum WorkspaceYAMLCodec {
             let anyDict = YAMLUtility.nodeToAny(node)
             let jsonData = try JSONSerialization.data(withJSONObject: anyDict, options: [])
             logger.info("loadWorkspace: JSON data size=\(jsonData.count)")
-            if let jsonStr = String(data: jsonData, encoding: .utf8) {
-                logger.info("loadWorkspace: JSON=\(jsonStr)")
-            }
             let dto = try JSONDecoder().decode(WorkspaceFileDTO.self, from: jsonData)
-            logger.info("loadWorkspace: DTO decoded, repos=\(dto.repos.count)")
+            let serviceCount = dto.repos.reduce(0) { count, repo in
+                count + (repo.services?.count ?? 0)
+            }
+            logger.info("loadWorkspace: DTO decoded, workspace=\(dto.workspaceName), repos=\(dto.repos.count), services=\(serviceCount)")
             let model = try dto.toModel()
             logger.info("loadWorkspace: model created, repos=\(model.repos.count)")
             return model
