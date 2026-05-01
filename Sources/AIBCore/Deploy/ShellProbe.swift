@@ -46,33 +46,57 @@ public enum ShellProbe {
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
 
-        // Await termination via continuation (never block with waitUntilExit)
-        let exitCode: Int32 = try await withCheckedThrowingContinuation { continuation in
-            process.terminationHandler = { process in
-                continuation.resume(returning: process.terminationStatus)
-            }
-
-            do {
-                try process.run()
-            } catch {
-                continuation.resume(throwing: AIBDeployError(
-                    phase: "preflight",
-                    message: "Failed to run command: \(command) — \(error.localizedDescription)"
-                ))
-                return
-            }
-
-            // Timeout: terminate after deadline
-            Task {
-                try await Task.sleep(for: timeout)
-                if process.isRunning {
-                    process.terminate()
-                }
-            }
+        // Drain pipes concurrently with process execution. The Pipe OS buffer is
+        // ~64 KB on macOS — once the child fills it, write() blocks until someone
+        // reads. Reading only after `terminationHandler` fires deadlocks on any
+        // large output (e.g. `gcloud run services list --format=json` ~ 700 KB).
+        let stdoutHandle = stdoutPipe.fileHandleForReading
+        let stderrHandle = stderrPipe.fileHandleForReading
+        let stdoutTask = Task.detached(priority: .userInitiated) {
+            stdoutHandle.readDataToEndOfFile()
+        }
+        let stderrTask = Task.detached(priority: .userInitiated) {
+            stderrHandle.readDataToEndOfFile()
         }
 
-        let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-        let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+        let exitCode: Int32
+        do {
+            exitCode = try await withCheckedThrowingContinuation { continuation in
+                process.terminationHandler = { process in
+                    continuation.resume(returning: process.terminationStatus)
+                }
+
+                do {
+                    try process.run()
+                } catch {
+                    process.terminationHandler = nil
+                    continuation.resume(throwing: AIBDeployError(
+                        phase: "preflight",
+                        message: "Failed to run command: \(command) — \(error.localizedDescription)"
+                    ))
+                    return
+                }
+
+                // Timeout: terminate after deadline
+                Task {
+                    try? await Task.sleep(for: timeout)
+                    if process.isRunning {
+                        process.terminate()
+                    }
+                }
+            }
+        } catch {
+            // Process never started — close the write ends so the read tasks see
+            // EOF and we can rejoin them before propagating the original error.
+            try? stdoutPipe.fileHandleForWriting.close()
+            try? stderrPipe.fileHandleForWriting.close()
+            _ = await stdoutTask.value
+            _ = await stderrTask.value
+            throw error
+        }
+
+        let stdoutData = await stdoutTask.value
+        let stderrData = await stderrTask.value
 
         return Result(
             exitCode: exitCode,
