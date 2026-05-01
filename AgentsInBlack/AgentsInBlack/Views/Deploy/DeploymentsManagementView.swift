@@ -4,8 +4,15 @@ import SwiftUI
 struct DeploymentsManagementView: View {
     @Bindable var model: AgentsInBlackAppModel
     @State private var pendingDelete: PendingDelete?
+    @State private var logsTarget: LogsTarget?
 
     private struct PendingDelete: Identifiable {
+        let id: String
+        let serviceName: String
+        let region: String
+    }
+
+    private struct LogsTarget: Identifiable {
         let id: String
         let serviceName: String
         let region: String
@@ -38,6 +45,14 @@ struct DeploymentsManagementView: View {
             }
         } message: { target in
             Text("This permanently removes the Cloud Run service \"\(target.serviceName)\" in \(target.region). This action cannot be undone.")
+        }
+        .sheet(item: $logsTarget) { target in
+            CloudRunLogsSheet(
+                model: model,
+                serviceName: target.serviceName,
+                region: target.region,
+                onClose: { logsTarget = nil }
+            )
         }
     }
 
@@ -157,7 +172,7 @@ struct DeploymentsManagementView: View {
             Text("Image").frame(maxWidth: .infinity, alignment: .leading)
             Text("Updated").frame(width: 160, alignment: .leading)
             Text("Status").frame(width: 160, alignment: .leading)
-            Spacer().frame(width: 80)
+            Spacer().frame(width: 120)
         }
         .font(.caption.weight(.semibold))
         .foregroundStyle(.secondary)
@@ -213,8 +228,8 @@ struct DeploymentsManagementView: View {
                 statusPill(for: entry.status)
                     .frame(width: 160, alignment: .leading)
 
-                deleteButton(entry: entry, deletionState: deletionState)
-                    .frame(width: 80, alignment: .trailing)
+                rowActions(entry: entry, deletionState: deletionState)
+                    .frame(width: 120, alignment: .trailing)
             }
 
             if let live, let url = live.url {
@@ -279,24 +294,38 @@ struct DeploymentsManagementView: View {
     }
 
     @ViewBuilder
-    private func deleteButton(entry: DeploymentDriftEntry, deletionState: AIBDeploymentsController.DeletionState) -> some View {
+    private func rowActions(entry: DeploymentDriftEntry, deletionState: AIBDeploymentsController.DeletionState) -> some View {
         if let live = entry.deployed {
-            Button {
-                pendingDelete = PendingDelete(
-                    id: "\(live.region)/\(live.name)",
-                    serviceName: live.name,
-                    region: live.region
-                )
-            } label: {
-                if deletionState == .deleting {
-                    ProgressView().controlSize(.small)
-                } else {
-                    Image(systemName: "trash")
+            HStack(spacing: 8) {
+                Button {
+                    logsTarget = LogsTarget(
+                        id: "\(live.region)/\(live.name)",
+                        serviceName: live.name,
+                        region: live.region
+                    )
+                } label: {
+                    Image(systemName: "doc.text.magnifyingglass")
                 }
+                .buttonStyle(.borderless)
+                .help("View Cloud Run logs for \(live.name) in \(live.region)")
+
+                Button {
+                    pendingDelete = PendingDelete(
+                        id: "\(live.region)/\(live.name)",
+                        serviceName: live.name,
+                        region: live.region
+                    )
+                } label: {
+                    if deletionState == .deleting {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Image(systemName: "trash")
+                    }
+                }
+                .buttonStyle(.borderless)
+                .disabled(deletionState == .deleting)
+                .help("Delete \(live.name) in \(live.region)")
             }
-            .buttonStyle(.borderless)
-            .disabled(deletionState == .deleting)
-            .help("Delete \(live.name) in \(live.region)")
         } else {
             EmptyView()
         }

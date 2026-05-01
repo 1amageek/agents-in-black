@@ -841,6 +841,196 @@ public struct GCPCloudRunProvider: DeploymentProvider, Sendable {
         }
     }
 
+    // MARK: - Service Logs
+
+    public func fetchServiceLogs(
+        serviceName: String,
+        region: String,
+        limit: Int,
+        targetConfig: AIBDeployTargetConfig
+    ) async throws -> [CloudLogEntry] {
+        let gcpProject = requiredGCPProject(from: targetConfig)
+        let filter = Self.cloudRunLogFilter(serviceName: serviceName, region: region)
+        let cappedLimit = max(1, min(limit, 1000))
+
+        let command = "gcloud logging read"
+            + " \(shellQuote(filter))"
+            + " --project=\(shellQuote(gcpProject))"
+            + " --order=desc"
+            + " --limit=\(cappedLimit)"
+            + " --format=json"
+            + " --quiet"
+
+        let result: ShellProbe.Result
+        do {
+            result = try await ShellProbe.run(command: command, timeout: .seconds(60))
+        } catch {
+            throw AIBDeployError(
+                phase: "logs",
+                message: "Failed to fetch logs for \(serviceName) in \(region): \(error.localizedDescription)"
+            )
+        }
+
+        guard result.exitCode == 0 else {
+            throw AIBDeployError(
+                phase: "logs",
+                message: "gcloud logging read exited with status \(result.exitCode). \(result.stderr)"
+            )
+        }
+
+        guard !result.stdout.isEmpty,
+              let data = result.stdout.data(using: .utf8) else {
+            return []
+        }
+
+        let parsed: Any
+        do {
+            parsed = try JSONSerialization.jsonObject(with: data)
+        } catch {
+            throw AIBDeployError(
+                phase: "logs",
+                message: "Failed to parse Cloud Logging JSON: \(error.localizedDescription)"
+            )
+        }
+
+        guard let array = parsed as? [[String: Any]] else { return [] }
+        // gcloud logging read returns newest-first when --order=desc; the UI also expects
+        // newest-first, so keep the order as-is.
+        return array.compactMap { Self.parseLogEntry(from: $0) }
+    }
+
+    public func tailServiceLogs(
+        serviceName: String,
+        region: String,
+        targetConfig: AIBDeployTargetConfig
+    ) -> AsyncThrowingStream<CloudLogEntry, any Error> {
+        let gcpProject = requiredGCPProject(from: targetConfig)
+        let filter = Self.cloudRunLogFilter(serviceName: serviceName, region: region)
+        return AsyncThrowingStream { continuation in
+
+            // PYTHONUNBUFFERED forces gcloud (a Python tool) to flush stdout per write,
+            // so the consumer sees lines as they arrive rather than in 4 KB chunks.
+            let command = "PYTHONUNBUFFERED=1 gcloud beta logging tail"
+                + " \(shellQuote(filter))"
+                + " --project=\(shellQuote(gcpProject))"
+                + " --format=json"
+
+            let task = Task {
+                do {
+                    for try await line in ShellProbe.streamLines(command: command) {
+                        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !trimmed.isEmpty,
+                              let data = trimmed.data(using: .utf8) else { continue }
+
+                        let parsed: Any
+                        do {
+                            parsed = try JSONSerialization.jsonObject(with: data)
+                        } catch {
+                            // gcloud emits informational lines on stdout occasionally
+                            // (e.g. "Tailing logs..."). Skip non-JSON lines.
+                            continue
+                        }
+
+                        if let object = parsed as? [String: Any],
+                           let entry = Self.parseLogEntry(from: object) {
+                            continuation.yield(entry)
+                        }
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+
+            continuation.onTermination = { _ in
+                task.cancel()
+            }
+        }
+    }
+
+    /// Build the Cloud Logging filter that scopes results to one Cloud Run service in one region.
+    static func cloudRunLogFilter(serviceName: String, region: String) -> String {
+        return "resource.type=\"cloud_run_revision\""
+            + " AND resource.labels.service_name=\"\(serviceName)\""
+            + " AND resource.labels.location=\"\(region)\""
+    }
+
+    /// Parse a single Cloud Logging JSON entry into a `CloudLogEntry`.
+    /// Returns nil only when the entry has no parseable timestamp — every other field
+    /// has a sensible fallback so the row still renders.
+    static func parseLogEntry(from json: [String: Any]) -> CloudLogEntry? {
+        guard let timestampRaw = json["timestamp"] as? String,
+              let date = Self.parseLogTimestamp(timestampRaw) else {
+            return nil
+        }
+
+        let severity = (json["severity"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "DEFAULT"
+
+        let resource = json["resource"] as? [String: Any]
+        let labels = resource?["labels"] as? [String: Any]
+        let revision = (labels?["revision_name"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+
+        let message = Self.extractMessage(from: json)
+
+        return CloudLogEntry(
+            timestamp: date,
+            severity: severity,
+            revisionName: revision,
+            message: message
+        )
+    }
+
+    private static func extractMessage(from json: [String: Any]) -> String {
+        if let text = json["textPayload"] as? String, !text.isEmpty {
+            return text
+        }
+
+        if let payload = json["jsonPayload"] as? [String: Any] {
+            if let msg = payload["message"] as? String, !msg.isEmpty {
+                return msg
+            }
+            if let err = (payload["error"] as? [String: Any])?["message"] as? String, !err.isEmpty {
+                return err
+            }
+            return Self.serializeJSON(payload) ?? "(structured payload)"
+        }
+
+        if let proto = json["protoPayload"] as? [String: Any] {
+            if let methodName = proto["methodName"] as? String, !methodName.isEmpty {
+                return methodName
+            }
+            return Self.serializeJSON(proto) ?? "(proto payload)"
+        }
+
+        if let httpRequest = json["httpRequest"] as? [String: Any] {
+            let method = httpRequest["requestMethod"] as? String ?? "?"
+            let url = httpRequest["requestUrl"] as? String ?? ""
+            let status = httpRequest["status"] as? Int ?? 0
+            return "\(method) \(url) → \(status)"
+        }
+
+        return "(no payload)"
+    }
+
+    private static func serializeJSON(_ value: [String: Any]) -> String? {
+        do {
+            let data = try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
+            return String(data: data, encoding: .utf8)
+        } catch {
+            return nil
+        }
+    }
+
+    private static func parseLogTimestamp(_ raw: String) -> Date? {
+        let withFraction = ISO8601DateFormatter()
+        withFraction.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = withFraction.date(from: raw) { return date }
+
+        let plain = ISO8601DateFormatter()
+        plain.formatOptions = [.withInternetDateTime]
+        return plain.date(from: raw)
+    }
+
     // MARK: - Parse Output
 
     public func parseDeployedURL(from output: String) -> String? {

@@ -19,7 +19,7 @@ public enum ShellProbe {
 
     /// Resolve the current user's login shell from the system user database.
     /// This is reliable even in GUI apps where `$SHELL` may not be set.
-    private static var userLoginShell: String {
+    static var userLoginShell: String {
         if let pw = getpwuid(getuid()), let shell = pw.pointee.pw_shell {
             return String(cString: shell)
         }

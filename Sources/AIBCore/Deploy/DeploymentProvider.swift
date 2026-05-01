@@ -118,6 +118,25 @@ public protocol DeploymentProvider: Sendable {
         targetConfig: AIBDeployTargetConfig
     ) async throws
 
+    /// Fetch a snapshot of the most-recent log entries for a deployed service,
+    /// newest first. Used for the "Latest" mode of the logs viewer.
+    /// Throws `AIBDeployError` on tool / auth failure.
+    func fetchServiceLogs(
+        serviceName: String,
+        region: String,
+        limit: Int,
+        targetConfig: AIBDeployTargetConfig
+    ) async throws -> [CloudLogEntry]
+
+    /// Stream live log entries for a deployed service. Each yielded entry corresponds
+    /// to one structured log line. The stream completes (or throws) when the underlying
+    /// tail process exits, and terminates when the consumer cancels its task.
+    func tailServiceLogs(
+        serviceName: String,
+        region: String,
+        targetConfig: AIBDeployTargetConfig
+    ) -> AsyncThrowingStream<CloudLogEntry, any Error>
+
     /// Parse the deployed URL from command output.
     func parseDeployedURL(from output: String) -> String?
 
@@ -165,5 +184,30 @@ extension DeploymentProvider {
             phase: "deployments",
             message: "Provider '\(providerID)' does not support deleting deployed services."
         )
+    }
+
+    public func fetchServiceLogs(
+        serviceName: String,
+        region: String,
+        limit: Int,
+        targetConfig: AIBDeployTargetConfig
+    ) async throws -> [CloudLogEntry] {
+        throw AIBDeployError(
+            phase: "logs",
+            message: "Provider '\(providerID)' does not support fetching service logs."
+        )
+    }
+
+    public func tailServiceLogs(
+        serviceName: String,
+        region: String,
+        targetConfig: AIBDeployTargetConfig
+    ) -> AsyncThrowingStream<CloudLogEntry, any Error> {
+        AsyncThrowingStream { continuation in
+            continuation.finish(throwing: AIBDeployError(
+                phase: "logs",
+                message: "Provider '\(providerID)' does not support tailing service logs."
+            ))
+        }
     }
 }

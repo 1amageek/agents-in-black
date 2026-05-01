@@ -221,6 +221,39 @@ public enum AIBDeployService {
         )
     }
 
+    /// Fetch a snapshot of recent log entries for a deployed service.
+    public static func fetchServiceLogs(
+        provider: any DeploymentProvider,
+        serviceName: String,
+        region: String,
+        limit: Int,
+        targetConfig: AIBDeployTargetConfig
+    ) async throws -> [CloudLogEntry] {
+        try provider.validateTargetConfig(targetConfig)
+        return try await provider.fetchServiceLogs(
+            serviceName: serviceName,
+            region: region,
+            limit: limit,
+            targetConfig: targetConfig
+        )
+    }
+
+    /// Stream live log entries for a deployed service.
+    /// The caller cancels their consuming task to stop the underlying tail process.
+    public static func tailServiceLogs(
+        provider: any DeploymentProvider,
+        serviceName: String,
+        region: String,
+        targetConfig: AIBDeployTargetConfig
+    ) throws -> AsyncThrowingStream<CloudLogEntry, any Error> {
+        try provider.validateTargetConfig(targetConfig)
+        return provider.tailServiceLogs(
+            serviceName: serviceName,
+            region: region,
+            targetConfig: targetConfig
+        )
+    }
+
     /// Compare a workspace plan against the live inventory and produce a drift report.
     /// - Parameters:
     ///   - plan: the workspace's intended state. May be nil when the workspace has no
