@@ -29,12 +29,16 @@ public enum ShellProbe {
     /// Runs a shell command and captures output.
     /// - Parameters:
     ///   - command: The shell command to execute via the user's login shell.
+    ///   - stdin: Optional bytes to write to the child's stdin. Used to pass
+    ///     secrets without leaking them into argv (e.g. `gcloud secrets versions
+    ///     add --data-file=-`).
     ///   - timeout: Maximum execution time before the process is terminated.
     /// - Returns: The captured result including exit code and output.
     /// - Note: Uses a login shell (`-l -c`) so that user PATH additions
     ///   (e.g. Homebrew, gcloud SDK) are available when running from a GUI app.
     public static func run(
         command: String,
+        stdin: String? = nil,
         timeout: Duration = .seconds(10)
     ) async throws -> Result {
         let process = Process()
@@ -45,6 +49,15 @@ public enum ShellProbe {
         let stderrPipe = Pipe()
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
+
+        let stdinPipe: Pipe?
+        if stdin != nil {
+            let pipe = Pipe()
+            process.standardInput = pipe
+            stdinPipe = pipe
+        } else {
+            stdinPipe = nil
+        }
 
         // Drain pipes concurrently with process execution. The Pipe OS buffer is
         // ~64 KB on macOS — once the child fills it, write() blocks until someone
@@ -75,6 +88,17 @@ public enum ShellProbe {
                         message: "Failed to run command: \(command) — \(error.localizedDescription)"
                     ))
                     return
+                }
+
+                // Write stdin then close — the child sees EOF and proceeds.
+                // Done synchronously (small payloads only — secret values, not
+                // streamed input) so we don't race the timeout fence below.
+                if let stdin, let stdinPipe {
+                    let writer = stdinPipe.fileHandleForWriting
+                    if let data = stdin.data(using: .utf8) {
+                        try? writer.write(contentsOf: data)
+                    }
+                    try? writer.close()
                 }
 
                 // Timeout: terminate after deadline

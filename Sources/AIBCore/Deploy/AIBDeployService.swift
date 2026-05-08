@@ -415,6 +415,41 @@ public enum AIBDeployService {
         var fatalErrors: [String] = []
 
         for service in resolved.config.services {
+            // Hard block: refuse to deploy if the universal `env` bucket contains entries
+            // that point at the local emulator. These would silently break production by
+            // routing Cloud Run traffic to nonexistent emulator hosts (e.g. Firestore
+            // writes hanging for 60s on FIRESTORE_EMULATOR_HOST=host.container.internal).
+            let envViolations = EnvScopeRule.violations(in: service.env)
+            if !envViolations.isEmpty {
+                let detail = envViolations
+                    .map { "  - env.\($0.key) — \($0.reason)" }
+                    .joined(separator: "\n")
+                fatalErrors.append(
+                    "Service '\(service.id.rawValue)': universal env contains local-only entries that would leak into deploy. Move them to local_env in workspace.yaml:\n\(detail)"
+                )
+                continue
+            }
+
+            // Hard block: refuse to deploy if any SecretRef has structural errors
+            // (empty/invalid secret name, env-key collision). Warnings (e.g.
+            // non-POSIX env-var-style key) flow through lint without blocking.
+            let secretViolations = SecretRefRule.violations(
+                secrets: service.secrets,
+                env: service.env,
+                localEnv: service.localEnv,
+                deployEnv: service.deployEnv
+            )
+            let secretErrors = secretViolations.filter { $0.severity == .error }
+            if !secretErrors.isEmpty {
+                let detail = secretErrors
+                    .map { "  - secrets.\($0.key) — \($0.reason) [\($0.ruleID)]" }
+                    .joined(separator: "\n")
+                fatalErrors.append(
+                    "Service '\(service.id.rawValue)': SecretRef declarations are invalid:\n\(detail)"
+                )
+                continue
+            }
+
             let deployedName = serviceNameMap[service.id.rawValue] ?? service.id.rawValue
             let meta = resolved.serviceMetadata[service.id.rawValue]
             let runtime = meta?.runtime ?? .unknown
@@ -592,13 +627,24 @@ public enum AIBDeployService {
                 }
             }
 
-            // Build env vars — merge workspace.yaml service.env first, then add generated vars
-            var envVars: [String: String] = service.env
+            // Build env vars — merge workspace.yaml deploy-scoped env first, then add generated vars.
+            // resolvedEnv(for: .deploy) returns env ⊕ deployEnv; localEnv (e.g. *_EMULATOR_HOST) is excluded.
+            var envVars: [String: String] = service.resolvedEnv(for: .deploy)
             if !resolvedConnections.mcpServers.isEmpty {
                 let urls = resolvedConnections.mcpServers.map(\.resolvedURL).joined(separator: ",")
                 envVars["MCP_SERVER_URLS"] = urls
                 // Tell the agent where to find the bundled connection config
                 envVars["AIB_CONNECTIONS_FILE"] = "/app/.aib-connections.json"
+            }
+            if service.kind == .agent {
+                // Surface the staged Claude Code plugin path so the agent runtime can
+                // pass it to the SDK's `plugins: [{ type: 'local', path }]` option.
+                envVars["AIB_PLUGIN_DIR"] = pluginRuntimePath
+                // Agent services run as unattended backend workers. AIB owns that runtime
+                // contract, so deploys must bypass Claude Code permission prompts instead
+                // of hanging on approvals that cannot be answered in Cloud Run.
+                envVars["AIB_AGENT_PERMISSION_MODE"] = "bypassPermissions"
+                envVars["AIB_AGENT_ALLOW_DANGEROUSLY_SKIP_PERMISSIONS"] = "true"
             }
 
             // Scan source for env var references to detect secrets and missing vars
@@ -607,12 +653,20 @@ public enum AIBDeployService {
                 workspaceRoot: workspaceRoot,
                 runtime: runtime
             )
-            let requiredSecrets = detectedVars
+            // declaredSecretRefs (workspace.yaml `secrets:`) take precedence:
+            // a secret pinned via SecretRef is mounted from Secret Manager
+            // automatically, so it should NOT appear in the unresolved list
+            // (which is the set the UI prompts for).
+            let declaredSecretRefs = service.secrets
+            let unresolvedSecrets = detectedVars
                 .filter { $0.kind == .secret }
+                .filter { !declaredSecretRefs.keys.contains($0.name) }
+                .filter { !envVars.keys.contains($0.name) }
                 .map(\.name)
             let missingRegularVars = detectedVars
                 .filter { $0.kind == .regular }
                 .filter { !envVars.keys.contains($0.name) }
+                .filter { !declaredSecretRefs.keys.contains($0.name) }
                 .map(\.name)
             let envWarnings = missingRegularVars.map {
                 "Service '\(service.id.rawValue)': Environment variable '\($0)' referenced in source but not configured in workspace.yaml env."
@@ -648,8 +702,9 @@ public enum AIBDeployService {
                 if service.kind == .agent {
                     claudeCodePluginArtifacts = try resolveClaudeCodePluginArtifacts(
                         serviceID: service.id.rawValue,
-                        resolvedConnections: resolvedConnections,
-                        skillArtifacts: skillArtifacts
+                        workspaceRoot: workspaceRoot,
+                        repoPath: repoPath,
+                        resolvedConnections: resolvedConnections
                     )
                 } else {
                     claudeCodePluginArtifacts = []
@@ -682,7 +737,8 @@ public enum AIBDeployService {
                 isPublic: isPublic,
                 sourceDependencies: sourceDependencies,
                 sourceCredential: cloudSourceCredential,
-                requiredSecrets: requiredSecrets,
+                declaredSecretRefs: declaredSecretRefs,
+                unresolvedSecrets: unresolvedSecrets,
                 envWarnings: envWarnings
             )
 
@@ -841,8 +897,18 @@ public enum AIBDeployService {
                 let pluginDir = serviceDeployDir.appendingPathComponent("plugin")
                 try fm.createDirectory(at: pluginDir, withIntermediateDirectories: true)
 
+                let stagingPrefix = "\(pluginStagingRoot)/"
                 for artifact in service.artifacts.claudeCodePluginArtifacts {
-                    let destination = pluginDir.appendingPathComponent(artifact.relativePath)
+                    // Plugin artifacts are produced with a build-context staging prefix
+                    // (`__aib_deploy/plugin/...`). Strip it for the local inspection copy
+                    // so the on-disk layout matches what the runtime sees at /app/.aib-plugin.
+                    let relative: String
+                    if artifact.relativePath.hasPrefix(stagingPrefix) {
+                        relative = String(artifact.relativePath.dropFirst(stagingPrefix.count))
+                    } else {
+                        relative = artifact.relativePath
+                    }
+                    let destination = pluginDir.appendingPathComponent(relative)
                     try fm.createDirectory(
                         at: destination.deletingLastPathComponent(),
                         withIntermediateDirectories: true
@@ -946,7 +1012,15 @@ public enum AIBDeployService {
             ".idea",
             ".vscode",
         ]
-        let requiredRules = requiredCommon + runtimeSpecific
+        // Negations (`!` prefix) keep AIB-staged build context (e.g. plugin SKILL.md files
+        // under `__aib_deploy/plugin/skills/...`) from being suppressed by user excludes
+        // like `*.md` or `node_modules`. Order matters: dockerignore evaluates rules
+        // top-to-bottom and the last matching rule wins, so these are appended last.
+        let requiredNegations = [
+            "!__aib_deploy",
+            "!__aib_deploy/**",
+        ]
+        let requiredRules = requiredCommon + runtimeSpecific + requiredNegations
 
         let existing: String
         if FileManager.default.fileExists(atPath: dockerignoreURL.path) {
@@ -1104,6 +1178,15 @@ extension AIBDeployService {
         "__aib_deploy/skills",
     ]
 
+    /// Build context root that staged Plugin bundle is materialized at.
+    /// Files at `__aib_deploy/plugin/...` are COPY'd into the runtime image at `/app/.aib-plugin/...`.
+    static let pluginStagingRoot: String = "__aib_deploy/plugin"
+
+    /// Container-side absolute path that the Plugin bundle is mounted at after `COPY`.
+    /// Surface this via `AIB_PLUGIN_DIR` so the agent runtime can pass it to the SDK's
+    /// `plugins: [{ type: 'local', path: ... }]` option.
+    static let pluginRuntimePath: String = "/app/.aib-plugin"
+
     static func resolveSkillArtifacts(
         workspaceRoot: String,
         assignedSkillIDs: [String],
@@ -1133,15 +1216,68 @@ extension AIBDeployService {
         return artifacts.sorted { $0.relativePath < $1.relativePath }
     }
 
+    /// Read repository-bundled skill directories at `<repoPath>/skills/<id>/`.
+    /// These are skills shipped with the agent code itself (as opposed to workspace-level
+    /// skills declared via `services[].skills:` in workspace.yaml). They are folded into
+    /// the Claude Code plugin bundle so the SDK discovers them at runtime.
+    static func collectRepoSkillFiles(
+        workspaceRoot: String,
+        repoPath: String
+    ) throws -> [(skillID: String, relativePath: String, content: Data)] {
+        guard !repoPath.isEmpty else { return [] }
+        let skillsRoot = URL(fileURLWithPath: workspaceRoot)
+            .appendingPathComponent(repoPath)
+            .appendingPathComponent("skills", isDirectory: true)
+
+        let fm = FileManager.default
+        var isDirectory: ObjCBool = false
+        guard fm.fileExists(atPath: skillsRoot.path(percentEncoded: false), isDirectory: &isDirectory),
+              isDirectory.boolValue else {
+            return []
+        }
+
+        let skillIDs = try fm.contentsOfDirectory(atPath: skillsRoot.path(percentEncoded: false))
+            .filter { !$0.hasPrefix(".") }
+            .sorted()
+
+        var results: [(skillID: String, relativePath: String, content: Data)] = []
+        for skillID in skillIDs {
+            let skillDir = skillsRoot.appendingPathComponent(skillID, isDirectory: true)
+            var dirCheck: ObjCBool = false
+            guard fm.fileExists(atPath: skillDir.path(percentEncoded: false), isDirectory: &dirCheck),
+                  dirCheck.boolValue else {
+                continue
+            }
+            guard let enumerator = fm.enumerator(
+                at: skillDir,
+                includingPropertiesForKeys: [.isRegularFileKey],
+                options: [.skipsHiddenFiles, .skipsPackageDescendants]
+            ) else { continue }
+
+            while let item = enumerator.nextObject() as? URL {
+                let resourceValues = try item.resourceValues(forKeys: [.isRegularFileKey])
+                guard resourceValues.isRegularFile == true else { continue }
+                let relComponents = item.standardizedFileURL.pathComponents
+                    .dropFirst(skillDir.standardizedFileURL.pathComponents.count)
+                guard !relComponents.isEmpty else { continue }
+                let relativePath = relComponents.joined(separator: "/")
+                let content = try Data(contentsOf: item)
+                results.append((skillID: skillID, relativePath: relativePath, content: content))
+            }
+        }
+        return results
+    }
+
     static func resolveClaudeCodePluginArtifacts(
         serviceID: String,
-        resolvedConnections: AIBDeployResolvedConnections,
-        skillArtifacts: [AIBDeployArtifact]
+        workspaceRoot: String,
+        repoPath: String,
+        resolvedConnections: AIBDeployResolvedConnections
     ) throws -> [AIBDeployArtifact] {
         let template = ClaudeCodePluginTemplate(
             serviceID: serviceID,
             servers: resolvedConnections.mcpServers.map { target in
-                let serviceRef = URL(string: target.serviceRef) == nil ? target.serviceRef : nil
+                let serviceRef = pluginServiceRef(from: target)
                 return .init(
                     name: ClaudeCodePluginBundle.mcpServerName(
                         serviceRef: serviceRef,
@@ -1155,7 +1291,7 @@ extension AIBDeployService {
         let binding = ClaudeCodePluginBinding(
             serviceID: serviceID,
             servers: resolvedConnections.mcpServers.map { target in
-                let serviceRef = URL(string: target.serviceRef) == nil ? target.serviceRef : nil
+                let serviceRef = pluginServiceRef(from: target)
                 return .init(
                     name: ClaudeCodePluginBundle.mcpServerName(
                         serviceRef: serviceRef,
@@ -1167,15 +1303,33 @@ extension AIBDeployService {
         )
         let rendered = try ClaudeCodePluginBundle.render(template: template, binding: binding)
 
-        let pluginFiles = rendered.files.map {
+        var artifacts: [AIBDeployArtifact] = rendered.files.map {
             AIBDeployArtifact(
-                relativePath: $0.relativePath,
+                relativePath: "\(pluginStagingRoot)/\($0.relativePath)",
                 content: $0.content,
                 source: .generated
             )
         }
-        return (pluginFiles + skillArtifacts)
-            .sorted { $0.relativePath < $1.relativePath }
+
+        // Fold repo-bundled skills (e.g. <repo>/skills/<id>/SKILL.md) into the plugin
+        // so the SDK's local-plugin loader can discover them at runtime.
+        let repoSkills = try collectRepoSkillFiles(
+            workspaceRoot: workspaceRoot,
+            repoPath: repoPath
+        )
+        for skill in repoSkills {
+            artifacts.append(AIBDeployArtifact(
+                relativePath: "\(pluginStagingRoot)/skills/\(skill.skillID)/\(skill.relativePath)",
+                content: skill.content,
+                source: .generated
+            ))
+        }
+
+        return artifacts.sorted { $0.relativePath < $1.relativePath }
+    }
+
+    private static func pluginServiceRef(from target: AIBDeployConnectionEntry) -> String? {
+        target.deployedServiceName.isEmpty ? nil : target.serviceRef
     }
 
     static func resolveExecutionDirectoryArtifacts(

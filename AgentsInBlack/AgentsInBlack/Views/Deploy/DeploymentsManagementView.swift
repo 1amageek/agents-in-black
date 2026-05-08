@@ -23,8 +23,8 @@ struct DeploymentsManagementView: View {
             header
             Divider()
             content
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .task {
             model.refreshDeploymentsInventory()
         }

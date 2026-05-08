@@ -243,7 +243,7 @@ public final class AIBEmulatorController {
                     ? resolvedPluginRootPath
                     : nil
                 let executionDirectory = service.cwd
-                let resolvedModel = service.env["MODEL"]
+                let resolvedModel = service.resolvedEnv(for: .local)["MODEL"]
                 let handler = LocalAgentHandler.makeHandler(
                     serviceID: service.id,
                     pluginRootPath: pluginRootPath,

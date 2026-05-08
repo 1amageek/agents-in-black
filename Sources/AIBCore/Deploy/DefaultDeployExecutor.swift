@@ -1,3 +1,4 @@
+import AIBConfig
 import AIBRuntimeCore
 import Foundation
 import Logging
@@ -96,6 +97,39 @@ public struct DefaultDeployExecutor: DeployExecuting {
             }
         }
 
+        // Validate declared SecretRefs exist in Secret Manager up front.
+        // --set-secrets fails mid-deploy with a less informative error if the
+        // secret is missing, leaving services in a partially-applied state.
+        // Catch it here so users get a single clear remediation step.
+        if !plan.allDeclaredSecretRefs.isEmpty {
+            let declaredNames = Set(plan.allDeclaredSecretRefs.values.map(\.secret))
+            logHandler(AIBDeployLogEntry(
+                level: .info,
+                step: .serviceDeploy,
+                message: "Validating \(declaredNames.count) declared SecretRef(s) against Secret Manager"
+            ))
+            let existingSecrets: Set<String>
+            do {
+                existingSecrets = try await provider.listSecrets(targetConfig: plan.targetConfig)
+            } catch let error as AIBDeployError {
+                throw error
+            } catch {
+                throw AIBDeployError(
+                    phase: "secrets",
+                    message: "Failed to list Secret Manager secrets: \(error.localizedDescription)"
+                )
+            }
+            let missing = declaredNames.subtracting(existingSecrets).sorted()
+            if !missing.isEmpty {
+                throw AIBDeployError(
+                    phase: "secrets",
+                    message: "Declared SecretRefs missing in Secret Manager: "
+                        + missing.joined(separator: ", ")
+                        + ". Create them with `gcloud secrets create <name>` or via the AIB Inspector before deploying."
+                )
+            }
+        }
+
         var serviceResults: [AIBDeployServiceResult] = []
 
         for service in plan.services {
@@ -107,24 +141,35 @@ public struct DefaultDeployExecutor: DeployExecuting {
             let buildContext = URL(fileURLWithPath: workspaceRoot)
                 .appendingPathComponent(service.repoPath)
                 .path
-            var injectedDockerfileInstructions: [String] = []
-            var appendedDockerfileInstructions: [String] = []
+            // Top-stage instructions land right after the first FROM; they
+            // intentionally appear in the base/deps stage so build-time RUNs
+            // (e.g. `pnpm install` over SSH) can use them.
+            var topStageInstructions: [String] = []
+            // Runtime-stage instructions land in the final FROM stage, after
+            // its last WORKDIR — so files end up at the configured WORKDIR
+            // (typically `/app`) of the image that actually runs.
+            var runtimeStageInstructions: [String] = []
+            var preUserDockerfileInstructions: [String] = []
+            var preEntrypointDockerfileInstructions: [String] = []
+            let appendedDockerfileInstructions: [String] = []
 
             if let mcpConfig = service.artifacts.mcpConnectionConfig {
                 let connectionsFileName = ".aib-connections.json"
                 let targetPath = URL(fileURLWithPath: buildContext)
                     .appendingPathComponent(connectionsFileName)
                 try mcpConfig.content.write(to: targetPath, options: .atomic)
-                injectedDockerfileInstructions.append("COPY \(connectionsFileName) ./")
+                runtimeStageInstructions.append("COPY \(connectionsFileName) ./")
             }
 
-            let projectedArtifacts = service.artifacts.skillConfigs + service.artifacts.executionDirectoryConfigs
+            let projectedArtifacts = service.artifacts.skillConfigs
+                + service.artifacts.executionDirectoryConfigs
+                + service.artifacts.claudeCodePluginArtifacts
             if !projectedArtifacts.isEmpty {
                 let stagedRoots = try Self.stageProjectedArtifacts(
                     projectedArtifacts,
                     buildContext: buildContext
                 )
-                injectedDockerfileInstructions.append(contentsOf: Self.copyInstructionsForStagedRuntimeRoots(stagedRoots))
+                runtimeStageInstructions.append(contentsOf: Self.copyInstructionsForStagedRuntimeRoots(stagedRoots))
             }
 
             if let sourceAuthInstructions = try await stageCloudBuildSourceAuthIfNeeded(
@@ -132,15 +177,29 @@ public struct DefaultDeployExecutor: DeployExecuting {
                 buildContext: buildContext,
                 logHandler: logHandler
             ) {
-                injectedDockerfileInstructions.append(contentsOf: sourceAuthInstructions.injectedInstructions)
-                appendedDockerfileInstructions.append(contentsOf: sourceAuthInstructions.appendedInstructions)
+                topStageInstructions.append(contentsOf: sourceAuthInstructions.injectedInstructions)
+                preUserDockerfileInstructions.append(contentsOf: sourceAuthInstructions.appendedInstructions)
             }
 
-            if !injectedDockerfileInstructions.isEmpty || !appendedDockerfileInstructions.isEmpty {
+            if service.serviceKind == .agent && service.runtime == "node" {
+                preEntrypointDockerfileInstructions.append(
+                    contentsOf: try Self.nodeAgentNonRootRuntimeInstructions(dockerfilePath: dockerfilePath)
+                )
+            }
+
+            if !topStageInstructions.isEmpty
+                || !runtimeStageInstructions.isEmpty
+                || !preUserDockerfileInstructions.isEmpty
+                || !preEntrypointDockerfileInstructions.isEmpty
+                || !appendedDockerfileInstructions.isEmpty
+            {
                 dockerfilePath = try Self.patchedDockerfilePath(
                     dockerfilePath: dockerfilePath,
                     buildContext: buildContext,
-                    insertedInstructions: injectedDockerfileInstructions,
+                    topStageInstructions: topStageInstructions,
+                    runtimeStageInstructions: runtimeStageInstructions,
+                    preUserInstructions: preUserDockerfileInstructions,
+                    preEntrypointInstructions: preEntrypointDockerfileInstructions,
                     appendedInstructions: appendedDockerfileInstructions
                 )
             }
@@ -156,8 +215,11 @@ public struct DefaultDeployExecutor: DeployExecuting {
                 buildContext: buildContext,
                 targetConfig: plan.targetConfig
             )
-            // Deploy service — filter secrets to only those required by this service
-            let serviceSecrets = secrets.filter { service.requiredSecrets.contains($0.key) }
+            // Deploy service — filter secrets to only those this service
+            // explicitly asked for (from EnvVarScanner). Declared SecretRefs
+            // are NOT in this set; they are mounted via --set-secrets in
+            // Phase 4, not via --set-env-vars.
+            let serviceSecrets = secrets.filter { service.unresolvedSecrets.contains($0.key) }
             let deployCommands = provider.deployCommands(
                 service: service,
                 imageTag: imageTag,
@@ -612,34 +674,183 @@ public struct DefaultDeployExecutor: DeployExecuting {
         return stagedRoots
     }
 
-    private static func patchedDockerfilePath(
+    /// Patch a Dockerfile with two distinct insertion points:
+    ///
+    /// - `topStageInstructions` go right after the **first** `FROM` so they
+    ///   land in the base/deps stage. Used for build-time concerns like
+    ///   provisioning SSH keys before `pnpm install` fetches private deps.
+    /// - `runtimeStageInstructions` go in the **final** `FROM` stage, after
+    ///   that stage's last `WORKDIR`. Used for files the running container
+    ///   needs to read at the configured working directory (e.g. `/app`).
+    ///   In a single-stage Dockerfile this is the same stage as the top.
+    /// - `appendedInstructions` are appended verbatim to the very end (used
+    ///   for runtime cleanup like deleting SSH keys before the image is
+    ///   committed).
+    static func patchedDockerfilePath(
         dockerfilePath: String,
         buildContext: String,
-        insertedInstructions: [String],
+        topStageInstructions: [String],
+        runtimeStageInstructions: [String],
+        preUserInstructions: [String] = [],
+        preEntrypointInstructions: [String] = [],
         appendedInstructions: [String]
     ) throws -> String {
         let originalContent = try String(contentsOfFile: dockerfilePath, encoding: .utf8)
-        let missingInsertedInstructions = insertedInstructions.filter { !originalContent.contains($0) }
-        let missingAppendedInstructions = appendedInstructions.filter { !originalContent.contains($0) }
-        guard !missingInsertedInstructions.isEmpty || !missingAppendedInstructions.isEmpty else { return dockerfilePath }
+        let missingTopStage = topStageInstructions.filter { !originalContent.contains($0) }
+        let missingRuntimeStage = runtimeStageInstructions.filter { !originalContent.contains($0) }
+        let missingPreUser = preUserInstructions.filter { !originalContent.contains($0) }
+        let missingPreEntrypoint = preEntrypointInstructions.filter { !originalContent.contains($0) }
+        let missingAppended = appendedInstructions.filter { !originalContent.contains($0) }
+        guard !missingTopStage.isEmpty
+            || !missingRuntimeStage.isEmpty
+            || !missingPreUser.isEmpty
+            || !missingPreEntrypoint.isEmpty
+            || !missingAppended.isEmpty
+        else {
+            return dockerfilePath
+        }
 
         let patchedPath = URL(fileURLWithPath: buildContext)
             .appendingPathComponent("Dockerfile.aib")
             .path(percentEncoded: false)
         var lines = originalContent.components(separatedBy: "\n")
-        if !missingInsertedInstructions.isEmpty,
-           let fromIndex = lines.firstIndex(where: { $0.trimmingCharacters(in: .whitespaces).uppercased().hasPrefix("FROM ") })
-        {
-            lines.insert(contentsOf: missingInsertedInstructions, at: fromIndex + 1)
-        } else if !missingInsertedInstructions.isEmpty {
-            lines.append(contentsOf: missingInsertedInstructions)
+
+        // Apply runtime-stage instructions first, walking from the bottom of the
+        // file. Doing top-stage second keeps the top-stage `firstIndex(of: FROM)`
+        // anchor stable; if we did it the other way around, inserting near the
+        // top would invalidate the runtime-stage index we computed earlier.
+        if !missingRuntimeStage.isEmpty {
+            let insertionIndex = Self.runtimeStageInsertionIndex(in: lines)
+                ?? lines.endIndex
+            lines.insert(contentsOf: missingRuntimeStage, at: insertionIndex)
         }
-        if !missingAppendedInstructions.isEmpty {
-            lines.append(contentsOf: missingAppendedInstructions)
+
+        if !missingPreUser.isEmpty {
+            let insertionIndex = Self.preUserInsertionIndex(in: lines)
+                ?? Self.preEntrypointInsertionIndex(in: lines)
+                ?? lines.endIndex
+            lines.insert(contentsOf: missingPreUser, at: insertionIndex)
         }
+
+        if !missingPreEntrypoint.isEmpty {
+            let insertionIndex = Self.preEntrypointInsertionIndex(in: lines)
+                ?? lines.endIndex
+            lines.insert(contentsOf: missingPreEntrypoint, at: insertionIndex)
+        }
+
+        if !missingTopStage.isEmpty {
+            if let firstFromIndex = lines.firstIndex(where: { Self.isFromLine($0) }) {
+                lines.insert(contentsOf: missingTopStage, at: firstFromIndex + 1)
+            } else {
+                lines.append(contentsOf: missingTopStage)
+            }
+        }
+
+        if !missingAppended.isEmpty {
+            lines.append(contentsOf: missingAppended)
+        }
+
         let patchedContent = lines.joined(separator: "\n") + "\n"
         try patchedContent.write(toFile: patchedPath, atomically: true, encoding: .utf8)
         return patchedPath
+    }
+
+    /// Pick the line index where runtime-stage COPY instructions should be
+    /// inserted. Prefers the line after the last `WORKDIR` inside the final
+    /// `FROM` stage so COPY targets resolve under the configured WORKDIR
+    /// (typically `/app`). Falls back to the line right after the final
+    /// `FROM` if that stage has no `WORKDIR`.
+    static func runtimeStageInsertionIndex(in lines: [String]) -> Int? {
+        guard let lastFromIndex = lines.lastIndex(where: { isFromLine($0) }) else {
+            return nil
+        }
+        let finalStageRange = (lastFromIndex + 1)..<lines.endIndex
+        if finalStageRange.lowerBound < lines.endIndex,
+           let lastWorkdirIndex = lines[finalStageRange].lastIndex(where: { isWorkdirLine($0) })
+        {
+            return lastWorkdirIndex + 1
+        }
+        return lastFromIndex + 1
+    }
+
+    static func preUserInsertionIndex(in lines: [String]) -> Int? {
+        guard let lastFromIndex = lines.lastIndex(where: { isFromLine($0) }) else {
+            return nil
+        }
+        let finalStageRange = (lastFromIndex + 1)..<lines.endIndex
+        guard finalStageRange.lowerBound < lines.endIndex else {
+            return nil
+        }
+        return lines[finalStageRange].firstIndex(where: { isUserLine($0) })
+    }
+
+    static func preEntrypointInsertionIndex(in lines: [String]) -> Int? {
+        guard let lastFromIndex = lines.lastIndex(where: { isFromLine($0) }) else {
+            return nil
+        }
+        let finalStageRange = (lastFromIndex + 1)..<lines.endIndex
+        guard finalStageRange.lowerBound < lines.endIndex else {
+            return nil
+        }
+        if let entrypointIndex = lines[finalStageRange].lastIndex(where: { isRuntimeEntrypointLine($0) }) {
+            return entrypointIndex
+        }
+        return lines.endIndex
+    }
+
+    static func nodeAgentNonRootRuntimeInstructions(dockerfilePath: String) throws -> [String] {
+        let content = try String(contentsOfFile: dockerfilePath, encoding: .utf8)
+        let lines = content.components(separatedBy: "\n")
+        guard let lastFromIndex = lines.lastIndex(where: { isFromLine($0) }) else {
+            return ["RUN chown -R node:node /app", "ENV HOME=/home/node", "USER node"]
+        }
+        let finalStageRange = (lastFromIndex + 1)..<lines.endIndex
+        let finalStageLines = finalStageRange.lowerBound < lines.endIndex
+            ? Array(lines[finalStageRange])
+            : []
+        let lastUser = finalStageLines
+            .last(where: { isUserLine($0) })
+            .flatMap(runtimeUserValue)
+
+        if let lastUser {
+            if lastUser == "node" {
+                return content.contains("ENV HOME=/home/node") ? [] : ["ENV HOME=/home/node"]
+            }
+            if lastUser != "root" && lastUser != "0" {
+                return []
+            }
+        }
+
+        return ["RUN chown -R node:node /app", "ENV HOME=/home/node", "USER node"]
+    }
+
+    private static func isFromLine(_ line: String) -> Bool {
+        line.trimmingCharacters(in: .whitespaces).uppercased().hasPrefix("FROM ")
+    }
+
+    private static func isWorkdirLine(_ line: String) -> Bool {
+        line.trimmingCharacters(in: .whitespaces).uppercased().hasPrefix("WORKDIR ")
+    }
+
+    private static func isUserLine(_ line: String) -> Bool {
+        line.trimmingCharacters(in: .whitespaces).uppercased().hasPrefix("USER ")
+    }
+
+    private static func isRuntimeEntrypointLine(_ line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespaces).uppercased()
+        return trimmed.hasPrefix("CMD ") || trimmed.hasPrefix("ENTRYPOINT ")
+    }
+
+    private static func runtimeUserValue(_ line: String) -> String? {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard trimmed.uppercased().hasPrefix("USER ") else {
+            return nil
+        }
+        return trimmed
+            .dropFirst(5)
+            .split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
+            .first
+            .map { String($0).lowercased() }
     }
 
     private static func copyInstructionsForStagedRuntimeRoots(_ roots: Set<String>) -> [String] {
@@ -656,6 +867,11 @@ public struct DefaultDeployExecutor: DeployExecuting {
         if roots.contains("__aib_deploy/skills") {
             instructions.append("COPY __aib_deploy/skills/ ./skills/")
         }
+        if roots.contains("__aib_deploy/plugin") {
+            // Mounts the Claude Code plugin bundle at /app/.aib-plugin so the agent
+            // runtime can pass it to SDK's `plugins: [{ type: 'local', path }]`.
+            instructions.append("COPY __aib_deploy/plugin/ ./.aib-plugin/")
+        }
         if roots.contains("__aib_deploy/root") {
             instructions.append("COPY __aib_deploy/root/ ./")
         }
@@ -668,6 +884,7 @@ public struct DefaultDeployExecutor: DeployExecuting {
             "__aib_deploy/codex/",
             "__aib_deploy/agents/",
             "__aib_deploy/skills/",
+            "__aib_deploy/plugin/",
             "__aib_deploy/root/",
         ]
         for prefix in prefixes where relativePath.hasPrefix(prefix) {

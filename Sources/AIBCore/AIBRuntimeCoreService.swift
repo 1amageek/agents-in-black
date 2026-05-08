@@ -217,6 +217,12 @@ public enum AIBRuntimeCoreService {
             logger: logger
         )
 
+        try await materializeLocalSecrets(
+            resolved: &resolved,
+            workspaceRoot: workspaceRoot,
+            logger: logger
+        )
+
         try WorkspaceSyncer.writeRuntimeConnectionArtifacts(
             config: resolved.config,
             workspaceRoot: workspaceRoot,
@@ -228,6 +234,68 @@ public enum AIBRuntimeCoreService {
             workspace: workspace
         )
         return LoadedConfig(config: resolved.config, warnings: resolved.warnings, configPath: workspacePath)
+    }
+
+    /// Resolves every declared SecretRef into the service's `localEnv` so the
+    /// running emulator sees plaintext values. Called once after node prep,
+    /// before connection artifacts are written. Hard-fails on unresolved
+    /// declarations — the user explicitly declared a SecretRef, and silently
+    /// dropping it would lead to confusing runtime auth errors instead of a
+    /// boot-time failure with clear remediation.
+    ///
+    /// Local-only mutation: writes into the in-memory `localEnv`, not back to
+    /// `workspace.yaml`. The same pattern is used for AIB internal markers
+    /// (`AIB_PREPARED_WORKSPACE` etc.) so values don't leak into commits.
+    static func materializeLocalSecrets(
+        resolved: inout ResolvedConfig,
+        workspaceRoot: String,
+        resolver: (any LocalSecretResolver)? = nil,
+        logger: Logger
+    ) async throws {
+        let activeResolver: any LocalSecretResolver
+        if let resolver {
+            activeResolver = resolver
+        } else {
+            // Order: env-passthrough (cheap, explicit), local file (offline
+            // dev), gcloud (authoritative but network-bound). First non-nil
+            // wins, so cheaper resolvers short-circuit network calls.
+            let fileResolver = try LocalFileSecretResolver.load(workspaceRoot: workspaceRoot)
+            activeResolver = ChainedLocalSecretResolver([
+                EnvPassthroughSecretResolver(),
+                fileResolver,
+                GcloudSecretResolver(),
+            ])
+        }
+
+        for index in resolved.config.services.indices {
+            let service = resolved.config.services[index]
+            for envKey in service.secrets.keys.sorted() {
+                guard let ref = service.secrets[envKey] else { continue }
+
+                // Honour user override: an explicit value in localEnv (e.g.
+                // set in Inspector or workspace.yaml) wins over resolution.
+                if resolved.config.services[index].localEnv[envKey] != nil {
+                    continue
+                }
+
+                guard let value = await activeResolver.resolve(secretName: ref.secret) else {
+                    throw ConfigError(
+                        "Failed to resolve local secret '\(ref.secret)' for service '\(service.id.rawValue)' "
+                        + "(env key: \(envKey)). Provide it via one of: "
+                        + "(1) AIB_SECRET_\(ref.secret.uppercased().replacingOccurrences(of: "-", with: "_")) env var, "
+                        + "(2) entry in .aib/secrets.local.yaml, "
+                        + "(3) `gcloud auth login` so `gcloud secrets versions access` succeeds for this project."
+                    )
+                }
+
+                resolved.config.services[index].localEnv[envKey] = value
+                logger.debug("Resolved local secret", metadata: [
+                    "service_id": .string(service.id.rawValue),
+                    "env_key": .string(envKey),
+                    "secret_name": .string(ref.secret),
+                ])
+            }
+        }
     }
 
     static func prepareLocalNodeServices(
@@ -330,9 +398,10 @@ public enum AIBRuntimeCoreService {
             resolved.config.services[result.index].cwd = result.preparedWorkspacePath
             resolved.config.services[result.index].install = nil
             resolved.config.services[result.index].build = nil
-            resolved.config.services[result.index].env["AIB_PREPARED_WORKSPACE"] = "1"
-            resolved.config.services[result.index].env["AIB_BUILD_MODE"] = targetConfig.buildMode.rawValue
-            resolved.config.services[result.index].env["AIB_ACTIVE_TARGET"] = "local"
+            // Internal AIB markers are local-only — never let them reach deploy.
+            resolved.config.services[result.index].localEnv["AIB_PREPARED_WORKSPACE"] = "1"
+            resolved.config.services[result.index].localEnv["AIB_BUILD_MODE"] = targetConfig.buildMode.rawValue
+            resolved.config.services[result.index].localEnv["AIB_ACTIVE_TARGET"] = "local"
             if targetConfig.buildMode == .convenience {
                 logger.info("Local emulator is running in convenience mode (not Cloud Run-aligned)", metadata: [
                     "service_id": .string(result.serviceID),

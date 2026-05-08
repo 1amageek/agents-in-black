@@ -1,3 +1,4 @@
+import AIBConfig
 import AIBRuntimeCore
 import Foundation
 
@@ -29,14 +30,31 @@ public struct AIBDeployPlan: Sendable, Identifiable {
         self.warnings = warnings
     }
 
-    /// All unique secret names required across all services.
-    public var allRequiredSecrets: [String] {
-        Array(Set(services.flatMap(\.requiredSecrets))).sorted()
+    /// All unique secret names that must be provided by the user before
+    /// deploy can proceed. These are env vars referenced in source code that
+    /// are neither already in `envVars` nor declared as `SecretRef`s in
+    /// workspace.yaml — they require an explicit value at deploy time.
+    public var allUnresolvedSecrets: [String] {
+        Array(Set(services.flatMap(\.unresolvedSecrets))).sorted()
     }
 
-    /// Whether any service requires secrets to be provided before deployment.
-    public var hasRequiredSecrets: Bool {
-        services.contains { !$0.requiredSecrets.isEmpty }
+    /// Whether any service has unresolved secrets that block deployment.
+    public var hasUnresolvedSecrets: Bool {
+        services.contains { !$0.unresolvedSecrets.isEmpty }
+    }
+
+    /// Every distinct secret reference declared across all services. Used by
+    /// the deploy pipeline to drive the Secret Manager upload pre-step
+    /// (when a value is provided via the local file or pre-existing) and the
+    /// `--set-secrets` mount on the resulting Cloud Run service.
+    public var allDeclaredSecretRefs: [String: SecretRef] {
+        var merged: [String: SecretRef] = [:]
+        for service in services {
+            for (key, ref) in service.declaredSecretRefs where merged[key] == nil {
+                merged[key] = ref
+            }
+        }
+        return merged
     }
 
     /// All env warnings across all services.
@@ -61,9 +79,18 @@ public struct AIBDeployServicePlan: Sendable, Identifiable {
     public var sourceDependencies: [AIBSourceDependencyFinding]
     public var sourceCredential: AIBSourceCredential?
 
-    /// Secret environment variable names detected from source code.
-    /// These must be provided by the user before deployment.
-    public var requiredSecrets: [String]
+    /// Secret references declared by the user in workspace.yaml's `secrets:`
+    /// block. The value lives in the provider's secret store; only the
+    /// reference (name + version) is committed to git. At deploy time these
+    /// are mounted as env vars via the provider's `setSecretsArgs`.
+    public var declaredSecretRefs: [String: SecretRef]
+
+    /// Env var names detected from source code that are NOT yet pinned —
+    /// neither present in `envVars` (workspace.yaml `env`/`deploy_env`) nor
+    /// declared as `SecretRef`s. The user must supply values at deploy time
+    /// (and the pipeline either uploads them to Secret Manager or sets them
+    /// directly via `--set-env-vars`).
+    public var unresolvedSecrets: [String]
 
     /// Warnings about missing non-secret environment variables.
     public var envWarnings: [String]
@@ -82,7 +109,8 @@ public struct AIBDeployServicePlan: Sendable, Identifiable {
         isPublic: Bool = false,
         sourceDependencies: [AIBSourceDependencyFinding] = [],
         sourceCredential: AIBSourceCredential? = nil,
-        requiredSecrets: [String] = [],
+        declaredSecretRefs: [String: SecretRef] = [:],
+        unresolvedSecrets: [String] = [],
         envWarnings: [String] = []
     ) {
         self.id = id
@@ -98,7 +126,8 @@ public struct AIBDeployServicePlan: Sendable, Identifiable {
         self.isPublic = isPublic
         self.sourceDependencies = sourceDependencies
         self.sourceCredential = sourceCredential
-        self.requiredSecrets = requiredSecrets
+        self.declaredSecretRefs = declaredSecretRefs
+        self.unresolvedSecrets = unresolvedSecrets
         self.envWarnings = envWarnings
     }
 }

@@ -425,6 +425,9 @@ public enum WorkspaceSyncer {
             pathRewrite: pathRewrite,
             cookiePathRewrite: inline.cookiePathRewrite ?? true,
             env: Self.mergeModelEnv(base: inline.env ?? [:], model: inline.model, kind: resolvedKind),
+            localEnv: inline.localEnv ?? [:],
+            deployEnv: inline.deployEnv ?? [:],
+            secrets: (inline.secrets ?? [:]).mapValues { SecretRef(secret: $0.secret, version: $0.version) },
             health: .init(
                 livenessPath: inline.health?.livenessPath ?? "/health/live",
                 readinessPath: inline.health?.readinessPath ?? "/health/ready",

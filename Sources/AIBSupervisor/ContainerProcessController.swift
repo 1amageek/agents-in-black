@@ -105,8 +105,9 @@ public actor ContainerProcessController: ProcessController {
 
         // Detect runtime for entrypoint generation
         let runtime = EntrypointGenerator.detectRuntime(service: service)
-        let preparedWorkspace = service.env["AIB_PREPARED_WORKSPACE"] == "1"
-        let buildMode = AIBBuildMode(rawValue: service.env["AIB_BUILD_MODE"] ?? "") ?? .strict
+        let localEnv = service.resolvedEnv(for: .local)
+        let preparedWorkspace = localEnv["AIB_PREPARED_WORKSPACE"] == "1"
+        let buildMode = AIBBuildMode(rawValue: localEnv["AIB_BUILD_MODE"] ?? "") ?? .strict
         var effectiveService = service
         if let preparedRunCommand = resolvedPreparedWorkspaceRunCommand(
             for: service,
@@ -1605,7 +1606,7 @@ public actor ContainerProcessController: ProcessController {
         env["PYTHONUNBUFFERED"] = "1"
 
         // Service-specific env vars (highest priority — override defaults)
-        for (key, value) in service.env {
+        for (key, value) in service.resolvedEnv(for: .local) {
             env[key] = value
         }
 
@@ -1645,7 +1646,7 @@ public actor ContainerProcessController: ProcessController {
         if let forwardedSSHAgentSocketPath {
             env["AIB_SSH_AUTH_SOCK"] = forwardedSSHAgentSocketPath
         }
-        for (key, value) in service.env {
+        for (key, value) in service.resolvedEnv(for: .local) {
             env[key] = value
         }
         return env.map { "\($0.key)=\($0.value)" }
@@ -1677,7 +1678,7 @@ public actor ContainerProcessController: ProcessController {
             env["AIB_CONNECTIONS_FILE"] = hostConnectionsPath
         }
 
-        for (key, value) in service.env {
+        for (key, value) in service.resolvedEnv(for: .local) {
             env[key] = normalizeHostExecutionEnvironmentValue(value)
         }
         return env
@@ -1701,7 +1702,7 @@ public actor ContainerProcessController: ProcessController {
         if let modulesDir = EntrypointGenerator.platformModulesDir(runtime: runtime) {
             env["AIB_MODULES_DIR"] = modulesDir
         }
-        for (key, value) in service.env {
+        for (key, value) in service.resolvedEnv(for: .local) {
             env[key] = normalizeHostExecutionEnvironmentValue(value)
         }
         return env
@@ -2099,8 +2100,9 @@ public actor ContainerProcessController: ProcessController {
         lines.append("build:\(service.build?.joined(separator: "\u{1f}") ?? "")")
         lines.append("run:\(service.run.joined(separator: "\u{1f}"))")
 
-        for key in service.env.keys.sorted() {
-            lines.append("env:\(key)=\(service.env[key] ?? "")")
+        let cacheEnv = service.resolvedEnv(for: .local)
+        for key in cacheEnv.keys.sorted() {
+            lines.append("env:\(key)=\(cacheEnv[key] ?? "")")
         }
 
         for dependency in sourceDependencies.sorted(by: {

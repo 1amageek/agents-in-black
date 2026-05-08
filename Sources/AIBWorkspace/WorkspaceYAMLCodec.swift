@@ -131,6 +131,9 @@ private struct WorkspaceFileDTO: Codable {
         var pathRewrite: String?
         var cookiePathRewrite: Bool?
         var env: [String: String]?
+        var localEnv: [String: String]?
+        var deployEnv: [String: String]?
+        var secrets: [String: SecretRefDTO]?
         var health: HealthDTO?
         var restart: RestartDTO?
         var concurrency: ConcurrencyDTO?
@@ -144,14 +147,21 @@ private struct WorkspaceFileDTO: Codable {
         var model: String?
 
         enum CodingKeys: String, CodingKey {
-            case id, kind, port, cwd, run, build, install, env, health, restart, concurrency, auth, connections, mcp, a2a, ui, endpoints, skills, model
+            case id, kind, port, cwd, run, build, install, env, secrets, health, restart, concurrency, auth, connections, mcp, a2a, ui, endpoints, skills, model
             case mountPath = "mount_path"
             case watchMode = "watch_mode"
             case watchPaths = "watch_paths"
             case restartAffects = "restart_affects"
             case pathRewrite = "path_rewrite"
             case cookiePathRewrite = "cookie_path_rewrite"
+            case localEnv = "local_env"
+            case deployEnv = "deploy_env"
         }
+    }
+
+    struct SecretRefDTO: Codable {
+        var secret: String
+        var version: String?
     }
 
     struct ConnectionsDTO: Codable {
@@ -311,6 +321,9 @@ private struct WorkspaceFileDTO: Codable {
             pathRewrite: s.pathRewrite,
             cookiePathRewrite: s.cookiePathRewrite,
             env: s.env,
+            localEnv: (s.localEnv?.isEmpty ?? true) ? nil : s.localEnv,
+            deployEnv: (s.deployEnv?.isEmpty ?? true) ? nil : s.deployEnv,
+            secrets: (s.secrets?.isEmpty ?? true) ? nil : s.secrets?.mapValues { SecretRefDTO(secret: $0.secret, version: $0.version) },
             health: s.health.map { HealthDTO(livenessPath: $0.livenessPath, readinessPath: $0.readinessPath, startupReadyTimeout: $0.startupReadyTimeout, checkInterval: $0.checkInterval, failureThreshold: $0.failureThreshold) },
             restart: s.restart.map { RestartDTO(drainTimeout: $0.drainTimeout, shutdownGracePeriod: $0.shutdownGracePeriod, backoffInitial: $0.backoffInitial, backoffMax: $0.backoffMax) },
             concurrency: s.concurrency.map { ConcurrencyDTO(maxInflight: $0.maxInflight, overflowMode: $0.overflowMode, queueTimeout: $0.queueTimeout) },
@@ -392,6 +405,9 @@ private struct WorkspaceFileDTO: Codable {
             pathRewrite: s.pathRewrite,
             cookiePathRewrite: s.cookiePathRewrite,
             env: s.env,
+            localEnv: s.localEnv,
+            deployEnv: s.deployEnv,
+            secrets: s.secrets?.mapValues { WorkspaceRepoSecretRef(secret: $0.secret, version: $0.version) },
             health: s.health.map { WorkspaceRepoHealthConfig(livenessPath: $0.livenessPath, readinessPath: $0.readinessPath, startupReadyTimeout: $0.startupReadyTimeout, checkInterval: $0.checkInterval, failureThreshold: $0.failureThreshold) },
             restart: s.restart.map { WorkspaceRepoRestartConfig(drainTimeout: $0.drainTimeout, shutdownGracePeriod: $0.shutdownGracePeriod, backoffInitial: $0.backoffInitial, backoffMax: $0.backoffMax) },
             concurrency: s.concurrency.map { WorkspaceRepoConcurrencyConfig(maxInflight: $0.maxInflight, overflowMode: $0.overflowMode, queueTimeout: $0.queueTimeout) },

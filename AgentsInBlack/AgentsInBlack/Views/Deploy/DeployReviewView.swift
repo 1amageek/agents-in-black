@@ -456,12 +456,12 @@ struct DeployReviewView: View {
 
     private var secretsInfoSection: some View {
         Group {
-            if plan.hasRequiredSecrets {
+            if plan.hasUnresolvedSecrets {
                 VStack(alignment: .leading, spacing: 8) {
-                    sectionHeader("Secrets Required", count: plan.allRequiredSecrets.count)
+                    sectionHeader("Secrets Required", count: plan.allUnresolvedSecrets.count)
 
                     cardBackground {
-                        ForEach(Array(plan.allRequiredSecrets.enumerated()), id: \.offset) { index, name in
+                        ForEach(Array(plan.allUnresolvedSecrets.enumerated()), id: \.offset) { index, name in
                             if index > 0 {
                                 Divider().padding(.leading, 12)
                             }

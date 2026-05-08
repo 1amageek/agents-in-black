@@ -1,3 +1,4 @@
+import AIBConfig
 import Foundation
 
 /// Protocol defining cloud deployment operations.
@@ -102,6 +103,63 @@ public protocol DeploymentProvider: Sendable {
         targetConfig: AIBDeployTargetConfig
     ) async -> Set<String>
 
+    /// Query existing environment variable name → value pairs configured on a deployed service.
+    /// Returns an empty dict if the service does not exist or has no env vars. Used by the
+    /// deploy pipeline to pre-populate secret values from the live service so users are not
+    /// re-prompted for secrets that were previously entered, and so the authoritative
+    /// `--set-env-vars` does not wipe values the user can no longer easily re-enter
+    /// (e.g. one-time API keys pasted from an external provider).
+    func existingEnvVars(
+        serviceName: String,
+        targetConfig: AIBDeployTargetConfig
+    ) async -> [String: String]
+
+    // MARK: - Secrets
+
+    /// Translate declared secret refs (workspace.yaml `secrets:` block) into
+    /// provider-specific CLI args that mount them as env vars at runtime.
+    /// Cloud Run: returns `["--set-secrets", "KEY1=secret1:latest,KEY2=secret2:7"]`.
+    /// Returns an empty array when there are no secrets to mount.
+    func setSecretsArgs(
+        declaredSecretRefs: [String: SecretRef],
+        targetConfig: AIBDeployTargetConfig
+    ) -> [String]
+
+    /// Create the secret if missing and add a new version with `value`.
+    /// Idempotent: re-creating an existing secret is treated as success.
+    /// Throws `AIBDeployError` on tool / auth / quota failure.
+    func upsertSecret(
+        name: String,
+        value: String,
+        targetConfig: AIBDeployTargetConfig
+    ) async throws
+
+    /// List every secret name currently configured in the provider's secret
+    /// store for this project. Used to decide whether to upload a fresh value
+    /// or rely on the value already in the store.
+    /// Throws `AIBDeployError` on tool / auth failure.
+    func listSecrets(
+        targetConfig: AIBDeployTargetConfig
+    ) async throws -> Set<String>
+
+    /// Verify that `runtimeServiceAccount` has the accessor role on `name`.
+    /// Returns true on confirmed access, false if the binding is missing.
+    /// Throws `AIBDeployError` on tool / auth failure so callers can surface it.
+    func validateSecretAccess(
+        name: String,
+        runtimeServiceAccount: String,
+        targetConfig: AIBDeployTargetConfig
+    ) async throws -> Bool
+
+    /// Grant `runtimeServiceAccount` the accessor role on `name`. Idempotent:
+    /// re-binding an already-granted role is treated as success.
+    /// Throws `AIBDeployError` on tool / auth / permission failure.
+    func grantSecretAccess(
+        name: String,
+        runtimeServiceAccount: String,
+        targetConfig: AIBDeployTargetConfig
+    ) async throws
+
     /// List every service currently deployed under this provider/project.
     /// Includes services in any region — drift detection compares against `targetConfig.region`.
     /// Throws `AIBDeployError` on tool / auth failure so callers can surface it in the UI.
@@ -166,6 +224,11 @@ extension DeploymentProvider {
         targetConfig: AIBDeployTargetConfig
     ) async -> Set<String> { [] }
 
+    public func existingEnvVars(
+        serviceName: String,
+        targetConfig: AIBDeployTargetConfig
+    ) async -> [String: String] { [:] }
+
     public func listDeployedServices(
         targetConfig: AIBDeployTargetConfig
     ) async throws -> [DeployedServiceInfo] {
@@ -209,5 +272,49 @@ extension DeploymentProvider {
                 message: "Provider '\(providerID)' does not support tailing service logs."
             ))
         }
+    }
+
+    // MARK: - Secrets (default no-op implementations)
+    //
+    // Providers without a managed secret store treat declared `SecretRef`s as
+    // unsupported. The default `setSecretsArgs` returns an empty arg list
+    // (silently dropping mounts), and the upload / access methods throw so the
+    // pipeline halts before attempting an unsupported operation.
+
+    public func setSecretsArgs(
+        declaredSecretRefs: [String: SecretRef],
+        targetConfig: AIBDeployTargetConfig
+    ) -> [String] { [] }
+
+    public func upsertSecret(
+        name: String,
+        value: String,
+        targetConfig: AIBDeployTargetConfig
+    ) async throws {
+        throw AIBDeployError(
+            phase: "secrets",
+            message: "Provider '\(providerID)' does not support managed secrets."
+        )
+    }
+
+    public func listSecrets(
+        targetConfig: AIBDeployTargetConfig
+    ) async throws -> Set<String> { [] }
+
+    public func validateSecretAccess(
+        name: String,
+        runtimeServiceAccount: String,
+        targetConfig: AIBDeployTargetConfig
+    ) async throws -> Bool { true }
+
+    public func grantSecretAccess(
+        name: String,
+        runtimeServiceAccount: String,
+        targetConfig: AIBDeployTargetConfig
+    ) async throws {
+        throw AIBDeployError(
+            phase: "secrets",
+            message: "Provider '\(providerID)' does not support granting secret access."
+        )
     }
 }

@@ -1602,6 +1602,110 @@ final class AgentsInBlackAppModel {
         }
     }
 
+    func updateServiceEnv(namespacedServiceID: String, env: [String: String]) async {
+        guard let workspace else { return }
+        do {
+            try AIBWorkspaceCore.updateServiceEnv(
+                workspaceRoot: workspace.rootURL.path,
+                namespacedServiceID: namespacedServiceID,
+                env: env
+            )
+            let syncResult = try AIBWorkspaceCore.syncWorkspace(workspaceRoot: workspace.rootURL.path)
+            await finalizeUserInitiatedSync(syncResult, workspaceRoot: workspace.rootURL)
+        } catch {
+            setError("Failed to update env: \(error.localizedDescription)")
+        }
+    }
+
+    func updateServiceLocalEnv(namespacedServiceID: String, localEnv: [String: String]) async {
+        guard let workspace else { return }
+        do {
+            try AIBWorkspaceCore.updateServiceLocalEnv(
+                workspaceRoot: workspace.rootURL.path,
+                namespacedServiceID: namespacedServiceID,
+                localEnv: localEnv
+            )
+            let syncResult = try AIBWorkspaceCore.syncWorkspace(workspaceRoot: workspace.rootURL.path)
+            await finalizeUserInitiatedSync(syncResult, workspaceRoot: workspace.rootURL)
+        } catch {
+            setError("Failed to update local_env: \(error.localizedDescription)")
+        }
+    }
+
+    func updateServiceDeployEnv(namespacedServiceID: String, deployEnv: [String: String]) async {
+        guard let workspace else { return }
+        do {
+            try AIBWorkspaceCore.updateServiceDeployEnv(
+                workspaceRoot: workspace.rootURL.path,
+                namespacedServiceID: namespacedServiceID,
+                deployEnv: deployEnv
+            )
+            let syncResult = try AIBWorkspaceCore.syncWorkspace(workspaceRoot: workspace.rootURL.path)
+            await finalizeUserInitiatedSync(syncResult, workspaceRoot: workspace.rootURL)
+        } catch {
+            setError("Failed to update deploy_env: \(error.localizedDescription)")
+        }
+    }
+
+    /// Replace a service's full SecretRef map (env-key → backing secret).
+    func updateServiceSecrets(
+        namespacedServiceID: String,
+        secrets: [String: AIBServiceSecretRef]
+    ) async {
+        guard let workspace else { return }
+        do {
+            let mapped: [String: WorkspaceRepoSecretRef] = secrets.reduce(into: [:]) { acc, pair in
+                acc[pair.key] = WorkspaceRepoSecretRef(secret: pair.value.secret, version: pair.value.version)
+            }
+            try AIBWorkspaceCore.updateServiceSecrets(
+                workspaceRoot: workspace.rootURL.path,
+                namespacedServiceID: namespacedServiceID,
+                secrets: mapped
+            )
+            let syncResult = try AIBWorkspaceCore.syncWorkspace(workspaceRoot: workspace.rootURL.path)
+            await finalizeUserInitiatedSync(syncResult, workspaceRoot: workspace.rootURL)
+        } catch {
+            setError("Failed to update secrets: \(error.localizedDescription)")
+        }
+    }
+
+    /// Add or replace a single SecretRef binding on a service.
+    func upsertServiceSecret(
+        namespacedServiceID: String,
+        envKey: String,
+        ref: AIBServiceSecretRef
+    ) async {
+        guard let workspace else { return }
+        do {
+            try AIBWorkspaceCore.upsertServiceSecret(
+                workspaceRoot: workspace.rootURL.path,
+                namespacedServiceID: namespacedServiceID,
+                envKey: envKey,
+                ref: WorkspaceRepoSecretRef(secret: ref.secret, version: ref.version)
+            )
+            let syncResult = try AIBWorkspaceCore.syncWorkspace(workspaceRoot: workspace.rootURL.path)
+            await finalizeUserInitiatedSync(syncResult, workspaceRoot: workspace.rootURL)
+        } catch {
+            setError("Failed to update secret '\(envKey)': \(error.localizedDescription)")
+        }
+    }
+
+    /// Remove a single SecretRef binding from a service.
+    func removeServiceSecret(namespacedServiceID: String, envKey: String) async {
+        guard let workspace else { return }
+        do {
+            try AIBWorkspaceCore.removeServiceSecret(
+                workspaceRoot: workspace.rootURL.path,
+                namespacedServiceID: namespacedServiceID,
+                envKey: envKey
+            )
+            let syncResult = try AIBWorkspaceCore.syncWorkspace(workspaceRoot: workspace.rootURL.path)
+            await finalizeUserInitiatedSync(syncResult, workspaceRoot: workspace.rootURL)
+        } catch {
+            setError("Failed to remove secret '\(envKey)': \(error.localizedDescription)")
+        }
+    }
+
     // MARK: - Skill Management (Workspace)
 
     /// Import a skill from the user library into the workspace and sync.
@@ -2293,8 +2397,8 @@ final class AgentsInBlackAppModel {
             appendDeployLogLine(level: .info, message: "Generating deploy plan...")
         case .reviewing:
             appendDeployLogLine(level: .info, message: "Deploy plan ready for review")
-        case .secretsInput(_, let requiredSecrets):
-            appendDeployLogLine(level: .info, message: "Secrets required: \(requiredSecrets.joined(separator: ", "))")
+        case .secretsInput(_, let unresolvedSecrets):
+            appendDeployLogLine(level: .info, message: "Secrets required: \(unresolvedSecrets.joined(separator: ", "))")
         case .applying:
             appendDeployLogLine(level: .info, message: "Applying deploy plan...")
         case .completed(let result):

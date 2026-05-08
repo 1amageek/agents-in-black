@@ -123,6 +123,8 @@ private struct FlowNodeInspectorSection: View {
                 }
             }
 
+            ServiceEnvironmentEditor(model: model, service: service)
+
             DeployResourcesInspectorSection(kind: service.serviceKind)
         }
     }
@@ -417,6 +419,8 @@ private struct ServiceInspectorSection: View {
                 ExecutionDirectoryInspectorSection(model: model, service: service)
                 SkillsInspectorSection(model: model, service: service)
             }
+
+            ServiceEnvironmentEditor(model: model, service: service)
 
             DeployResourcesInspectorSection(kind: service.serviceKind)
 

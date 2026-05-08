@@ -37,6 +37,15 @@ public struct AIBServiceModel: Identifiable, Hashable, Sendable {
     }
     /// Explicitly configured model (nil = use default).
     public var configuredModel: String?
+    /// Universal env vars from `workspace.yaml` (applied in both local and deploy).
+    public var env: [String: String]
+    /// Local-only env vars (emulator hosts, dev secrets). Never sent to deploy.
+    public var localEnv: [String: String]
+    /// Deploy-only env vars (production overrides). Never used locally.
+    public var deployEnv: [String: String]
+    /// SecretRef bindings (env-key → backing Secret Manager secret name + optional version).
+    /// Empty when the service does not declare any secrets.
+    public var secrets: [String: AIBServiceSecretRef]
 
     /// Default LLM model for agent services.
     public static let defaultAgentModel = "claude-sonnet-4-6"
@@ -61,7 +70,11 @@ public struct AIBServiceModel: Identifiable, Hashable, Sendable {
         nativeSkillIDs: [String] = [],
         executionDirectoryPath: String? = nil,
         executionDirectoryEntries: [AIBExecutionDirectoryEntry] = [],
-        model: String? = nil
+        model: String? = nil,
+        env: [String: String] = [:],
+        localEnv: [String: String] = [:],
+        deployEnv: [String: String] = [:],
+        secrets: [String: AIBServiceSecretRef] = [:]
     ) {
         self.repoID = repoID
         self.repoName = repoName
@@ -84,5 +97,22 @@ public struct AIBServiceModel: Identifiable, Hashable, Sendable {
         self.executionDirectoryPath = executionDirectoryPath
         self.executionDirectoryEntries = executionDirectoryEntries
         self.configuredModel = model
+        self.env = env
+        self.localEnv = localEnv
+        self.deployEnv = deployEnv
+        self.secrets = secrets
+    }
+}
+
+/// View-layer mirror of `AIBConfig.SecretRef` / `WorkspaceRepoSecretRef`.
+/// Lives in `AIBCore` so the SwiftUI app target can read secrets without
+/// importing AIBConfig or AIBWorkspace directly.
+public struct AIBServiceSecretRef: Hashable, Sendable {
+    public var secret: String
+    public var version: String?
+
+    public init(secret: String, version: String? = nil) {
+        self.secret = secret
+        self.version = version
     }
 }

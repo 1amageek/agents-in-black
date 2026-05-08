@@ -4,7 +4,7 @@ import SwiftUI
 /// View for entering secret values required by services before deployment.
 struct DeploySecretsInputView: View {
     let plan: AIBDeployPlan
-    let requiredSecrets: [String]
+    let unresolvedSecrets: [String]
     @Bindable var model: AgentsInBlackAppModel
     @State private var secretValues: [String: String] = [:]
 
@@ -22,7 +22,7 @@ struct DeploySecretsInputView: View {
             bottomBar
         }
         .onAppear {
-            for name in requiredSecrets {
+            for name in unresolvedSecrets {
                 secretValues[name] = ""
             }
         }
@@ -52,7 +52,7 @@ struct DeploySecretsInputView: View {
 
     private var secretFieldsSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            ForEach(Array(requiredSecrets.enumerated()), id: \.offset) { _, name in
+            ForEach(Array(unresolvedSecrets.enumerated()), id: \.offset) { _, name in
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 8) {
                         Text(name)
@@ -89,12 +89,12 @@ struct DeploySecretsInputView: View {
                 .foregroundStyle(.secondary)
 
             VStack(alignment: .leading, spacing: 4) {
-                ForEach(plan.services.filter { !$0.requiredSecrets.isEmpty }, id: \.id) { service in
+                ForEach(plan.services.filter { !$0.unresolvedSecrets.isEmpty }, id: \.id) { service in
                     HStack(spacing: 8) {
                         Text(service.deployedServiceName)
                             .font(.system(.caption, design: .monospaced))
                         Spacer()
-                        Text(service.requiredSecrets.joined(separator: ", "))
+                        Text(service.unresolvedSecrets.joined(separator: ", "))
                             .font(.caption2)
                             .foregroundStyle(.tertiary)
                     }
@@ -132,21 +132,21 @@ struct DeploySecretsInputView: View {
     // MARK: - Helpers
 
     private var allSecretsProvided: Bool {
-        requiredSecrets.allSatisfy { name in
+        unresolvedSecrets.allSatisfy { name in
             guard let value = secretValues[name] else { return false }
             return !value.isEmpty
         }
     }
 
     private var missingCount: Int {
-        requiredSecrets.filter { name in
+        unresolvedSecrets.filter { name in
             guard let value = secretValues[name] else { return true }
             return value.isEmpty
         }.count
     }
 
     private var hasGeneratableSecrets: Bool {
-        requiredSecrets.contains { DeploySecretValueGenerator.canGenerate(name: $0) }
+        unresolvedSecrets.contains { DeploySecretValueGenerator.canGenerate(name: $0) }
     }
 
     private func binding(for name: String) -> Binding<String> {

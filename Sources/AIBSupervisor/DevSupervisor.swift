@@ -353,17 +353,19 @@ public actor DevSupervisor {
         runtimes[id] = runtime
 
         var service = runtime.service
-        for (key, value) in additionalEnvironment where service.env[key] == nil {
+        let preExisting = service.resolvedEnv(for: .local)
+        for (key, value) in additionalEnvironment where preExisting[key] == nil {
             // Agent services use local Claude Code CLI (subscription auth) in dev mode.
             // Do not inject API keys into agent containers to avoid API billing.
             if service.kind == .agent && (key == "ANTHROPIC_API_KEY" || key == "ANTHROPIC_AUTH_TOKEN") {
                 continue
             }
-            service.env[key] = value
+            // Local-only injection — never let dev secrets leak into deploy.
+            service.localEnv[key] = value
         }
 
         // Log API key prefixes for debugging
-        for (key, value) in service.env where key.contains("API_KEY") || key.contains("APIKEY") {
+        for (key, value) in service.resolvedEnv(for: .local) where key.contains("API_KEY") || key.contains("APIKEY") {
             let prefix = String(value.prefix(20))
             logger.info("Env \(key)=\(prefix)…", metadata: ["service_id": .string(id.rawValue)])
         }

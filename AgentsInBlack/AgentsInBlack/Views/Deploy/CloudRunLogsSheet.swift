@@ -1,4 +1,5 @@
 import AIBCore
+import AppKit
 import SwiftUI
 
 struct CloudRunLogsSheet: View {
@@ -39,6 +40,7 @@ struct CloudRunLogsSheet: View {
             modeBar
             Divider()
             content
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(minWidth: 720, minHeight: 480)
         .task {
@@ -47,6 +49,18 @@ struct CloudRunLogsSheet: View {
         .onDisappear {
             controller.stopTail()
         }
+    }
+
+    private func copyAllLogsToPasteboard() {
+        // Snapshot ordering reverses chronologically (newest first); flip back so
+        // pasted text reads top-to-bottom in time order.
+        let text = controller.entries
+            .reversed()
+            .map(formatEntryLine)
+            .joined(separator: "\n")
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
     }
 
     private var header: some View {
@@ -66,6 +80,13 @@ struct CloudRunLogsSheet: View {
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
             }
+            Button {
+                copyAllLogsToPasteboard()
+            } label: {
+                Label("Copy", systemImage: "doc.on.doc")
+            }
+            .disabled(controller.entries.isEmpty)
+            .help("Copy all visible log entries to the clipboard")
             Button("Close", action: onClose)
                 .keyboardShortcut(.cancelAction)
         }
@@ -224,6 +245,44 @@ struct CloudRunLogsSheet: View {
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 6)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+        .contextMenu {
+            Button {
+                copyEntryToPasteboard(entry)
+            } label: {
+                Label("Copy Line", systemImage: "doc.on.doc")
+            }
+            Button {
+                copyMessageToPasteboard(entry)
+            } label: {
+                Label("Copy Message Only", systemImage: "text.bubble")
+            }
+            Divider()
+            Button {
+                copyAllLogsToPasteboard()
+            } label: {
+                Label("Copy All Logs", systemImage: "doc.on.doc.fill")
+            }
+        }
+    }
+
+    private func formatEntryLine(_ entry: CloudLogEntry) -> String {
+        let timestamp = entry.timestamp.formatted(.iso8601)
+        let revision = entry.revisionName.map { " [\($0)]" } ?? ""
+        return "[\(timestamp)] \(entry.severity.uppercased())\(revision) \(entry.message)"
+    }
+
+    private func copyEntryToPasteboard(_ entry: CloudLogEntry) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(formatEntryLine(entry), forType: .string)
+    }
+
+    private func copyMessageToPasteboard(_ entry: CloudLogEntry) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(entry.message, forType: .string)
     }
 
     @ViewBuilder

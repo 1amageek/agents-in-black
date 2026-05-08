@@ -1449,6 +1449,19 @@ func deployPlanProjectsAssignedSkillBundlesIntoRuntimeDirectories() async throws
         encoding: .utf8
     )
 
+    // Repo-level skill (shipped alongside agent code) — folded into the plugin bundle
+    // so the SDK's local-plugin loader can discover it at runtime.
+    let repoSkillsDir = repo.appendingPathComponent("skills/local-helper", isDirectory: true)
+    try FileManager.default.createDirectory(at: repoSkillsDir, withIntermediateDirectories: true)
+    try """
+    ---
+    name: local-helper
+    description: Local helper skill bundled with the agent code
+    ---
+
+    Helper instructions go here.
+    """.write(to: repoSkillsDir.appendingPathComponent("SKILL.md"), atomically: true, encoding: .utf8)
+
     let provider = MockDeploymentProvider()
     let targetConfig = AIBDeployTargetConfig(providerID: provider.providerID, region: "us-central1")
     let plan = try await AIBDeployService.generatePlan(
@@ -1466,21 +1479,31 @@ func deployPlanProjectsAssignedSkillBundlesIntoRuntimeDirectories() async throws
     #expect(skillPaths.contains("__aib_deploy/claude/skills/deploy/scripts/deploy.sh"))
     #expect(skillPaths.contains("__aib_deploy/agents/skills/deploy/agents/openai.yaml"))
     #expect(skillPaths.contains("__aib_deploy/skills/deploy/SKILL.md"))
-    #expect(pluginPaths.contains(".claude-plugin/plugin.json"))
-    #expect(pluginPaths.contains(".mcp.json"))
-    #expect(pluginPaths.contains("__aib_deploy/claude/skills/deploy/SKILL.md"))
+    // Plugin bundle artifacts now live under the staged `__aib_deploy/plugin/` build-context root.
+    #expect(pluginPaths.contains("__aib_deploy/plugin/.claude-plugin/plugin.json"))
+    #expect(pluginPaths.contains("__aib_deploy/plugin/.mcp.json"))
+    #expect(pluginPaths.contains("__aib_deploy/plugin/template.json"))
+    #expect(pluginPaths.contains("__aib_deploy/plugin/binding.json"))
+    // Repo-level `<repo>/skills/<id>/...` is folded into the plugin so the SDK can discover it.
+    #expect(pluginPaths.contains("__aib_deploy/plugin/skills/local-helper/SKILL.md"))
+    // The agent gets the plugin path and unattended permission-bypass contract.
+    #expect(service.envVars["AIB_PLUGIN_DIR"] == "/app/.aib-plugin")
+    #expect(service.envVars["AIB_AGENT_PERMISSION_MODE"] == "bypassPermissions")
+    #expect(service.envVars["AIB_AGENT_ALLOW_DANGEROUSLY_SKIP_PERMISSIONS"] == "true")
     #expect(executionPaths.contains("__aib_deploy/claude/commands/deploy.md"))
     #expect(executionPaths.contains("__aib_deploy/root/CLAUDE.md"))
 
     try AIBDeployService.writeArtifacts(plan: plan, workspaceRoot: root.path)
 
+    // Workspace-level skill files now land under `<service>/skills/...` (not under plugin/)
+    // since the plugin no longer aliases them.
     let stagedSkillFile = root
         .appendingPathComponent(".aib")
         .appendingPathComponent("generated")
         .appendingPathComponent("deploy")
         .appendingPathComponent("services")
         .appendingPathComponent(service.deployedServiceName)
-        .appendingPathComponent("plugin")
+        .appendingPathComponent("skills")
         .appendingPathComponent("__aib_deploy")
         .appendingPathComponent("claude")
         .appendingPathComponent("skills")
@@ -1488,6 +1511,20 @@ func deployPlanProjectsAssignedSkillBundlesIntoRuntimeDirectories() async throws
         .appendingPathComponent("scripts")
         .appendingPathComponent("deploy.sh")
     #expect(FileManager.default.fileExists(atPath: stagedSkillFile.path))
+
+    // Repo-level skill is materialized inside the plugin's local inspection copy
+    // with the staging prefix stripped.
+    let stagedRepoSkill = root
+        .appendingPathComponent(".aib")
+        .appendingPathComponent("generated")
+        .appendingPathComponent("deploy")
+        .appendingPathComponent("services")
+        .appendingPathComponent(service.deployedServiceName)
+        .appendingPathComponent("plugin")
+        .appendingPathComponent("skills")
+        .appendingPathComponent("local-helper")
+        .appendingPathComponent("SKILL.md")
+    #expect(FileManager.default.fileExists(atPath: stagedRepoSkill.path))
 
     let stagedPluginConfig = root
         .appendingPathComponent(".aib")
@@ -1532,6 +1569,111 @@ func deployPlanProjectsAssignedSkillBundlesIntoRuntimeDirectories() async throws
         .appendingPathComponent("commands")
         .appendingPathComponent("deploy.md")
     #expect(FileManager.default.fileExists(atPath: stagedExecutionFile.path))
+
+    // The deploy-time .dockerignore enforcement must un-ignore __aib_deploy/ so user
+    // excludes like `*.md` cannot suppress staged plugin artifacts (e.g. SKILL.md).
+    let dockerignoreURL = repo.appendingPathComponent(".dockerignore")
+    let dockerignoreContent = try String(contentsOf: dockerignoreURL, encoding: .utf8)
+    #expect(dockerignoreContent.contains("!__aib_deploy"))
+    #expect(dockerignoreContent.contains("!__aib_deploy/**"))
+}
+
+@Test(.timeLimit(.minutes(1)))
+func deployPluginKeepsServiceRefBasedMCPNamesStable() async throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("aib-deploy-plugin-mcp-names-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer {
+        do {
+            try FileManager.default.removeItem(at: root)
+        } catch {
+            // Best-effort cleanup for temp test directory.
+        }
+    }
+
+    let agentRepo = root.appendingPathComponent("agent", isDirectory: true)
+    let mcpRepo = root.appendingPathComponent("proposal-mcp", isDirectory: true)
+    for repo in [agentRepo, mcpRepo] {
+        try FileManager.default.createDirectory(at: repo.appendingPathComponent(".git"), withIntermediateDirectories: true)
+        try """
+        // swift-tools-version: 6.0
+        import PackageDescription
+
+        let package = Package(
+            name: "\(repo.lastPathComponent)",
+            targets: [.executableTarget(name: "\(repo.lastPathComponent)")]
+        )
+        """.write(to: repo.appendingPathComponent("Package.swift"), atomically: true, encoding: .utf8)
+        try "FROM swift:6.2-jammy\nWORKDIR /app\n".write(
+            to: repo.appendingPathComponent("Dockerfile"),
+            atomically: true,
+            encoding: .utf8
+        )
+    }
+
+    let workspace = AIBWorkspaceConfig(
+        workspaceName: "test",
+        repos: [
+            WorkspaceRepo(
+                name: "agent",
+                path: "agent",
+                runtime: .swift,
+                framework: .unknown,
+                packageManager: .swiftpm,
+                status: .discoverable,
+                detectionConfidence: .high,
+                services: [
+                    WorkspaceRepoServiceConfig(
+                        id: "node",
+                        kind: "agent",
+                        mountPath: "/agent/node",
+                        run: ["swift", "run"],
+                        connections: WorkspaceRepoConnectionsConfig(
+                            mcpServers: [WorkspaceRepoConnectionTarget(serviceRef: "proposal-mcp/main")]
+                        )
+                    ),
+                ]
+            ),
+            WorkspaceRepo(
+                name: "proposal-mcp",
+                path: "proposal-mcp",
+                runtime: .swift,
+                framework: .unknown,
+                packageManager: .swiftpm,
+                status: .discoverable,
+                detectionConfidence: .high,
+                services: [
+                    WorkspaceRepoServiceConfig(
+                        id: "main",
+                        kind: "mcp",
+                        mountPath: "/proposal-mcp",
+                        run: ["swift", "run"],
+                        mcp: WorkspaceRepoMCPConfig(path: "/mcp")
+                    ),
+                ]
+            ),
+        ]
+    )
+    try AIBWorkspaceManager.saveWorkspace(workspace, workspaceRoot: root.path)
+
+    let provider = MockDeploymentProvider()
+    let targetConfig = AIBDeployTargetConfig(providerID: provider.providerID, region: "us-central1")
+    let plan = try await AIBDeployService.generatePlan(
+        workspaceRoot: root.path,
+        targetConfig: targetConfig,
+        provider: provider
+    )
+
+    let agentService = try #require(plan.services.first(where: { $0.id == "agent/node" }))
+    let mcpConfigArtifact = try #require(
+        agentService.artifacts.claudeCodePluginArtifacts.first(where: {
+            $0.relativePath == "__aib_deploy/plugin/.mcp.json"
+        })
+    )
+    let mcpConfig = String(decoding: mcpConfigArtifact.content, as: UTF8.self)
+
+    #expect(mcpConfig.contains("\"proposal-mcp-main\""))
+    #expect(!mcpConfig.contains("\"example.invalid-mcp\""))
 }
 
 @Test(.timeLimit(.minutes(1)))

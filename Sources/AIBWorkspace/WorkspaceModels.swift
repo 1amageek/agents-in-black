@@ -105,6 +105,17 @@ public struct WorkspaceRepoServiceConfig: Codable, Sendable, Equatable {
     public var pathRewrite: String?
     public var cookiePathRewrite: Bool?
     public var env: [String: String]?
+    /// Local-only env vars (emulator hosts, debug flags). Merged on top of `env` for local runs;
+    /// never included in deploy. Keep `*_EMULATOR_HOST` and similar dev-only values here.
+    public var localEnv: [String: String]?
+    /// Deploy-only env vars (production overrides). Merged on top of `env` for deploy;
+    /// never included locally.
+    public var deployEnv: [String: String]?
+    /// Secret references mounted as env vars at deploy time. Keys are the env var
+    /// names exposed to the container; values describe which secret/version
+    /// to mount in the provider's secret store. Values themselves are never
+    /// committed — only references.
+    public var secrets: [String: WorkspaceRepoSecretRef]?
     public var health: WorkspaceRepoHealthConfig?
     public var restart: WorkspaceRepoRestartConfig?
     public var concurrency: WorkspaceRepoConcurrencyConfig?
@@ -136,6 +147,9 @@ public struct WorkspaceRepoServiceConfig: Codable, Sendable, Equatable {
         pathRewrite: String? = nil,
         cookiePathRewrite: Bool? = nil,
         env: [String: String]? = nil,
+        localEnv: [String: String]? = nil,
+        deployEnv: [String: String]? = nil,
+        secrets: [String: WorkspaceRepoSecretRef]? = nil,
         health: WorkspaceRepoHealthConfig? = nil,
         restart: WorkspaceRepoRestartConfig? = nil,
         concurrency: WorkspaceRepoConcurrencyConfig? = nil,
@@ -162,6 +176,9 @@ public struct WorkspaceRepoServiceConfig: Codable, Sendable, Equatable {
         self.pathRewrite = pathRewrite
         self.cookiePathRewrite = cookiePathRewrite
         self.env = env
+        self.localEnv = localEnv
+        self.deployEnv = deployEnv
+        self.secrets = secrets
         self.health = health
         self.restart = restart
         self.concurrency = concurrency
@@ -173,6 +190,18 @@ public struct WorkspaceRepoServiceConfig: Codable, Sendable, Equatable {
         self.endpoints = endpoints
         self.skills = skills
         self.model = model
+    }
+}
+
+/// YAML-layer mirror of `AIBConfig.SecretRef`. Kept in `AIBWorkspace` so the
+/// workspace codec remains free of `AIBConfig` cross-imports inside the DTO.
+public struct WorkspaceRepoSecretRef: Codable, Sendable, Equatable, Hashable {
+    public var secret: String
+    public var version: String?
+
+    public init(secret: String, version: String? = nil) {
+        self.secret = secret
+        self.version = version
     }
 }
 

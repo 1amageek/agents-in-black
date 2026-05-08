@@ -251,7 +251,11 @@ public final class WorkspaceDiscoveryService {
                         nativeSkillIDs: nativeSkills.map(\.id),
                         executionDirectoryPath: executionDirectoryURL.path(percentEncoded: false),
                         executionDirectoryEntries: executionEntries,
-                        model: service.model
+                        model: service.model,
+                        env: service.env ?? [:],
+                        localEnv: service.localEnv ?? [:],
+                        deployEnv: service.deployEnv ?? [:],
+                        secrets: Self.mapSecrets(service.secrets)
                     ))
                 }
             } else {
@@ -267,6 +271,18 @@ public final class WorkspaceDiscoveryService {
             }
         }
         return result
+    }
+
+    /// Bridges the workspace YAML's secret bindings into the view-layer model.
+    /// Kept static + tiny because the discovery service is rebuilt frequently.
+    static func mapSecrets(_ raw: [String: WorkspaceRepoSecretRef]?) -> [String: AIBServiceSecretRef] {
+        guard let raw else { return [:] }
+        var out: [String: AIBServiceSecretRef] = [:]
+        out.reserveCapacity(raw.count)
+        for (key, value) in raw {
+            out[key] = AIBServiceSecretRef(secret: value.secret, version: value.version)
+        }
+        return out
     }
 
     private func resolveExecutionDirectoryURL(serviceCWD: String?, repoRootURL: URL) -> URL {

@@ -1,3 +1,4 @@
+import AIBConfig
 import Foundation
 
 /// GCP Cloud Run deployment provider.
@@ -578,22 +579,47 @@ public struct GCPCloudRunProvider: DeploymentProvider, Sendable {
             args.append("--no-allow-unauthenticated")
         }
 
-        // Merge regular env vars + secrets into a single --set-env-vars.
-        // Use gcloud's ^||^ custom delimiter to avoid values containing commas
-        // or other special characters from breaking the parser.
-        var allEnvVars = service.envVars.filter { !reservedCloudRunEnvKeys.contains($0.key) }
-        for (key, value) in secrets {
+        // Merge regular env vars + user-provided secret values and apply with
+        // --set-env-vars so the Cloud Run env is replaced authoritatively.
+        // --update-env-vars only merges, which would leave previously-set keys
+        // (e.g. a leaked FIRESTORE_EMULATOR_HOST) on the service after they are
+        // removed from workspace.yaml. Use gcloud's ^||^ custom delimiter so
+        // values containing commas don't break the parser.
+        //
+        // Declared SecretRefs are mounted via --set-secrets (separate Cloud
+        // Run mechanism); strip any collision out of the env-var dict so
+        // gcloud doesn't reject the deploy with a duplicate-key error.
+        let declaredSecretKeys = Set(service.declaredSecretRefs.keys)
+        var allEnvVars = service.envVars.filter {
+            !reservedCloudRunEnvKeys.contains($0.key) && !declaredSecretKeys.contains($0.key)
+        }
+        for (key, value) in secrets where !declaredSecretKeys.contains(key) {
             allEnvVars[key] = value
         }
 
-        if !allEnvVars.isEmpty {
+        if allEnvVars.isEmpty {
+            args.append("--clear-env-vars")
+        } else {
             let delimiter = "||"
             let envString = "^" + delimiter + "^"
                 + allEnvVars
                 .sorted(by: { $0.key < $1.key })
                 .map { "\($0.key)=\($0.value)" }
                 .joined(separator: delimiter)
-            args.append(contentsOf: ["--update-env-vars", envString])
+            args.append(contentsOf: ["--set-env-vars", envString])
+        }
+
+        // Mount declared SecretRefs from Secret Manager. Authoritative like
+        // --set-env-vars: when the workspace declares no secrets, --clear-secrets
+        // must run so previously-mounted entries are removed from the service.
+        let secretArgs = setSecretsArgs(
+            declaredSecretRefs: service.declaredSecretRefs,
+            targetConfig: targetConfig
+        )
+        if secretArgs.isEmpty {
+            args.append("--clear-secrets")
+        } else {
+            args.append(contentsOf: secretArgs)
         }
 
         return [
@@ -694,8 +720,16 @@ public struct GCPCloudRunProvider: DeploymentProvider, Sendable {
         serviceName: String,
         targetConfig: AIBDeployTargetConfig
     ) async -> Set<String> {
+        let pairs = await existingEnvVars(serviceName: serviceName, targetConfig: targetConfig)
+        return Set(pairs.keys)
+    }
+
+    public func existingEnvVars(
+        serviceName: String,
+        targetConfig: AIBDeployTargetConfig
+    ) async -> [String: String] {
         let gcpProject = targetConfig.providerConfig["gcpProject"] ?? ""
-        guard !gcpProject.isEmpty else { return [] }
+        guard !gcpProject.isEmpty else { return [:] }
 
         // Use JSON output for reliable parsing
         let command = "gcloud run services describe \(serviceName)"
@@ -705,14 +739,14 @@ public struct GCPCloudRunProvider: DeploymentProvider, Sendable {
 
         do {
             let result = try await ShellProbe.run(command: command, timeout: .seconds(15))
-            guard result.exitCode == 0, !result.stdout.isEmpty else { return [] }
+            guard result.exitCode == 0, !result.stdout.isEmpty else { return [:] }
 
-            guard let data = result.stdout.data(using: .utf8) else { return [] }
+            guard let data = result.stdout.data(using: .utf8) else { return [:] }
             let jsonObject: Any
             do {
                 jsonObject = try JSONSerialization.jsonObject(with: data)
             } catch {
-                return []
+                return [:]
             }
 
             let envEntries: [[String: Any]]
@@ -725,18 +759,200 @@ public struct GCPCloudRunProvider: DeploymentProvider, Sendable {
                 // Fallback for full-service JSON output shape.
                 envEntries = envArray
             } else {
-                return []
+                return [:]
             }
 
-            var names: Set<String> = []
+            // Cloud Run env entries come in two shapes:
+            //   { "name": "FOO", "value": "bar" }                 -- plain
+            //   { "name": "FOO", "valueFrom": { "secretKeyRef": ... } } -- mounted secret
+            // Plain values are what we want to carry forward to avoid wiping on
+            // authoritative --set-env-vars; mounted secrets are managed via
+            // --set-secrets / --clear-secrets and must NOT be returned here, or
+            // they would be re-set as plain env vars on the next deploy.
+            var pairs: [String: String] = [:]
             for entry in envEntries {
-                if let name = entry["name"] as? String, !name.isEmpty {
-                    names.insert(name)
+                guard let name = entry["name"] as? String, !name.isEmpty else { continue }
+                if let value = entry["value"] as? String {
+                    pairs[name] = value
                 }
             }
-            return names
+            return pairs
         } catch {
-            return []
+            return [:]
+        }
+    }
+
+    // MARK: - Secrets (Secret Manager)
+
+    public func setSecretsArgs(
+        declaredSecretRefs: [String: SecretRef],
+        targetConfig: AIBDeployTargetConfig
+    ) -> [String] {
+        guard !declaredSecretRefs.isEmpty else { return [] }
+        // Cloud Run accepts `--set-secrets KEY=secret:version[,KEY=...]`. Sort
+        // entries so the rendered command is stable across plan generations.
+        let entries = declaredSecretRefs
+            .sorted { $0.key < $1.key }
+            .map { key, ref in "\(key)=\(ref.secret):\(ref.resolvedVersion)" }
+            .joined(separator: ",")
+        return ["--set-secrets", entries]
+    }
+
+    public func upsertSecret(
+        name: String,
+        value: String,
+        targetConfig: AIBDeployTargetConfig
+    ) async throws {
+        let gcpProject = requiredGCPProject(from: targetConfig)
+        let nameForShell = shellQuote(name)
+        let projectForShell = shellQuote(gcpProject)
+        // Pipe the value through stdin to avoid leaking it to argv / process
+        // listings. `secrets create` returns ALREADY_EXISTS when the secret
+        // already exists; in that case we skip creation and just add a version.
+        let script = """
+        set -euo pipefail
+        if ! gcloud secrets describe \(nameForShell) --project \(projectForShell) >/dev/null 2>&1; then
+          gcloud secrets create \(nameForShell) \\
+            --replication-policy=automatic \\
+            --project \(projectForShell) \\
+            --quiet
+        fi
+        gcloud secrets versions add \(nameForShell) \\
+          --data-file=- \\
+          --project \(projectForShell) \\
+          --quiet
+        """
+
+        let result: ShellProbe.Result
+        do {
+            result = try await ShellProbe.run(
+                command: script,
+                stdin: value,
+                timeout: .seconds(60)
+            )
+        } catch {
+            throw AIBDeployError(
+                phase: "secrets",
+                message: "Failed to upload secret '\(name)': \(error.localizedDescription)"
+            )
+        }
+
+        guard result.exitCode == 0 else {
+            throw AIBDeployError(
+                phase: "secrets",
+                message: "gcloud secrets versions add for '\(name)' exited with status \(result.exitCode). \(result.stderr)"
+            )
+        }
+    }
+
+    public func listSecrets(
+        targetConfig: AIBDeployTargetConfig
+    ) async throws -> Set<String> {
+        let gcpProject = requiredGCPProject(from: targetConfig)
+        let command = "gcloud secrets list"
+            + " --project=\(gcpProject)"
+            + " --format='value(name)'"
+            + " --quiet"
+
+        let result: ShellProbe.Result
+        do {
+            result = try await ShellProbe.run(command: command, timeout: .seconds(60))
+        } catch {
+            throw AIBDeployError(
+                phase: "secrets",
+                message: "Failed to list Secret Manager secrets: \(error.localizedDescription)"
+            )
+        }
+
+        guard result.exitCode == 0 else {
+            throw AIBDeployError(
+                phase: "secrets",
+                message: "gcloud secrets list exited with status \(result.exitCode). \(result.stderr)"
+            )
+        }
+
+        let names = result.stdout
+            .split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        return Set(names)
+    }
+
+    public func validateSecretAccess(
+        name: String,
+        runtimeServiceAccount: String,
+        targetConfig: AIBDeployTargetConfig
+    ) async throws -> Bool {
+        let gcpProject = requiredGCPProject(from: targetConfig)
+        // `secrets get-iam-policy` returns the policy as JSON. The accessor role
+        // is `roles/secretmanager.secretAccessor`; we look for a binding with
+        // that role and `serviceAccount:<sa>` in members.
+        let command = "gcloud secrets get-iam-policy \(shellQuote(name))"
+            + " --project=\(shellQuote(gcpProject))"
+            + " --format=json"
+
+        let result: ShellProbe.Result
+        do {
+            result = try await ShellProbe.run(command: command, timeout: .seconds(30))
+        } catch {
+            throw AIBDeployError(
+                phase: "secrets",
+                message: "Failed to read IAM policy for secret '\(name)': \(error.localizedDescription)"
+            )
+        }
+
+        guard result.exitCode == 0 else {
+            throw AIBDeployError(
+                phase: "secrets",
+                message: "gcloud secrets get-iam-policy exited with status \(result.exitCode). \(result.stderr)"
+            )
+        }
+
+        guard let data = result.stdout.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let bindings = json["bindings"] as? [[String: Any]] else {
+            return false
+        }
+
+        let member = "serviceAccount:\(runtimeServiceAccount)"
+        for binding in bindings {
+            guard let role = binding["role"] as? String,
+                  role == "roles/secretmanager.secretAccessor",
+                  let members = binding["members"] as? [String] else { continue }
+            if members.contains(member) {
+                return true
+            }
+        }
+        return false
+    }
+
+    public func grantSecretAccess(
+        name: String,
+        runtimeServiceAccount: String,
+        targetConfig: AIBDeployTargetConfig
+    ) async throws {
+        let gcpProject = requiredGCPProject(from: targetConfig)
+        let command = "gcloud secrets add-iam-policy-binding \(shellQuote(name))"
+            + " --member=serviceAccount:\(shellQuote(runtimeServiceAccount))"
+            + " --role=roles/secretmanager.secretAccessor"
+            + " --project=\(shellQuote(gcpProject))"
+            + " --quiet"
+
+        let result: ShellProbe.Result
+        do {
+            result = try await ShellProbe.run(command: command, timeout: .seconds(60))
+        } catch {
+            throw AIBDeployError(
+                phase: "secrets",
+                message: "Failed to grant access on '\(name)' to '\(runtimeServiceAccount)': \(error.localizedDescription)"
+            )
+        }
+
+        guard result.exitCode == 0 else {
+            throw AIBDeployError(
+                phase: "secrets",
+                message: "gcloud secrets add-iam-policy-binding exited with status \(result.exitCode). \(result.stderr)"
+            )
         }
     }
 

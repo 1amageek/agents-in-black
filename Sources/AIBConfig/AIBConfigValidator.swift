@@ -96,6 +96,25 @@ public enum AIBConfigValidator {
             if service.health.failureThreshold <= 0 {
                 result.errors.append("service \(service.id): health.failure_threshold must be > 0")
             }
+            for violation in EnvScopeRule.violations(in: service.env) {
+                result.warnings.append(
+                    "service \(service.id): env.\(violation.key) — \(violation.reason). This will block deploy."
+                )
+            }
+            for violation in SecretRefRule.violations(
+                secrets: service.secrets,
+                env: service.env,
+                localEnv: service.localEnv,
+                deployEnv: service.deployEnv
+            ) {
+                let line = "service \(service.id): secrets.\(violation.key) — \(violation.reason) [\(violation.ruleID)]"
+                switch violation.severity {
+                case .error:
+                    result.errors.append(line)
+                case .warning:
+                    result.warnings.append(line)
+                }
+            }
         }
 
         validateMountPrefixCollisions(config.services.map(\.mountPath), errors: &result.errors)

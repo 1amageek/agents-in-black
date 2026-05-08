@@ -443,6 +443,105 @@ public enum AIBWorkspaceManager {
         try saveWorkspace(workspace, workspaceRoot: workspaceRoot)
     }
 
+    /// Replace a service's universal `env` (applied in both local and deploy).
+    public static func updateServiceEnv(
+        workspaceRoot: String,
+        namespacedServiceID: String,
+        env: [String: String]
+    ) throws {
+        try mutateService(workspaceRoot: workspaceRoot, namespacedServiceID: namespacedServiceID) { service in
+            service.env = env.isEmpty ? nil : env
+        }
+    }
+
+    /// Replace a service's `local_env` (merged on top of `env` for local emulator only).
+    public static func updateServiceLocalEnv(
+        workspaceRoot: String,
+        namespacedServiceID: String,
+        localEnv: [String: String]
+    ) throws {
+        try mutateService(workspaceRoot: workspaceRoot, namespacedServiceID: namespacedServiceID) { service in
+            service.localEnv = localEnv.isEmpty ? nil : localEnv
+        }
+    }
+
+    /// Replace a service's `deploy_env` (merged on top of `env` for deploy only).
+    public static func updateServiceDeployEnv(
+        workspaceRoot: String,
+        namespacedServiceID: String,
+        deployEnv: [String: String]
+    ) throws {
+        try mutateService(workspaceRoot: workspaceRoot, namespacedServiceID: namespacedServiceID) { service in
+            service.deployEnv = deployEnv.isEmpty ? nil : deployEnv
+        }
+    }
+
+    /// Replace a service's `secrets` (declared SecretRef bindings).
+    public static func updateServiceSecrets(
+        workspaceRoot: String,
+        namespacedServiceID: String,
+        secrets: [String: WorkspaceRepoSecretRef]
+    ) throws {
+        try mutateService(workspaceRoot: workspaceRoot, namespacedServiceID: namespacedServiceID) { service in
+            service.secrets = secrets.isEmpty ? nil : secrets
+        }
+    }
+
+    /// Add or replace a single SecretRef entry on a service.
+    public static func upsertServiceSecret(
+        workspaceRoot: String,
+        namespacedServiceID: String,
+        envKey: String,
+        ref: WorkspaceRepoSecretRef
+    ) throws {
+        try mutateService(workspaceRoot: workspaceRoot, namespacedServiceID: namespacedServiceID) { service in
+            var current = service.secrets ?? [:]
+            current[envKey] = ref
+            service.secrets = current.isEmpty ? nil : current
+        }
+    }
+
+    /// Remove a single SecretRef entry from a service. No-op if absent.
+    public static func removeServiceSecret(
+        workspaceRoot: String,
+        namespacedServiceID: String,
+        envKey: String
+    ) throws {
+        try mutateService(workspaceRoot: workspaceRoot, namespacedServiceID: namespacedServiceID) { service in
+            guard var current = service.secrets else { return }
+            current.removeValue(forKey: envKey)
+            service.secrets = current.isEmpty ? nil : current
+        }
+    }
+
+    /// Locate a service by `namespace/id`, apply the mutation, validate, and persist.
+    private static func mutateService(
+        workspaceRoot: String,
+        namespacedServiceID: String,
+        mutate: (inout WorkspaceRepoServiceConfig) -> Void
+    ) throws {
+        var workspace = try loadWorkspace(workspaceRoot: workspaceRoot)
+        let parts = namespacedServiceID.split(separator: "/", maxSplits: 1).map(String.init)
+        guard parts.count == 2 else {
+            throw ConfigError("Invalid namespaced service ID", metadata: ["id": namespacedServiceID])
+        }
+        let namespace = parts[0]
+        let localID = parts[1]
+
+        guard let repoIndex = workspace.repos.firstIndex(where: { $0.namespace == namespace }),
+              var services = workspace.repos[repoIndex].services,
+              let serviceIndex = services.firstIndex(where: { $0.id == localID })
+        else {
+            throw ConfigError("Service not found", metadata: ["id": namespacedServiceID])
+        }
+
+        mutate(&services[serviceIndex])
+        workspace.repos[repoIndex].services = services
+
+        try validateWorkspaceMutation(workspaceRoot: workspaceRoot, workspace: workspace)
+        try saveWorkspace(workspace, workspaceRoot: workspaceRoot)
+    }
+
     private static func validateWorkspaceMutation(
         workspaceRoot: String,
         workspace: AIBWorkspaceConfig

@@ -124,34 +124,66 @@ public final class AIBDeployController {
                     return
                 }
 
-                // Phase 3.5: Secrets Input — check remote for already-configured secrets,
-                // then prompt only for missing ones.
+                // Phase 3.5: Secrets Input — pre-populate from the live service so
+                // values entered on a previous deploy are reused. Only prompt for
+                // ones that are not yet on the remote.
+                //
+                // Why pre-populate: deploy uses authoritative `--set-env-vars`,
+                // which replaces the env wholesale. If we skipped already-set
+                // secrets but did NOT carry their values forward, the deploy
+                // would wipe them from the live service. So we fetch the
+                // existing values, merge them into `secretValues`, and only
+                // prompt the user for the names we couldn't fetch.
+                //
+                // Declared SecretRefs are mounted via `--set-secrets` (Secret
+                // Manager-backed) and never appear in `unresolvedSecrets`, so
+                // they are not part of this flow.
                 var secretValues: [String: String] = [:]
-                if plan.hasRequiredSecrets {
-                    // Query each service's existing env vars on the remote
-                    var alreadyConfigured: Set<String> = []
-                    for service in plan.services where !service.requiredSecrets.isEmpty {
-                        let existing = await provider.existingEnvVarNames(
+                if plan.hasUnresolvedSecrets {
+                    var aggregatedExistingEnv: [String: String] = [:]
+                    for service in plan.services where !service.unresolvedSecrets.isEmpty {
+                        let existing = await provider.existingEnvVars(
                             serviceName: service.deployedServiceName,
                             targetConfig: enrichedConfig
                         )
-                        alreadyConfigured.formUnion(existing)
+                        // Last writer wins on collisions across services. The
+                        // SecretsInput dialog deduplicates by name (one input
+                        // per secret name across all services), so we only
+                        // need a single value per name.
+                        for (key, value) in existing {
+                            aggregatedExistingEnv[key] = value
+                        }
                     }
 
-                    let missingSecrets = plan.allRequiredSecrets.filter { !alreadyConfigured.contains($0) }
+                    for name in plan.allUnresolvedSecrets {
+                        if let existingValue = aggregatedExistingEnv[name], !existingValue.isEmpty {
+                            secretValues[name] = existingValue
+                        }
+                    }
 
-                    if !missingSecrets.isEmpty {
-                        self.transitionTo(.secretsInput(plan, requiredSecrets: missingSecrets))
+                    let stillMissing = plan.allUnresolvedSecrets
+                        .filter { secretValues[$0] == nil }
+
+                    if !stillMissing.isEmpty {
+                        self.transitionTo(.secretsInput(plan, unresolvedSecrets: stillMissing))
 
                         let sGate = SecretsGate()
                         self.secretsGate = sGate
                         let result = await sGate.wait()
 
-                        guard let secrets = result else {
+                        guard let userSecrets = result else {
                             self.transitionTo(.cancelled)
                             return
                         }
-                        secretValues = secrets
+                        // Merge user-provided values on top of remote values.
+                        // User input takes precedence so a user can rotate a
+                        // secret by re-entering it (the prompt only fires for
+                        // missing names today, but this keeps the contract
+                        // forward-compatible if the UI gains an "override"
+                        // flow later).
+                        for (key, value) in userSecrets {
+                            secretValues[key] = value
+                        }
                     }
                 }
                 self.providedSecrets = secretValues

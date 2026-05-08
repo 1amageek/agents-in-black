@@ -54,6 +54,14 @@ public struct GatewayConfig: Sendable, Codable, Equatable {
     }
 }
 
+/// Selects which environment variable bucket(s) to merge when materialising
+/// the final env map for a service. `env` is always included; `localEnv` /
+/// `deployEnv` are added only for the matching target.
+public enum EnvTarget: Sendable, Equatable {
+    case local
+    case deploy
+}
+
 public struct ServiceConfig: Sendable, Codable, Equatable {
     public var id: ServiceID
     public var kind: ServiceKind
@@ -68,7 +76,23 @@ public struct ServiceConfig: Sendable, Codable, Equatable {
     public var restartAffects: [ServiceID]
     public var pathRewrite: PathRewriteMode
     public var cookiePathRewrite: Bool
+    /// Environment variables applied in BOTH local emulator and deploy targets.
+    /// Universal vars only — never put `*_EMULATOR_HOST` style dev-only values
+    /// here, or they will leak into production. Use `localEnv` instead.
     public var env: [String: String]
+    /// Local-only environment variables (emulator hosts, debug flags, etc.).
+    /// Merged on top of `env` for `EnvTarget.local`. Never sent to deploy.
+    public var localEnv: [String: String]
+    /// Deploy-only environment variables (production-specific overrides).
+    /// Merged on top of `env` for `EnvTarget.deploy`. Never used locally.
+    public var deployEnv: [String: String]
+    /// Secret references mounted as env vars at deploy time. The literal value
+    /// lives in a provider-managed secret store (Cloud Run: Secret Manager);
+    /// only the reference is committed to `workspace.yaml`. Keys are the env
+    /// var names exposed to the container; values describe which secret/version
+    /// to mount. At local runtime the value is resolved via
+    /// `.aib/secrets.local.yaml` or by fetching from the provider.
+    public var secrets: [String: SecretRef]
     public var health: ServiceHealthConfig
     public var restart: ServiceRestartConfig
     public var concurrency: ServiceConcurrencyConfig
@@ -92,6 +116,9 @@ public struct ServiceConfig: Sendable, Codable, Equatable {
         pathRewrite: PathRewriteMode = .stripPrefix,
         cookiePathRewrite: Bool = true,
         env: [String: String] = [:],
+        localEnv: [String: String] = [:],
+        deployEnv: [String: String] = [:],
+        secrets: [String: SecretRef] = [:],
         health: ServiceHealthConfig,
         restart: ServiceRestartConfig,
         concurrency: ServiceConcurrencyConfig = .init(),
@@ -114,6 +141,9 @@ public struct ServiceConfig: Sendable, Codable, Equatable {
         self.pathRewrite = pathRewrite
         self.cookiePathRewrite = cookiePathRewrite
         self.env = env
+        self.localEnv = localEnv
+        self.deployEnv = deployEnv
+        self.secrets = secrets
         self.health = health
         self.restart = restart
         self.concurrency = concurrency
@@ -121,6 +151,18 @@ public struct ServiceConfig: Sendable, Codable, Equatable {
         self.connections = connections
         self.mcp = mcp
         self.a2a = a2a
+    }
+
+    /// Materialises the effective env map for the given target by merging
+    /// `env` with the target-specific bucket. The target bucket wins on key
+    /// collisions, allowing per-environment overrides.
+    public func resolvedEnv(for target: EnvTarget) -> [String: String] {
+        switch target {
+        case .local:
+            return env.merging(localEnv) { _, new in new }
+        case .deploy:
+            return env.merging(deployEnv) { _, new in new }
+        }
     }
 }
 

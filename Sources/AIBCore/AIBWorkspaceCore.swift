@@ -114,6 +114,80 @@ public enum AIBWorkspaceCore {
         )
     }
 
+    public static func updateServiceEnv(
+        workspaceRoot: String,
+        namespacedServiceID: String,
+        env: [String: String]
+    ) throws {
+        try AIBWorkspaceManager.updateServiceEnv(
+            workspaceRoot: workspaceRoot,
+            namespacedServiceID: namespacedServiceID,
+            env: env
+        )
+    }
+
+    public static func updateServiceLocalEnv(
+        workspaceRoot: String,
+        namespacedServiceID: String,
+        localEnv: [String: String]
+    ) throws {
+        try AIBWorkspaceManager.updateServiceLocalEnv(
+            workspaceRoot: workspaceRoot,
+            namespacedServiceID: namespacedServiceID,
+            localEnv: localEnv
+        )
+    }
+
+    public static func updateServiceDeployEnv(
+        workspaceRoot: String,
+        namespacedServiceID: String,
+        deployEnv: [String: String]
+    ) throws {
+        try AIBWorkspaceManager.updateServiceDeployEnv(
+            workspaceRoot: workspaceRoot,
+            namespacedServiceID: namespacedServiceID,
+            deployEnv: deployEnv
+        )
+    }
+
+    public static func updateServiceSecrets(
+        workspaceRoot: String,
+        namespacedServiceID: String,
+        secrets: [String: WorkspaceRepoSecretRef]
+    ) throws {
+        try AIBWorkspaceManager.updateServiceSecrets(
+            workspaceRoot: workspaceRoot,
+            namespacedServiceID: namespacedServiceID,
+            secrets: secrets
+        )
+    }
+
+    public static func upsertServiceSecret(
+        workspaceRoot: String,
+        namespacedServiceID: String,
+        envKey: String,
+        ref: WorkspaceRepoSecretRef
+    ) throws {
+        try AIBWorkspaceManager.upsertServiceSecret(
+            workspaceRoot: workspaceRoot,
+            namespacedServiceID: namespacedServiceID,
+            envKey: envKey,
+            ref: ref
+        )
+    }
+
+    public static func removeServiceSecret(
+        workspaceRoot: String,
+        namespacedServiceID: String,
+        envKey: String
+    ) throws {
+        try AIBWorkspaceManager.removeServiceSecret(
+            workspaceRoot: workspaceRoot,
+            namespacedServiceID: namespacedServiceID,
+            envKey: envKey
+        )
+    }
+
     public static func updateServiceConnections(
         workspaceRoot: String,
         connectionsByNamespacedServiceID: [String: ServiceConnectionsConfig]
