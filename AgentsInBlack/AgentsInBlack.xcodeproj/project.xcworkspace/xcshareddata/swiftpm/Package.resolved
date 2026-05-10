@@ -1,5 +1,5 @@
 {
-  "originHash" : "ae2246791d74ed89422fcde804a0f995fed480e173bc041b2acbc22bf2895849",
+  "originHash" : "9edc19127b8e4f7ad8590c02ba4425bdf871608f10ff059c2cfaed0aa90bce41",
   "pins" : [
     {
       "identity" : "async-http-client",
@@ -44,6 +44,15 @@
       "state" : {
         "branch" : "main",
         "revision" : "41822c6bb3b9478272bc43356f29f701d9efdf25"
+      }
+    },
+    {
+      "identity" : "splitview",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/1amageek/SplitView.git",
+      "state" : {
+        "branch" : "main",
+        "revision" : "5eb68dde5fa3672371445249344d708babba197c"
       }
     },
     {
