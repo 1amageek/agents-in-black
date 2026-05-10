@@ -34,7 +34,7 @@ struct EmulatorOutputView: View {
 
                 Divider()
             }
-            Logs(source: source, text: \.text)
+            Logs(source: source)
         }
     }
 

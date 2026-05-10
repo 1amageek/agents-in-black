@@ -3,9 +3,13 @@ import LogViewer
 
 @MainActor
 final class LogBuffer: @MainActor LogSource {
-    struct Entry: Identifiable, Sendable, Equatable, Hashable {
+    struct Entry: Identifiable, Sendable, Equatable, Hashable, CustomStringConvertible {
         let id: String
         let text: String
+
+        var description: String {
+            text
+        }
     }
 
     private(set) var lines: [Entry] = []

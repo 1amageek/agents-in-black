@@ -230,7 +230,7 @@ private struct ServiceRuntimeLogsPaneView: View {
 
     var body: some View {
         let source = model.utilityServiceRuntimeLogSource(filterText: model.utilityPanelFilterText)
-        Logs(source: source, text: \.text)
+        Logs(source: source)
     }
 
 }
