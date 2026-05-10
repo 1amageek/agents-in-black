@@ -1,18 +1,14 @@
 import Foundation
+import LogViewer
 
-/// A single rendered log line with a stable identity for `LazyVStack`.
-struct LogLine: Identifiable, Sendable {
-    let id: String
-    let text: String
-}
+@MainActor
+final class LogBuffer: @MainActor LogSource {
+    struct Entry: Identifiable, Sendable, Equatable, Hashable {
+        let id: String
+        let text: String
+    }
 
-/// Bounded append-only buffer of `LogLine`s with per-buffer stable ids.
-///
-/// Storing logs as an array of lines — rather than a single concatenated `String` —
-/// avoids O(n) reallocation on every append and enables `LazyVStack` to
-/// materialize only visible rows.
-struct LogBuffer: Sendable {
-    private(set) var lines: [LogLine] = []
+    private(set) var lines: [Entry] = []
     private var nextCounter: UInt64 = 0
     let maxLines: Int
     let idNamespace: String
@@ -25,7 +21,15 @@ struct LogBuffer: Sendable {
 
     /// Appends `text` to the buffer. Multi-line input is split on `\n`; a
     /// trailing newline does not produce an empty line.
-    mutating func append(_ text: String) {
+    var numberOfLines: Int {
+        lines.count
+    }
+
+    func line(at index: Int) -> Entry {
+        lines[index]
+    }
+
+    func append(_ text: String) {
         guard !text.isEmpty else { return }
         let parts = text.split(separator: "\n", omittingEmptySubsequences: false)
         let effective: ArraySlice<Substring>
@@ -37,14 +41,14 @@ struct LogBuffer: Sendable {
         for part in effective {
             let id = "\(idNamespace):\(nextCounter)"
             nextCounter &+= 1
-            lines.append(LogLine(id: id, text: String(part)))
+            lines.append(Entry(id: id, text: String(part)))
         }
         if lines.count > maxLines {
             lines.removeFirst(lines.count - maxLines)
         }
     }
 
-    mutating func clear() {
+    func clear() {
         lines.removeAll(keepingCapacity: true)
     }
 }

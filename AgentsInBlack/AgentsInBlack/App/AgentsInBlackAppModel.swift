@@ -4,6 +4,7 @@ import AIBRuntimeCore
 import AIBWorkspace
 import Darwin
 import Foundation
+import LogViewer
 import Logging
 import Observation
 import os
@@ -2465,8 +2466,8 @@ final class AgentsInBlackAppModel {
         }
     }
 
-    func aibLogOutput() -> [LogLine] {
-        aibLogBuffer.lines
+    func aibLogSource(filterText: String = "") -> AnyLogSource<LogBuffer.Entry> {
+        filteredLogSource(AnyLogSource(aibLogBuffer), filterText: filterText)
     }
 
     func clearAIBLogs() {
@@ -2477,30 +2478,49 @@ final class AgentsInBlackAppModel {
         showUtilityPanel.toggle()
     }
 
-    func selectedScopedRuntimeLogOutput() -> [LogLine] {
+    func selectedScopedRuntimeLogSource() -> AnyLogSource<LogBuffer.Entry> {
         if let service = primaryWorkbenchService() {
-            return serviceLogBuffersByServiceID[service.namespacedID]?.lines ?? []
+            return serviceLogBuffersByServiceID[service.namespacedID].map { AnyLogSource($0) }
+                ?? emptyLogSource()
         }
-        guard let repo = selectedRepo(), let workspace else { return [] }
+        guard let repo = selectedRepo(), let workspace else { return emptyLogSource() }
         let namespacedIDs = Set(workspace.services.filter { $0.repoID == repo.id }.map(\.namespacedID))
-        guard !namespacedIDs.isEmpty else { return [] }
-        return serviceLogBuffersByServiceID
+        guard !namespacedIDs.isEmpty else { return emptyLogSource() }
+        let sources = serviceLogBuffersByServiceID
             .filter { namespacedIDs.contains($0.key) }
             .sorted { $0.key.localizedStandardCompare($1.key) == .orderedAscending }
-            .flatMap { $0.value.lines }
+            .map { AnyLogSource($0.value) }
+        return AnyLogSource(CompositeLogSource(sources))
     }
 
-    func utilityServiceRuntimeLogOutput() -> [LogLine] {
+    func utilityServiceRuntimeLogSource(filterText: String = "") -> AnyLogSource<LogBuffer.Entry> {
+        let source: AnyLogSource<LogBuffer.Entry>
         switch utilityServiceLogTarget {
         case .selection:
-            return selectedScopedRuntimeLogOutput()
+            source = selectedScopedRuntimeLogSource()
         case .allServices:
-            return serviceLogBuffersByServiceID
+            let sources = serviceLogBuffersByServiceID
                 .sorted { $0.key.localizedStandardCompare($1.key) == .orderedAscending }
-                .flatMap { $0.value.lines }
+                .map { AnyLogSource($0.value) }
+            source = AnyLogSource(CompositeLogSource(sources))
         case .service(let namespacedID):
-            return serviceLogBuffersByServiceID[namespacedID]?.lines ?? []
+            source = serviceLogBuffersByServiceID[namespacedID].map { AnyLogSource($0) }
+                ?? emptyLogSource()
         }
+        return filteredLogSource(source, filterText: filterText)
+    }
+
+    private func filteredLogSource(
+        _ source: AnyLogSource<LogBuffer.Entry>,
+        filterText: String
+    ) -> AnyLogSource<LogBuffer.Entry> {
+        let query = filterText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return source }
+        return AnyLogSource(FilteredLogSource(source: source, text: \.text, filterText: query))
+    }
+
+    private func emptyLogSource() -> AnyLogSource<LogBuffer.Entry> {
+        AnyLogSource(EmptyLogSource(LogBuffer.Entry.self))
     }
 
     func clearSelectedScopedRuntimeLogs() {

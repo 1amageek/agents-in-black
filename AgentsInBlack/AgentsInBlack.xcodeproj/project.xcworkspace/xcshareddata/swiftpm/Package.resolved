@@ -1,5 +1,5 @@
 {
-  "originHash" : "68731543167cf0ff474b5536fcc8fc22c08710c95a61fea73dd1a472db739564",
+  "originHash" : "ae2246791d74ed89422fcde804a0f995fed480e173bc041b2acbc22bf2895849",
   "pins" : [
     {
       "identity" : "async-http-client",
@@ -35,6 +35,15 @@
       "state" : {
         "revision" : "4c6f2467d5bc72b062c7a9b7e4cd77a09635ea8b",
         "version" : "1.3.1"
+      }
+    },
+    {
+      "identity" : "logviewer",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/1amageek/LogViewer.git",
+      "state" : {
+        "branch" : "main",
+        "revision" : "8dd8fb595e380b4ea5ba53b05e979ae6ce13460d"
       }
     },
     {

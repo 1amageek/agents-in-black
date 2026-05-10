@@ -12,6 +12,7 @@
 		A1B000000000000000000009 /* SwiftTerm in Frameworks */ = {isa = PBXBuildFile; productRef = A1B000000000000000000008 /* SwiftTerm */; };
 		A1B00000000000000000000C /* SwiftSkill in Frameworks */ = {isa = PBXBuildFile; productRef = A1B00000000000000000000B /* SwiftSkill */; };
 		A1B00000000000000000000F /* JSONSchema in Frameworks */ = {isa = PBXBuildFile; productRef = A1B00000000000000000000E /* JSONSchema */; };
+		A1B000000000000000000010 /* LogViewer in Frameworks */ = {isa = PBXBuildFile; productRef = A1B000000000000000000011 /* LogViewer */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -78,6 +79,7 @@
 				A1B000000000000000000009 /* SwiftTerm in Frameworks */,
 				A1B00000000000000000000C /* SwiftSkill in Frameworks */,
 				A1B00000000000000000000F /* JSONSchema in Frameworks */,
+				A1B000000000000000000010 /* LogViewer in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -143,6 +145,7 @@
 				A1B000000000000000000008 /* SwiftTerm */,
 				A1B00000000000000000000B /* SwiftSkill */,
 				A1B00000000000000000000E /* JSONSchema */,
+				A1B000000000000000000011 /* LogViewer */,
 			);
 			productName = AgentsInBlack;
 			productReference = 12BDD1172F501E3200FB156D /* AgentsInBlack.app */;
@@ -231,6 +234,7 @@
 				A1B000000000000000000004 /* XCRemoteSwiftPackageReference "swift-flow" */,
 				A1B000000000000000000007 /* XCRemoteSwiftPackageReference "SwiftTerm" */,
 				A1B00000000000000000000A /* XCRemoteSwiftPackageReference "swift-skills" */,
+				A1B000000000000000000012 /* XCRemoteSwiftPackageReference "LogViewer" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 12BDD1182F501E3200FB156D /* Products */;
@@ -647,6 +651,14 @@
 				kind = branch;
 			};
 		};
+		A1B000000000000000000012 /* XCRemoteSwiftPackageReference "LogViewer" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/1amageek/LogViewer.git";
+			requirement = {
+				branch = main;
+				kind = branch;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -674,6 +686,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = A1B000000000000000000001 /* XCLocalSwiftPackageReference ".." */;
 			productName = JSONSchema;
+		};
+		A1B000000000000000000011 /* LogViewer */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A1B000000000000000000012 /* XCRemoteSwiftPackageReference "LogViewer" */;
+			productName = LogViewer;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

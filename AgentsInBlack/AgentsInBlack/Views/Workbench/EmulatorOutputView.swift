@@ -1,3 +1,4 @@
+import LogViewer
 import SwiftUI
 
 struct EmulatorOutputView: View {
@@ -6,7 +7,7 @@ struct EmulatorOutputView: View {
     var filterText: String = ""
 
     var body: some View {
-        let lines = model.aibLogOutput()
+        let source = model.aibLogSource(filterText: filterText)
 
         VStack(spacing: 0) {
             if showsHeader {
@@ -33,15 +34,8 @@ struct EmulatorOutputView: View {
 
                 Divider()
             }
-            UtilityMonospacedOutputView(
-                lines: lines,
-                emptyMessage: emptyMessage,
-                filterText: filterText
-            )
+            Logs(source: source, text: \.text)
         }
     }
 
-    private var emptyMessage: String {
-        "Run the emulator to stream AIB logs here."
-    }
 }

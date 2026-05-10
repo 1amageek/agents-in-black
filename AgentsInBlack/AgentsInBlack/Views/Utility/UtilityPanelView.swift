@@ -1,4 +1,5 @@
 import AIBCore
+import LogViewer
 import SwiftUI
 
 // MARK: - Header Content
@@ -228,17 +229,10 @@ private struct ServiceRuntimeLogsPaneView: View {
     @Bindable var model: AgentsInBlackAppModel
 
     var body: some View {
-        let lines = model.utilityServiceRuntimeLogOutput()
-        UtilityMonospacedOutputView(
-            lines: lines,
-            emptyMessage: emptyMessage,
-            filterText: model.utilityPanelFilterText
-        )
+        let source = model.utilityServiceRuntimeLogSource(filterText: model.utilityPanelFilterText)
+        Logs(source: source, text: \.text)
     }
 
-    private var emptyMessage: String {
-        "Select a service and run the emulator to view service runtime logs."
-    }
 }
 
 private extension UtilityPanelMode {
