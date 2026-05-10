@@ -1,5 +1,5 @@
 {
-  "originHash" : "9edc19127b8e4f7ad8590c02ba4425bdf871608f10ff059c2cfaed0aa90bce41",
+  "originHash" : "f9882330e3b3415c7f4118cf95180ed125321bbf8bcd410ac4f196f4816699a4",
   "pins" : [
     {
       "identity" : "async-http-client",
@@ -47,12 +47,12 @@
       }
     },
     {
-      "identity" : "splitview",
+      "identity" : "mac-component",
       "kind" : "remoteSourceControl",
-      "location" : "https://github.com/1amageek/SplitView.git",
+      "location" : "https://github.com/1amageek/mac-component.git",
       "state" : {
         "branch" : "main",
-        "revision" : "5eb68dde5fa3672371445249344d708babba197c"
+        "revision" : "e38b17b252d315c0ed10fdb47479fcbe56bdbbef"
       }
     },
     {

@@ -1,5 +1,5 @@
 import AIBCore
-import SplitView
+import MacComponent
 import SwiftUI
 import TipKit
 

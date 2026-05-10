@@ -13,7 +13,7 @@
 		A1B00000000000000000000C /* SwiftSkill in Frameworks */ = {isa = PBXBuildFile; productRef = A1B00000000000000000000B /* SwiftSkill */; };
 		A1B00000000000000000000F /* JSONSchema in Frameworks */ = {isa = PBXBuildFile; productRef = A1B00000000000000000000E /* JSONSchema */; };
 		A1B000000000000000000010 /* LogViewer in Frameworks */ = {isa = PBXBuildFile; productRef = A1B000000000000000000011 /* LogViewer */; };
-		A1B000000000000000000013 /* SplitView in Frameworks */ = {isa = PBXBuildFile; productRef = A1B000000000000000000014 /* SplitView */; };
+		A1B000000000000000000013 /* MacComponent in Frameworks */ = {isa = PBXBuildFile; productRef = A1B000000000000000000014 /* MacComponent */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -81,7 +81,7 @@
 				A1B00000000000000000000C /* SwiftSkill in Frameworks */,
 				A1B00000000000000000000F /* JSONSchema in Frameworks */,
 				A1B000000000000000000010 /* LogViewer in Frameworks */,
-				A1B000000000000000000013 /* SplitView in Frameworks */,
+				A1B000000000000000000013 /* MacComponent in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -148,7 +148,7 @@
 				A1B00000000000000000000B /* SwiftSkill */,
 				A1B00000000000000000000E /* JSONSchema */,
 				A1B000000000000000000011 /* LogViewer */,
-				A1B000000000000000000014 /* SplitView */,
+				A1B000000000000000000014 /* MacComponent */,
 			);
 			productName = AgentsInBlack;
 			productReference = 12BDD1172F501E3200FB156D /* AgentsInBlack.app */;
@@ -238,7 +238,7 @@
 				A1B000000000000000000007 /* XCRemoteSwiftPackageReference "SwiftTerm" */,
 				A1B00000000000000000000A /* XCRemoteSwiftPackageReference "swift-skills" */,
 				A1B000000000000000000012 /* XCRemoteSwiftPackageReference "LogViewer" */,
-				A1B000000000000000000015 /* XCRemoteSwiftPackageReference "SplitView" */,
+				A1B000000000000000000015 /* XCRemoteSwiftPackageReference "mac-component" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 12BDD1182F501E3200FB156D /* Products */;
@@ -663,9 +663,9 @@
 				kind = branch;
 			};
 		};
-		A1B000000000000000000015 /* XCRemoteSwiftPackageReference "SplitView" */ = {
+		A1B000000000000000000015 /* XCRemoteSwiftPackageReference "mac-component" */ = {
 			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/1amageek/SplitView.git";
+			repositoryURL = "https://github.com/1amageek/mac-component.git";
 			requirement = {
 				branch = main;
 				kind = branch;
@@ -704,10 +704,10 @@
 			package = A1B000000000000000000012 /* XCRemoteSwiftPackageReference "LogViewer" */;
 			productName = LogViewer;
 		};
-		A1B000000000000000000014 /* SplitView */ = {
+		A1B000000000000000000014 /* MacComponent */ = {
 			isa = XCSwiftPackageProductDependency;
-			package = A1B000000000000000000015 /* XCRemoteSwiftPackageReference "SplitView" */;
-			productName = SplitView;
+			package = A1B000000000000000000015 /* XCRemoteSwiftPackageReference "mac-component" */;
+			productName = MacComponent;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};
