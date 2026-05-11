@@ -91,10 +91,11 @@ final class AgentsInBlackAppModel {
     private var hasShutdown = false
 
     // MARK: - Deploy
-    let deployController = AIBDeployController()
+    let deployController: AIBDeployController
     let deploymentsController = AIBDeploymentsController()
     var deployPhase: AIBDeployPhase = .idle
     var showDeploySheet: Bool = false
+    var deploySelection: AIBDeploySelection?
     var showCloudSettings: Bool = false
     var workspaceSourceAuthRequirements: [WorkspaceSourceAuthRequirement] = []
     var sourceAuthQuickSetupRequirement: WorkspaceSourceAuthRequirement?
@@ -105,7 +106,7 @@ final class AgentsInBlackAppModel {
     private let configStore: DeployTargetConfigStore = DefaultDeployTargetConfigStore()
     private let cloudSourceAuthBootstrapService = CloudSourceAuthBootstrapService()
     private let gcloudContextService = GCloudContextService()
-    private let targetSourceAuthKeychainStore = TargetSourceAuthKeychainStore()
+    private let targetSourceAuthKeychainStore: TargetSourceAuthKeychainStore
     private var presentedSourceAuthQuickSetupKeys: Set<String> = []
     private var announcedSourceAuthIssueKeys: Set<String> = []
 
@@ -152,6 +153,18 @@ final class AgentsInBlackAppModel {
     private var directoryMonitorFD: Int32 = -1
 
     init() {
+        // Wire the Keychain-backed passphrase resolver into the deploy
+        // controller so auto-provisioning of cloud source auth secrets
+        // can decrypt passphrase-protected local SSH keys without
+        // forcing the user through the AIB Inspector flow.
+        let keychain = TargetSourceAuthKeychainStore()
+        self.targetSourceAuthKeychainStore = keychain
+        self.deployController = AIBDeployController(
+            sourceAuthPassphraseResolver: { [keychain] reference in
+                try keychain.passphrase(for: reference)
+            }
+        )
+
         refreshPreferredApplications()
         emulatorEventsTask = Task { [weak self] in
             guard let self else { return }
@@ -1204,7 +1217,10 @@ final class AgentsInBlackAppModel {
 
     /// Create the local runner for a service using Codex App Server.
     private func makeLocalRunner(for service: AIBServiceModel) -> any AgentRunner {
-        return CodexAppServerAgentRunner(model: service.model)
+        return CodexAppServerAgentRunner(
+            model: service.model,
+            reasoningEffort: service.reasoningEffort
+        )
     }
 
     /// Build the runner context for a local session.
@@ -1603,6 +1619,21 @@ final class AgentsInBlackAppModel {
         }
     }
 
+    func updateServiceReasoningEffort(namespacedServiceID: String, reasoningEffort: String?) async {
+        guard let workspace else { return }
+        do {
+            try AIBWorkspaceCore.updateServiceReasoningEffort(
+                workspaceRoot: workspace.rootURL.path,
+                namespacedServiceID: namespacedServiceID,
+                reasoningEffort: reasoningEffort
+            )
+            let syncResult = try AIBWorkspaceCore.syncWorkspace(workspaceRoot: workspace.rootURL.path)
+            await finalizeUserInitiatedSync(syncResult, workspaceRoot: workspace.rootURL)
+        } catch {
+            setError("Failed to update reasoning effort: \(error.localizedDescription)")
+        }
+    }
+
     func updateServiceEnv(namespacedServiceID: String, env: [String: String]) async {
         guard let workspace else { return }
         do {
@@ -1852,12 +1883,13 @@ final class AgentsInBlackAppModel {
         }
     }
 
-    func startDeploy() {
+    func startDeploy(selection: AIBDeploySelection? = nil) {
         guard let workspace else { return }
         if hasUnsavedFlowChanges {
             setError("Save topology changes before deploying.")
             return
         }
+        deploySelection = selection
 
         // Check if cloud settings are configured before starting deploy flow.
         // If not configured, show cloud settings first — deploy resumes after save.
@@ -1876,7 +1908,11 @@ final class AgentsInBlackAppModel {
             // Provider detection failed — proceed and let the deploy pipeline surface the error
         }
 
-        beginDeployPipeline()
+        beginDeployPipeline(selection: selection)
+    }
+
+    func startDeploy(for service: AIBServiceModel) {
+        startDeploy(selection: AIBDeploySelection(serviceIDs: [service.namespacedID]))
     }
 
     /// Resume deploy pipeline after cloud settings are saved.
@@ -1894,7 +1930,7 @@ final class AgentsInBlackAppModel {
                     providerID: provider.providerID,
                     provider: provider
                 ) {
-                    beginDeployPipeline()
+                    beginDeployPipeline(selection: deploySelection)
                 }
             } catch {
                 // Settings still not configured — do nothing
@@ -2001,9 +2037,10 @@ final class AgentsInBlackAppModel {
         }
     }
 
-    private func beginDeployPipeline() {
+    private func beginDeployPipeline(selection: AIBDeploySelection? = nil) {
         guard let workspace else { return }
 
+        deploySelection = selection
         showDeploySheet = true
         deployPhase = .idle
         startDeployEventStream()
@@ -2024,7 +2061,8 @@ final class AgentsInBlackAppModel {
                 deployController.startPlan(
                     workspaceRoot: workspace.rootURL.path,
                     targetConfig: targetConfig,
-                    provider: provider
+                    provider: provider,
+                    selection: selection
                 )
             } catch {
                 deployPhase = .failed(AIBDeployError(
@@ -2118,11 +2156,23 @@ final class AgentsInBlackAppModel {
     }
 
     /// Cleanup deploy state. Called exclusively from `.sheet(onDismiss:)`.
+    ///
+    /// The sheet may be dismissed via paths that bypass the Cancel button
+    /// (Esc key, click-outside, programmatic dismiss). In those cases the
+    /// pipeline task may still be running, so we `await cancel()` first to
+    /// let it terminate and emit its final phase event before we reset.
+    /// Otherwise a deferred `.cancelled` would race past `reset()` and
+    /// corrupt the next deploy session's state.
     func cleanupDeployState() {
-        deployController.reset()
-        deployPhase = .idle
-        deployEventsTask?.cancel()
-        deployEventsTask = nil
+        Task { [weak self] in
+            guard let self else { return }
+            await self.deployController.cancel()
+            self.deployController.reset()
+            self.deployPhase = .idle
+            self.deploySelection = nil
+            self.deployEventsTask?.cancel()
+            self.deployEventsTask = nil
+        }
     }
 
     private func startDeployEventStream() {
@@ -2143,7 +2193,7 @@ final class AgentsInBlackAppModel {
 
         let providerID: String
         switch deployPhase {
-        case .reviewing(let plan), .secretsInput(let plan, _), .applying(let plan):
+        case .reviewing(let plan), .secretsInput(let plan, _, _), .applying(let plan):
             providerID = plan.targetConfig.providerID
         case .completed(let result):
             providerID = result.plan.targetConfig.providerID
@@ -2359,10 +2409,20 @@ final class AgentsInBlackAppModel {
 
         switch deployPhase {
         case .reviewing, .failed, .cancelled:
-            deployController.cancel()
-            deployController.reset()
-            deployPhase = .idle
-            beginDeployPipeline()
+            let selection = deploySelection
+            Task { [weak self] in
+                guard let self else { return }
+                // `cancel()` is async: it waits for the running pipeline task
+                // to fully terminate (and emit its final phase event) before
+                // returning. Without this, the running task's deferred
+                // `transitionTo(.cancelled)` would race past `reset()` and
+                // leave the UI stuck on "Deployment cancelled" right after
+                // the user switched projects.
+                await self.deployController.cancel()
+                self.deployController.reset()
+                self.deployPhase = .idle
+                self.beginDeployPipeline(selection: selection)
+            }
         default:
             break
         }
@@ -2398,8 +2458,12 @@ final class AgentsInBlackAppModel {
             appendDeployLogLine(level: .info, message: "Generating deploy plan...")
         case .reviewing:
             appendDeployLogLine(level: .info, message: "Deploy plan ready for review")
-        case .secretsInput(_, let unresolvedSecrets):
-            appendDeployLogLine(level: .info, message: "Secrets required: \(unresolvedSecrets.joined(separator: ", "))")
+        case .secretsInput(_, let unresolvedSecrets, let missingDeclaredSecrets):
+            let parts: [String] = [
+                unresolvedSecrets.isEmpty ? nil : "env=" + unresolvedSecrets.joined(separator: ","),
+                missingDeclaredSecrets.isEmpty ? nil : "secretManager=" + missingDeclaredSecrets.joined(separator: ",")
+            ].compactMap { $0 }
+            appendDeployLogLine(level: .info, message: "Secrets required: \(parts.joined(separator: "; "))")
         case .applying:
             appendDeployLogLine(level: .info, message: "Applying deploy plan...")
         case .completed(let result):

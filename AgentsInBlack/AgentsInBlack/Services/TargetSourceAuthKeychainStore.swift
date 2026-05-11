@@ -18,11 +18,18 @@ enum TargetSourceAuthKeychainStoreError: LocalizedError {
     }
 }
 
-@MainActor
-final class TargetSourceAuthKeychainStore {
+/// Thread-safe wrapper over Keychain Services. The underlying
+/// `SecItem*` APIs are safe to call from any thread, so methods are
+/// marked `nonisolated` and the type conforms to `Sendable`. This lets
+/// the deploy controller's auto-provisioning path call into the store
+/// from a non-MainActor closure without an `await MainActor.run` hop —
+/// necessary because the project defaults to MainActor isolation.
+final class TargetSourceAuthKeychainStore: Sendable {
     private let service = "team.stamp.AgentsInBlack.target-source-auth"
 
-    func passphrase(for reference: String) throws -> String? {
+    nonisolated init() {}
+
+    nonisolated func passphrase(for reference: String) throws -> String? {
         var query = baseQuery(reference: reference)
         query[kSecReturnData as String] = kCFBooleanTrue
         query[kSecMatchLimit as String] = kSecMatchLimitOne
@@ -45,7 +52,7 @@ final class TargetSourceAuthKeychainStore {
         }
     }
 
-    func containsPassphrase(for reference: String) throws -> Bool {
+    nonisolated func containsPassphrase(for reference: String) throws -> Bool {
         var query = baseQuery(reference: reference)
         query[kSecReturnAttributes as String] = kCFBooleanTrue
         query[kSecMatchLimit as String] = kSecMatchLimitOne
@@ -60,7 +67,7 @@ final class TargetSourceAuthKeychainStore {
         }
     }
 
-    func setPassphrase(_ passphrase: String, for reference: String) throws {
+    nonisolated func setPassphrase(_ passphrase: String, for reference: String) throws {
         let encoded = Data(passphrase.utf8)
         let query = baseQuery(reference: reference)
         let attributes = [
@@ -83,14 +90,14 @@ final class TargetSourceAuthKeychainStore {
         }
     }
 
-    func removePassphrase(for reference: String) throws {
+    nonisolated func removePassphrase(for reference: String) throws {
         let status = SecItemDelete(baseQuery(reference: reference) as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else {
             throw TargetSourceAuthKeychainStoreError.unexpectedStatus(status)
         }
     }
 
-    private func baseQuery(reference: String) -> [String: Any] {
+    nonisolated private func baseQuery(reference: String) -> [String: Any] {
         [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
