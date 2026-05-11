@@ -445,6 +445,41 @@ public enum AIBWorkspaceManager {
         try saveWorkspace(workspace, workspaceRoot: workspaceRoot)
     }
 
+    /// Update the `reasoning_effort` field of a service in workspace.yaml.
+    public static func updateServiceReasoningEffort(
+        workspaceRoot: String,
+        namespacedServiceID: String,
+        reasoningEffort: String?
+    ) throws {
+        var workspace = try loadWorkspace(workspaceRoot: workspaceRoot)
+        let parts = namespacedServiceID.split(separator: "/", maxSplits: 1).map(String.init)
+        guard parts.count == 2 else {
+            throw ConfigError("Invalid namespaced service ID", metadata: ["id": namespacedServiceID])
+        }
+        let namespace = parts[0]
+        let localID = parts[1]
+
+        guard let repoIndex = workspace.repos.firstIndex(where: { $0.namespace == namespace }),
+              var services = workspace.repos[repoIndex].services,
+              let serviceIndex = services.firstIndex(where: { $0.id == localID })
+        else {
+            throw ConfigError("Service not found", metadata: ["id": namespacedServiceID])
+        }
+
+        let trimmed = reasoningEffort?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let trimmed, !trimmed.isEmpty {
+            guard AIBReasoningEffort(rawValue: trimmed) != nil else {
+                throw ConfigError("Invalid reasoning effort", metadata: ["reasoning_effort": trimmed])
+            }
+            services[serviceIndex].reasoningEffort = trimmed
+        } else {
+            services[serviceIndex].reasoningEffort = nil
+        }
+        workspace.repos[repoIndex].services = services
+
+        try saveWorkspace(workspace, workspaceRoot: workspaceRoot)
+    }
+
     /// Replace a service's universal `env` (applied in both local and deploy).
     public static func updateServiceEnv(
         workspaceRoot: String,

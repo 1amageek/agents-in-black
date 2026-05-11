@@ -146,6 +146,7 @@ private struct WorkspaceFileDTO: Codable {
         var endpoints: [String: String]?
         var skills: [String]?
         var model: String?
+        var reasoningEffort: String?
 
         enum CodingKeys: String, CodingKey {
             case id, kind, port, cwd, run, build, install, env, secrets, health, restart, concurrency, auth, connections, mcp, a2a, codex, ui, endpoints, skills, model
@@ -157,6 +158,7 @@ private struct WorkspaceFileDTO: Codable {
             case cookiePathRewrite = "cookie_path_rewrite"
             case localEnv = "local_env"
             case deployEnv = "deploy_env"
+            case reasoningEffort = "reasoning_effort"
         }
     }
 
@@ -346,7 +348,8 @@ private struct WorkspaceFileDTO: Codable {
             ui: s.ui.map { UIDTO(primaryMode: $0.primaryMode, chat: $0.chat.map { UIChatDTO(method: $0.method, path: $0.path, requestContentType: $0.requestContentType, requestMessageJSONPath: $0.requestMessageJSONPath, requestContextJSONPath: $0.requestContextJSONPath, responseMessageJSONPath: $0.responseMessageJSONPath, streaming: $0.streaming) }) },
             endpoints: s.endpoints,
             skills: s.skills,
-            model: s.model
+            model: s.model,
+            reasoningEffort: s.reasoningEffort
         )
     }
 
@@ -431,7 +434,8 @@ private struct WorkspaceFileDTO: Codable {
             ui: s.ui.map { WorkspaceRepoUIConfig(primaryMode: $0.primaryMode, chat: $0.chat.map { WorkspaceRepoUIChatConfig(method: $0.method, path: $0.path, requestContentType: $0.requestContentType, requestMessageJSONPath: $0.requestMessageJSONPath, requestContextJSONPath: $0.requestContextJSONPath, responseMessageJSONPath: $0.responseMessageJSONPath, streaming: $0.streaming) }) },
             endpoints: s.endpoints,
             skills: s.skills,
-            model: s.model
+            model: s.model,
+            reasoningEffort: s.reasoningEffort
         )
     }
 }

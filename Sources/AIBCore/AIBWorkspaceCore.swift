@@ -114,6 +114,18 @@ public enum AIBWorkspaceCore {
         )
     }
 
+    public static func updateServiceReasoningEffort(
+        workspaceRoot: String,
+        namespacedServiceID: String,
+        reasoningEffort: String?
+    ) throws {
+        try AIBWorkspaceManager.updateServiceReasoningEffort(
+            workspaceRoot: workspaceRoot,
+            namespacedServiceID: namespacedServiceID,
+            reasoningEffort: reasoningEffort
+        )
+    }
+
     public static func updateServiceEnv(
         workspaceRoot: String,
         namespacedServiceID: String,

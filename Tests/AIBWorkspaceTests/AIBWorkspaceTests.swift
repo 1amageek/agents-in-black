@@ -887,7 +887,8 @@ func serviceModelYAMLRoundTrip() throws {
                         kind: "agent",
                         mountPath: "/agents/a",
                         run: ["swift", "run"],
-                        model: "gpt-5.5"
+                        model: "gpt-5.5",
+                        reasoningEffort: "high"
                     ),
                 ]
             ),
@@ -900,6 +901,48 @@ func serviceModelYAMLRoundTrip() throws {
 
     let service = loaded.repos.first?.services?.first
     #expect(service?.model == "gpt-5.5")
+    #expect(service?.reasoningEffort == "high")
+
+    let resolved = try WorkspaceSyncer.resolveConfig(workspaceRoot: root.path, workspace: loaded)
+    let resolvedEnv = try #require(resolved.config.services.first?.env)
+    #expect(resolvedEnv["MODEL"] == "gpt-5.5")
+    #expect(resolvedEnv["MODEL_REASONING_EFFORT"] == "high")
+}
+
+@Test(.timeLimit(.minutes(1)))
+func serviceReasoningEffortDefaultsToMedium() throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("aib-service-reasoning-default-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let workspace = AIBWorkspaceConfig(
+        workspaceName: "test",
+        repos: [
+            WorkspaceRepo(
+                name: "agent-a",
+                path: "agent-a",
+                runtime: .swift,
+                framework: .unknown,
+                packageManager: .swiftpm,
+                status: .discoverable,
+                detectionConfidence: .high,
+                services: [
+                    WorkspaceRepoServiceConfig(
+                        id: "main",
+                        kind: "agent",
+                        mountPath: "/agents/a",
+                        run: ["swift", "run"]
+                    ),
+                ]
+            ),
+        ]
+    )
+
+    let resolved = try WorkspaceSyncer.resolveConfig(workspaceRoot: root.path, workspace: workspace)
+    let service = try #require(resolved.config.services.first)
+    #expect(service.env["MODEL_REASONING_EFFORT"] == AIBReasoningEffort.defaultAgent.rawValue)
+    #expect(AIBReasoningEffort.defaultAgent == .medium)
 }
 
 @Test(.timeLimit(.minutes(1)))
@@ -994,6 +1037,60 @@ func updateServiceModelPersistsToYAML() throws {
     )
     let cleared = try AIBWorkspaceManager.loadWorkspace(workspaceRoot: root.path)
     #expect(cleared.repos[0].services?.first?.model == nil)
+}
+
+@Test(.timeLimit(.minutes(1)))
+func updateServiceReasoningEffortPersistsToYAML() throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("aib-update-reasoning-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let repo = root.appendingPathComponent("agent-a", isDirectory: true)
+    try FileManager.default.createDirectory(at: repo.appendingPathComponent(".git"), withIntermediateDirectories: true)
+    try "// swift-tools-version: 6.0\nimport PackageDescription\n".write(to: repo.appendingPathComponent("Package.swift"), atomically: true, encoding: .utf8)
+
+    var workspace = AIBWorkspaceConfig(
+        workspaceName: "test",
+        repos: [
+            WorkspaceRepo(
+                name: "agent-a",
+                path: "agent-a",
+                runtime: .swift,
+                framework: .unknown,
+                packageManager: .swiftpm,
+                status: .discoverable,
+                detectionConfidence: .high
+            ),
+        ]
+    )
+    workspace.repos[0].services = [
+        WorkspaceRepoServiceConfig(
+            id: "main",
+            kind: "agent",
+            mountPath: "/agents/a",
+            run: ["swift", "run"]
+        )
+    ]
+    try AIBWorkspaceManager.saveWorkspace(workspace, workspaceRoot: root.path)
+
+    let namespace = workspace.repos[0].servicesNamespace ?? workspace.repos[0].name
+    try AIBWorkspaceManager.updateServiceReasoningEffort(
+        workspaceRoot: root.path,
+        namespacedServiceID: "\(namespace)/main",
+        reasoningEffort: "xhigh"
+    )
+
+    let reloaded = try AIBWorkspaceManager.loadWorkspace(workspaceRoot: root.path)
+    #expect(reloaded.repos[0].services?.first?.reasoningEffort == "xhigh")
+
+    try AIBWorkspaceManager.updateServiceReasoningEffort(
+        workspaceRoot: root.path,
+        namespacedServiceID: "\(namespace)/main",
+        reasoningEffort: nil
+    )
+    let cleared = try AIBWorkspaceManager.loadWorkspace(workspaceRoot: root.path)
+    #expect(cleared.repos[0].services?.first?.reasoningEffort == nil)
 }
 
 @Test(.timeLimit(.minutes(1)))
@@ -1561,7 +1658,7 @@ func deployPlanProjectsAssignedSkillBundlesIntoRuntimeDirectories() async throws
     #expect(service.envVars["AIB_AGENT_ALLOW_DANGEROUSLY_SKIP_PERMISSIONS"] == "true")
     #expect(service.envVars["AIB_CODEX_AUTH_MODE"] == "chatgpt")
     #expect(service.envVars["AIB_CODEX_AUTH_JSON"] == "/var/secrets/aib/codex/auth.json")
-    #expect(service.envVars["CODEX_HOME"] == "/tmp/aib-codex-home")
+    #expect(service.envVars["CODEX_HOME"] == "/home/node/.codex")
     #expect(service.declaredSecretRefs["/var/secrets/aib/codex/auth.json"]?.secret == "codex-auth-json")
     #expect(service.declaredSecretRefs["/var/secrets/aib/codex/auth.json"]?.version == "latest")
     #expect(!service.unresolvedSecrets.contains("OPENAI_API_KEY"))
@@ -1750,6 +1847,174 @@ func deployPluginKeepsServiceRefBasedMCPNamesStable() async throws {
 
     #expect(mcpConfig.contains("\"proposal-mcp-main\""))
     #expect(!mcpConfig.contains("\"example.invalid-mcp\""))
+}
+
+@Test(.timeLimit(.minutes(1)))
+func deployPlanSelectionByAgentKindKeepsMCPResolutionAndAuthBinding() async throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("aib-deploy-agent-selection-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer {
+        do {
+            try FileManager.default.removeItem(at: root)
+        } catch {
+            // Best-effort cleanup for temp test directory.
+        }
+    }
+
+    let agentRepo = root.appendingPathComponent("agent", isDirectory: true)
+    let mcpRepo = root.appendingPathComponent("proposal-mcp", isDirectory: true)
+    for repo in [agentRepo, mcpRepo] {
+        try FileManager.default.createDirectory(at: repo.appendingPathComponent(".git"), withIntermediateDirectories: true)
+        try """
+        // swift-tools-version: 6.0
+        import PackageDescription
+
+        let package = Package(
+            name: "\(repo.lastPathComponent)",
+            targets: [.executableTarget(name: "\(repo.lastPathComponent)")]
+        )
+        """.write(to: repo.appendingPathComponent("Package.swift"), atomically: true, encoding: .utf8)
+        try "FROM swift:6.2-jammy\nWORKDIR /app\n".write(
+            to: repo.appendingPathComponent("Dockerfile"),
+            atomically: true,
+            encoding: .utf8
+        )
+    }
+
+    let workspace = AIBWorkspaceConfig(
+        workspaceName: "test",
+        repos: [
+            WorkspaceRepo(
+                name: "agent",
+                path: "agent",
+                runtime: .swift,
+                framework: .unknown,
+                packageManager: .swiftpm,
+                status: .discoverable,
+                detectionConfidence: .high,
+                services: [
+                    WorkspaceRepoServiceConfig(
+                        id: "node",
+                        kind: "agent",
+                        mountPath: "/agent/node",
+                        run: ["swift", "run"],
+                        connections: WorkspaceRepoConnectionsConfig(
+                            mcpServers: [WorkspaceRepoConnectionTarget(serviceRef: "proposal-mcp/main")]
+                        )
+                    ),
+                ]
+            ),
+            WorkspaceRepo(
+                name: "proposal-mcp",
+                path: "proposal-mcp",
+                runtime: .swift,
+                framework: .unknown,
+                packageManager: .swiftpm,
+                status: .discoverable,
+                detectionConfidence: .high,
+                services: [
+                    WorkspaceRepoServiceConfig(
+                        id: "main",
+                        kind: "mcp",
+                        mountPath: "/proposal-mcp",
+                        run: ["swift", "run"],
+                        mcp: WorkspaceRepoMCPConfig(path: "/mcp")
+                    ),
+                ]
+            ),
+        ]
+    )
+    try AIBWorkspaceManager.saveWorkspace(workspace, workspaceRoot: root.path)
+
+    let provider = MockDeploymentProvider()
+    let targetConfig = AIBDeployTargetConfig(providerID: provider.providerID, region: "us-central1")
+    let plan = try await AIBDeployService.generatePlan(
+        workspaceRoot: root.path,
+        targetConfig: targetConfig,
+        provider: provider,
+        selection: AIBDeploySelection(kinds: [.agent])
+    )
+
+    #expect(plan.services.map(\.id) == ["agent/node"])
+    #expect(plan.authBindings.count == 1)
+    let binding = try #require(plan.authBindings.first)
+    #expect(binding.sourceServiceName == "mock-agent")
+    #expect(binding.targetServiceName == "mock-proposal-mcp")
+
+    let agentService = try #require(plan.services.first)
+    let mcpConnection = try #require(agentService.connections.mcpServers.first)
+    #expect(mcpConnection.serviceRef == "proposal-mcp/main")
+    #expect(mcpConnection.resolvedURL == "https://example.invalid/mcp")
+    #expect(agentService.artifacts.mcpConnectionConfig != nil)
+    #expect(plan.warnings.contains { $0.contains("Deploy selection") })
+}
+
+@Test(.timeLimit(.minutes(1)))
+func deployPlanSelectionRejectsUnknownService() async throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("aib-deploy-unknown-selection-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer {
+        do {
+            try FileManager.default.removeItem(at: root)
+        } catch {
+            // Best-effort cleanup for temp test directory.
+        }
+    }
+
+    let repo = root.appendingPathComponent("agent", isDirectory: true)
+    try FileManager.default.createDirectory(at: repo.appendingPathComponent(".git"), withIntermediateDirectories: true)
+    try """
+    // swift-tools-version: 6.0
+    import PackageDescription
+
+    let package = Package(
+        name: "agent",
+        targets: [.executableTarget(name: "agent")]
+    )
+    """.write(to: repo.appendingPathComponent("Package.swift"), atomically: true, encoding: .utf8)
+    try "FROM swift:6.2-jammy\nWORKDIR /app\n".write(
+        to: repo.appendingPathComponent("Dockerfile"),
+        atomically: true,
+        encoding: .utf8
+    )
+
+    let workspace = AIBWorkspaceConfig(
+        workspaceName: "test",
+        repos: [
+            WorkspaceRepo(
+                name: "agent",
+                path: "agent",
+                runtime: .swift,
+                framework: .unknown,
+                packageManager: .swiftpm,
+                status: .discoverable,
+                detectionConfidence: .high,
+                services: [
+                    WorkspaceRepoServiceConfig(
+                        id: "node",
+                        kind: "agent",
+                        mountPath: "/agent/node",
+                        run: ["swift", "run"]
+                    ),
+                ]
+            ),
+        ]
+    )
+    try AIBWorkspaceManager.saveWorkspace(workspace, workspaceRoot: root.path)
+
+    let provider = MockDeploymentProvider()
+    let targetConfig = AIBDeployTargetConfig(providerID: provider.providerID, region: "us-central1")
+
+    await #expect(throws: AIBDeployError.self) {
+        try await AIBDeployService.generatePlan(
+            workspaceRoot: root.path,
+            targetConfig: targetConfig,
+            provider: provider,
+            selection: AIBDeploySelection(serviceIDs: ["missing/service"])
+        )
+    }
 }
 
 @Test(.timeLimit(.minutes(1)))

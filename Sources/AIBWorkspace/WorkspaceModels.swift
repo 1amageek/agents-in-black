@@ -132,6 +132,9 @@ public struct WorkspaceRepoServiceConfig: Codable, Sendable, Equatable {
     /// LLM model identifier for agent services (e.g., "gpt-5.5").
     /// Injected as `MODEL` environment variable at runtime.
     public var model: String?
+    /// Codex reasoning effort for agent services (`low`, `medium`, `high`, `xhigh`).
+    /// Injected as `MODEL_REASONING_EFFORT` environment variable at runtime.
+    public var reasoningEffort: String?
 
     public init(
         id: String,
@@ -162,7 +165,8 @@ public struct WorkspaceRepoServiceConfig: Codable, Sendable, Equatable {
         ui: WorkspaceRepoUIConfig? = nil,
         endpoints: [String: String]? = nil,
         skills: [String]? = nil,
-        model: String? = nil
+        model: String? = nil,
+        reasoningEffort: String? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -193,6 +197,7 @@ public struct WorkspaceRepoServiceConfig: Codable, Sendable, Equatable {
         self.endpoints = endpoints
         self.skills = skills
         self.model = model
+        self.reasoningEffort = reasoningEffort
     }
 }
 

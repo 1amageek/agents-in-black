@@ -435,7 +435,12 @@ public enum WorkspaceSyncer {
             restartAffects: (inline.restartAffects ?? []).map { ServiceID($0) },
             pathRewrite: pathRewrite,
             cookiePathRewrite: inline.cookiePathRewrite ?? true,
-            env: Self.mergeModelEnv(base: inline.env ?? [:], model: inline.model, kind: resolvedKind),
+            env: Self.mergeAgentRuntimeEnv(
+                base: inline.env ?? [:],
+                model: inline.model,
+                reasoningEffort: inline.reasoningEffort,
+                kind: resolvedKind
+            ),
             localEnv: inline.localEnv ?? [:],
             deployEnv: inline.deployEnv ?? [:],
             secrets: (inline.secrets ?? [:]).mapValues { SecretRef(secret: $0.secret, version: $0.version) },
@@ -468,16 +473,27 @@ public enum WorkspaceSyncer {
     /// Default LLM model for agent services when none is explicitly configured.
     static let defaultAgentModel = "gpt-5.5"
 
-    /// Merge the dedicated `model` field into the env dict as `MODEL`.
-    /// Uses `defaultAgentModel` when no model is specified for agent services.
-    /// Explicit env["MODEL"] takes precedence.
-    private static func mergeModelEnv(base: [String: String], model: String?, kind: ServiceKind) -> [String: String] {
+    /// Merge dedicated agent runtime fields into env vars.
+    /// Explicit env values take precedence over typed workspace fields.
+    private static func mergeAgentRuntimeEnv(
+        base: [String: String],
+        model: String?,
+        reasoningEffort: String?,
+        kind: ServiceKind
+    ) -> [String: String] {
         var env = base
-        guard env["MODEL"] == nil else { return env }
-        if let model, !model.isEmpty {
+        if env["MODEL"] == nil, let model, !model.isEmpty {
             env["MODEL"] = model
-        } else if kind == .agent {
+        } else if env["MODEL"] == nil, kind == .agent {
             env["MODEL"] = defaultAgentModel
+        }
+        if env["MODEL_REASONING_EFFORT"] == nil,
+           let reasoningEffort,
+           AIBReasoningEffort(rawValue: reasoningEffort) != nil
+        {
+            env["MODEL_REASONING_EFFORT"] = reasoningEffort
+        } else if env["MODEL_REASONING_EFFORT"] == nil, kind == .agent {
+            env["MODEL_REASONING_EFFORT"] = AIBReasoningEffort.defaultAgent.rawValue
         }
         return env
     }

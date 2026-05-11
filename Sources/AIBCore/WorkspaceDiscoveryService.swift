@@ -252,6 +252,7 @@ public final class WorkspaceDiscoveryService {
                         executionDirectoryPath: executionDirectoryURL.path(percentEncoded: false),
                         executionDirectoryEntries: executionEntries,
                         model: service.model,
+                        reasoningEffort: service.reasoningEffort,
                         env: service.env ?? [:],
                         localEnv: service.localEnv ?? [:],
                         deployEnv: service.deployEnv ?? [:],

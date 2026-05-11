@@ -253,6 +253,7 @@ public final class AIBEmulatorController {
 
             // Register local handlers for agent services so requests are processed
             // by Codex App Server CLI (subscription auth) instead of the container.
+            var diagnosticTargets: [CodexPluginStartupDiagnosticTarget] = []
             for service in loaded.config.services where service.kind == .agent {
                 let resolvedPluginRootPath = CodexAppServerPluginBundle.pluginRootURL(
                     baseURL: URL(fileURLWithPath: workspaceRoot)
@@ -263,12 +264,15 @@ public final class AIBEmulatorController {
                     ? resolvedPluginRootPath
                     : nil
                 let executionDirectory = service.cwd
-                let resolvedModel = service.resolvedEnv(for: .local)["MODEL"]
+                let resolvedLocalEnv = service.resolvedEnv(for: .local)
+                let resolvedModel = resolvedLocalEnv["MODEL"]
+                let resolvedReasoningEffort = resolvedLocalEnv["MODEL_REASONING_EFFORT"]
                 let handler = LocalAgentHandler.makeHandler(
                     serviceID: service.id,
                     pluginRootPath: pluginRootPath,
                     executionDirectory: executionDirectory,
                     model: resolvedModel,
+                    reasoningEffort: resolvedReasoningEffort,
                     logger: logger
                 )
                 await gatewayControl.registerLocalHandler(serviceID: service.id, handler: handler)
@@ -280,7 +284,16 @@ public final class AIBEmulatorController {
                 if let resolvedModel {
                     metadata["model"] = "\(resolvedModel)"
                 }
+                if let resolvedReasoningEffort {
+                    metadata["reasoning_effort"] = "\(resolvedReasoningEffort)"
+                }
                 logger.info("Registered local Codex App Server handler", metadata: metadata)
+                diagnosticTargets.append(CodexPluginStartupDiagnosticTarget(
+                    serviceID: service.id.rawValue,
+                    pluginRootPath: pluginRootPath,
+                    model: resolvedModel,
+                    reasoningEffort: resolvedReasoningEffort
+                ))
             }
 
             let supervisor = DevSupervisor(
@@ -294,6 +307,10 @@ public final class AIBEmulatorController {
                 logger: logger
             )
             try await supervisor.startAll()
+            await CodexPluginStartupDiagnostics.run(
+                targets: diagnosticTargets,
+                logger: logger
+            )
 
             self.gateway = gateway
             self.supervisor = supervisor
@@ -501,6 +518,288 @@ public final class AIBEmulatorController {
             timer.cancel()
         }
         inactiveTimers.removeAll()
+    }
+}
+
+private struct CodexPluginStartupDiagnosticTarget {
+    var serviceID: String
+    var pluginRootPath: String?
+    var model: String?
+    var reasoningEffort: String?
+}
+
+private enum CodexPluginStartupDiagnostics {
+    static func run(
+        targets: [CodexPluginStartupDiagnosticTarget],
+        logger: Logger
+    ) async {
+        for target in targets {
+            await run(target: target, logger: logger)
+        }
+    }
+
+    private static func run(
+        target: CodexPluginStartupDiagnosticTarget,
+        logger: Logger
+    ) async {
+        guard let pluginRootPath = target.pluginRootPath else {
+            logger.warning("Codex plugin startup diagnostic failed", metadata: [
+                "service_id": "\(target.serviceID)",
+                "reason": "plugin_root_missing",
+            ])
+            return
+        }
+
+        let pluginRootURL = URL(fileURLWithPath: pluginRootPath, isDirectory: true)
+        let skills = skillNames(pluginRootURL: pluginRootURL)
+        logger.info("Codex plugin startup diagnostic: skills", metadata: [
+            "service_id": "\(target.serviceID)",
+            "plugin_root": "\(pluginRootPath)",
+            "model": "\(target.model ?? "")",
+            "reasoning_effort": "\(target.reasoningEffort ?? "")",
+            "skill_count": "\(skills.count)",
+            "skills": "\(skills.joined(separator: ","))",
+        ])
+
+        let mcpConfigURL = pluginRootURL.appendingPathComponent(CodexAppServerPluginBundle.mcpConfigFileName)
+        guard FileManager.default.fileExists(atPath: mcpConfigURL.path) else {
+            logger.warning("Codex plugin startup diagnostic failed", metadata: [
+                "service_id": "\(target.serviceID)",
+                "reason": "mcp_config_missing",
+                "path": "\(mcpConfigURL.path)",
+            ])
+            return
+        }
+
+        do {
+            let config = try loadMCPConfig(mcpConfigURL)
+            logger.info("Codex plugin startup diagnostic: MCP config", metadata: [
+                "service_id": "\(target.serviceID)",
+                "mcp_config": "\(mcpConfigURL.path)",
+                "server_count": "\(config.mcpServers.count)",
+                "servers": "\(config.mcpServers.keys.sorted().joined(separator: ","))",
+            ])
+            for (name, server) in config.mcpServers.sorted(by: { $0.key < $1.key }) {
+                await diagnoseMCPServer(
+                    serviceID: target.serviceID,
+                    name: name,
+                    server: server,
+                    logger: logger
+                )
+            }
+        } catch {
+            logger.warning("Codex plugin startup diagnostic failed", metadata: [
+                "service_id": "\(target.serviceID)",
+                "reason": "mcp_config_invalid",
+                "path": "\(mcpConfigURL.path)",
+                "error": "\(error)",
+            ])
+        }
+    }
+
+    private static func skillNames(pluginRootURL: URL) -> [String] {
+        let pluginName = pluginName(pluginRootURL: pluginRootURL)
+        let skillsURL = pluginRootURL.appendingPathComponent("skills", isDirectory: true)
+        guard let entries = try? FileManager.default.contentsOfDirectory(
+            at: skillsURL,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return []
+        }
+
+        return entries.compactMap { entry in
+            let isDirectory = (try? entry.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
+            guard isDirectory else { return nil }
+            let skillFile = entry.appendingPathComponent("SKILL.md")
+            guard FileManager.default.fileExists(atPath: skillFile.path) else { return nil }
+            let raw = (try? String(contentsOf: skillFile, encoding: .utf8)) ?? ""
+            let skillName = frontmatterValue(raw, key: "name") ?? entry.lastPathComponent
+            guard let pluginName, !pluginName.isEmpty else {
+                return skillName
+            }
+            return "\(pluginName):\(skillName)"
+        }
+        .sorted()
+    }
+
+    private static func frontmatterValue(_ raw: String, key: String) -> String? {
+        guard raw.hasPrefix("---\n"), let endRange = raw.range(of: "\n---", range: raw.index(raw.startIndex, offsetBy: 4)..<raw.endIndex) else {
+            return nil
+        }
+        let frontmatter = raw[raw.index(raw.startIndex, offsetBy: 4)..<endRange.lowerBound]
+        for line in frontmatter.split(separator: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.hasPrefix("\(key):") else { continue }
+            let value = trimmed.dropFirst(key.count + 1).trimmingCharacters(in: .whitespacesAndNewlines)
+            return value.isEmpty ? nil : value
+        }
+        return nil
+    }
+
+    private static func pluginName(pluginRootURL: URL) -> String? {
+        let metadataURL = pluginRootURL
+            .appendingPathComponent(CodexAppServerPluginBundle.manifestRelativePath, isDirectory: false)
+        guard let data = try? Data(contentsOf: metadataURL),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let name = object["name"] as? String else {
+            return nil
+        }
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private static func loadMCPConfig(_ url: URL) throws -> StartupMCPProjectConfig {
+        let data = try Data(contentsOf: url)
+        return try JSONDecoder().decode(StartupMCPProjectConfig.self, from: data)
+    }
+
+    private static func diagnoseMCPServer(
+        serviceID: String,
+        name: String,
+        server: StartupMCPServerConfig,
+        logger: Logger
+    ) async {
+        guard server.type == nil || server.type == "http" else {
+            logger.warning("Codex plugin startup diagnostic: MCP server skipped", metadata: [
+                "service_id": "\(serviceID)",
+                "server": "\(name)",
+                "reason": "unsupported_type",
+                "type": "\(server.type ?? "")",
+            ])
+            return
+        }
+        guard let urlString = server.url, let url = URL(string: urlString) else {
+            logger.warning("Codex plugin startup diagnostic: MCP server skipped", metadata: [
+                "service_id": "\(serviceID)",
+                "server": "\(name)",
+                "reason": "invalid_url",
+                "url": "\(server.url ?? "")",
+            ])
+            return
+        }
+
+        do {
+            _ = try await postJSONRPC(
+                url: url,
+                payload: [
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": [
+                        "protocolVersion": "2024-11-05",
+                        "capabilities": [:],
+                        "clientInfo": [
+                            "name": "aib-startup-diagnostics",
+                            "version": "0.1.0",
+                        ],
+                    ],
+                ]
+            )
+            _ = try? await postJSONRPC(
+                url: url,
+                payload: [
+                    "jsonrpc": "2.0",
+                    "method": "notifications/initialized",
+                    "params": [:],
+                ]
+            )
+            let toolsResponse = try await postJSONRPC(
+                url: url,
+                payload: [
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/list",
+                    "params": [:],
+                ]
+            )
+            let tools = ((toolsResponse["result"] as? [String: Any])?["tools"] as? [[String: Any]]) ?? []
+            let toolNames = tools.compactMap { $0["name"] as? String }.sorted()
+            logger.info("Codex plugin startup diagnostic: MCP tools/list succeeded", metadata: [
+                "service_id": "\(serviceID)",
+                "server": "\(name)",
+                "url": "\(urlString)",
+                "tool_count": "\(tools.count)",
+                "tools": "\(toolNames.joined(separator: ","))",
+            ])
+        } catch {
+            logger.warning("Codex plugin startup diagnostic: MCP tools/list failed", metadata: [
+                "service_id": "\(serviceID)",
+                "server": "\(name)",
+                "url": "\(urlString)",
+                "error": "\(error)",
+            ])
+        }
+    }
+
+    private static func postJSONRPC(
+        url: URL,
+        payload: [String: Any]
+    ) async throws -> [String: Any] {
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 3
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json, text/event-stream", forHTTPHeaderField: "Accept")
+        request.httpBody = try JSONSerialization.data(withJSONObject: payload)
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        guard (200..<300).contains(status) else {
+            let body = String(data: data, encoding: .utf8) ?? ""
+            throw StartupDiagnosticError.httpStatus(status, body)
+        }
+        if data.isEmpty {
+            return [:]
+        }
+        let contentType = (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Content-Type") ?? ""
+        let jsonData = Self.jsonPayloadData(from: data, contentType: contentType)
+        guard let object = try JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else {
+            throw StartupDiagnosticError.invalidJSON
+        }
+        return object
+    }
+
+    private static func jsonPayloadData(from data: Data, contentType: String) -> Data {
+        let loweredContentType = contentType.lowercased()
+        guard loweredContentType.contains("text/event-stream"),
+              let text = String(data: data, encoding: .utf8) else {
+            return data
+        }
+
+        for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.hasPrefix("data:") else { continue }
+            let payload = trimmed
+                .dropFirst("data:".count)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !payload.isEmpty, payload != "[DONE]" else { continue }
+            return Data(payload.utf8)
+        }
+        return data
+    }
+}
+
+private struct StartupMCPProjectConfig: Decodable {
+    var mcpServers: [String: StartupMCPServerConfig]
+}
+
+private struct StartupMCPServerConfig: Decodable {
+    var type: String?
+    var url: String?
+}
+
+private enum StartupDiagnosticError: Error, CustomStringConvertible {
+    case httpStatus(Int, String)
+    case invalidJSON
+
+    var description: String {
+        switch self {
+        case .httpStatus(let status, let body):
+            return "HTTP \(status): \(body)"
+        case .invalidJSON:
+            return "Invalid JSON response"
+        }
     }
 }
 

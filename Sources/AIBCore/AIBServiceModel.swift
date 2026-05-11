@@ -1,3 +1,4 @@
+import AIBRuntimeCore
 import Foundation
 
 public struct AIBServiceModel: Identifiable, Hashable, Sendable {
@@ -37,6 +38,14 @@ public struct AIBServiceModel: Identifiable, Hashable, Sendable {
     }
     /// Explicitly configured model (nil = use default).
     public var configuredModel: String?
+    /// Codex reasoning effort for agent services.
+    public var reasoningEffort: String? {
+        if let configuredReasoningEffort { return configuredReasoningEffort }
+        if serviceKind == .agent { return Self.defaultAgentReasoningEffort }
+        return nil
+    }
+    /// Explicitly configured reasoning effort (nil = use default).
+    public var configuredReasoningEffort: String?
     /// Universal env vars from `workspace.yaml` (applied in both local and deploy).
     public var env: [String: String]
     /// Local-only env vars (emulator hosts, dev secrets). Never sent to deploy.
@@ -49,6 +58,8 @@ public struct AIBServiceModel: Identifiable, Hashable, Sendable {
 
     /// Default LLM model for agent services.
     public static let defaultAgentModel = "gpt-5.5"
+    /// Default reasoning effort for agent services.
+    public static let defaultAgentReasoningEffort = AIBReasoningEffort.defaultAgent.rawValue
 
     public init(
         repoID: String,
@@ -71,6 +82,7 @@ public struct AIBServiceModel: Identifiable, Hashable, Sendable {
         executionDirectoryPath: String? = nil,
         executionDirectoryEntries: [AIBExecutionDirectoryEntry] = [],
         model: String? = nil,
+        reasoningEffort: String? = nil,
         env: [String: String] = [:],
         localEnv: [String: String] = [:],
         deployEnv: [String: String] = [:],
@@ -97,6 +109,7 @@ public struct AIBServiceModel: Identifiable, Hashable, Sendable {
         self.executionDirectoryPath = executionDirectoryPath
         self.executionDirectoryEntries = executionDirectoryEntries
         self.configuredModel = model
+        self.configuredReasoningEffort = reasoningEffort
         self.env = env
         self.localEnv = localEnv
         self.deployEnv = deployEnv
