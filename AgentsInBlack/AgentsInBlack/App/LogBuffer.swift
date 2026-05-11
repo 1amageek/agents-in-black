@@ -30,7 +30,10 @@ final class LogBuffer: @MainActor LogSource {
     }
 
     func line(at index: Int) -> Entry {
-        lines[index]
+        guard lines.indices.contains(index) else {
+            return Entry(id: "\(idNamespace):missing:\(index)", text: "")
+        }
+        return lines[index]
     }
 
     func append(_ text: String) {

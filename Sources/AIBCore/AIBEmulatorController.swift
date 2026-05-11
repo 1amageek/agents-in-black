@@ -3,7 +3,6 @@ import AIBGateway
 import AIBRuntimeCore
 import AIBSupervisor
 import AIBWorkspace
-import ClaudeCode
 import Darwin
 import Foundation
 import Logging
@@ -123,8 +122,21 @@ public final class AIBEmulatorController {
     }
 
     public func shutdown() {
-        Task {
+        let gatewayToStop = gateway
+        Task { [weak self, gatewayToStop] in
             await LocalAgentHandler.cancelAllAsyncRuns()
+            await gatewayToStop?.control.shutdownActivityStreams()
+            do {
+                try await gatewayToStop?.stop()
+            } catch {
+                // shutdown() is best-effort and cannot throw. stop(graceful:)
+                // remains the reporting path for explicit user-initiated stops.
+            }
+            await MainActor.run {
+                if self?.gateway === gatewayToStop {
+                    self?.gateway = nil
+                }
+            }
         }
         requestActivityTask?.cancel()
         requestActivityTask = nil
@@ -138,7 +150,6 @@ public final class AIBEmulatorController {
         // nonisolated and uses a Mutex-protected container registry internally.
         supervisor?.forceTerminateAll()
         supervisor = nil
-        gateway = nil
         // Release the process controller and its vmnet network on app termination.
         processController = nil
         state = .stopped
@@ -200,7 +211,16 @@ public final class AIBEmulatorController {
 
             let gatewayControl = GatewayControl()
             let gateway = DevGateway(gatewayConfig: loaded.config.gateway, control: gatewayControl, logger: logger)
-            try await gateway.start()
+            do {
+                try await gateway.start()
+            } catch {
+                do {
+                    try await gateway.stop()
+                } catch {
+                    logger.warning("Gateway stop after start failure also failed", metadata: ["error": "\(error)"])
+                }
+                throw error
+            }
 
             let preparedConfigCache = PreparedConfigCache(initial: loaded)
             let configLogger = logger
@@ -218,23 +238,23 @@ public final class AIBEmulatorController {
 
             let hasAgentServices = loaded.config.services.contains { $0.kind == .agent }
             if hasAgentServices {
-                let authStatus = await ClaudeCodeAgentRunner.checkAuthStatus()
+                let authStatus = await CodexAppServerAgentRunner.checkAuthStatus()
                 guard authStatus.isOAuthAuthenticated else {
                     throw NSError(
                         domain: "AIBEmulatorController",
                         code: 1,
                         userInfo: [
                             NSLocalizedDescriptionKey:
-                                "Claude Code must be logged in with subscription OAuth (claude.ai) for local agent execution. API key auth is not allowed."
+                                "codex CLI must be installed and authenticated for local agent execution."
                         ]
                     )
                 }
             }
 
             // Register local handlers for agent services so requests are processed
-            // by Claude Code CLI (subscription auth) instead of the container.
+            // by Codex App Server CLI (subscription auth) instead of the container.
             for service in loaded.config.services where service.kind == .agent {
-                let resolvedPluginRootPath = ClaudeCodePluginBundle.pluginRootURL(
+                let resolvedPluginRootPath = CodexAppServerPluginBundle.pluginRootURL(
                     baseURL: URL(fileURLWithPath: workspaceRoot)
                         .appendingPathComponent(".aib/generated/runtime/plugins", isDirectory: true),
                     serviceID: service.id.rawValue
@@ -255,12 +275,12 @@ public final class AIBEmulatorController {
                 var metadata: Logger.Metadata = ["service_id": "\(service.id.rawValue)"]
                 if let pluginRootPath {
                     metadata["plugin_root"] = "\(pluginRootPath)"
-                    metadata["claude_plugin_command"] = "\(ClaudeCodePluginBundle.manualLaunchCommand(pluginRootPath: pluginRootPath))"
+                    metadata["codex_mcp_config"] = "\(CodexAppServerPluginBundle.mcpConfigPath(pluginRootPath: pluginRootPath))"
                 }
                 if let resolvedModel {
                     metadata["model"] = "\(resolvedModel)"
                 }
-                logger.info("Registered local Claude Code handler", metadata: metadata)
+                logger.info("Registered local Codex App Server handler", metadata: metadata)
             }
 
             let supervisor = DevSupervisor(

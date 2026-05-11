@@ -62,6 +62,56 @@ struct SecretsRoundTripTests {
         #expect(reloadedSvc.secrets == svc.secrets)
     }
 
+    @Test("Loading then saving preserves Codex ChatGPT auth secret config")
+    func roundTripPreservesCodexChatGPTAuth() throws {
+        let yaml = """
+        version: 1
+        workspace_name: test
+        gateway:
+          port: 9090
+        repos:
+          - name: agent
+            path: agent
+            runtime: node
+            framework: hono
+            package_manager: pnpm
+            status: discoverable
+            detection_confidence: medium
+            command_candidates: []
+            enabled: true
+            services_namespace: agent
+            services:
+              - id: node
+                kind: agent
+                mount_path: /agent/node
+                run:
+                  - pnpm
+                  - dev
+                codex:
+                  auth:
+                    mode: chatgpt
+                    secret: codex-auth-json
+                    version: latest
+        """
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("CodexAuthRoundTripTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let source = dir.appendingPathComponent("workspace.yaml")
+        try yaml.write(to: source, atomically: true, encoding: .utf8)
+
+        let loaded = try WorkspaceYAMLCodec.loadWorkspace(at: source.path)
+        let auth = try #require(loaded.repos.first?.services?.first?.codex?.auth)
+        #expect(auth.mode == "chatgpt")
+        #expect(auth.secret == "codex-auth-json")
+        #expect(auth.version == "latest")
+
+        let target = dir.appendingPathComponent("written.yaml")
+        try WorkspaceYAMLCodec.saveWorkspace(loaded, to: target.path)
+        let reloadedAuth = try #require(WorkspaceYAMLCodec.loadWorkspace(at: target.path).repos.first?.services?.first?.codex?.auth)
+        #expect(reloadedAuth == auth)
+    }
+
     @Test("Empty / absent secrets are omitted from saved YAML to keep diffs minimal")
     func emptySecretsAreOmittedOnSave() throws {
         let yaml = """

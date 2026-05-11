@@ -112,14 +112,23 @@ public final class DevGateway: Sendable {
     }
 
     public func stop() async throws {
-        let acceptTask = phase.withLock { p -> Task<Void, Never>? in
-            guard case .running(let task) = p else { return nil }
-            p = .stopped
-            return task
+        let stopAction = phase.withLock { p -> (acceptTask: Task<Void, Never>?, shouldShutdown: Bool) in
+            switch p {
+            case .idle, .starting:
+                p = .stopped
+                return (nil, true)
+            case .running(let task):
+                p = .stopped
+                return (task, true)
+            case .stopped:
+                return (nil, false)
+            }
         }
-        guard let acceptTask else { return }
-        acceptTask.cancel()
-        await acceptTask.value
+        guard stopAction.shouldShutdown else { return }
+        if let acceptTask = stopAction.acceptTask {
+            acceptTask.cancel()
+            await acceptTask.value
+        }
         try await httpClient.shutdown()
         try await eventLoopGroup.shutdownGracefully()
     }

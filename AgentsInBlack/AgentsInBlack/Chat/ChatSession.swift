@@ -5,7 +5,7 @@ import Foundation
 ///
 /// Supports two execution modes:
 /// - **A2A**: sends messages via HTTP/JSON-RPC to a running agent container or deployed service.
-/// - **Claude Code**: runs Claude Code CLI locally using subscription auth (no API cost).
+/// - **Codex App Server**: runs Codex locally through the app-server JSON-RPC protocol.
 ///
 /// The mode is determined by the `AgentRunner` injected at creation time.
 @MainActor

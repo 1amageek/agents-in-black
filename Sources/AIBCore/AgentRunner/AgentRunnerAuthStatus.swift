@@ -1,6 +1,6 @@
 import Foundation
 
-/// Authentication status for a runner that requires sign-in (e.g. Claude Code OAuth).
+/// Authentication status for a runner that requires sign-in (e.g. Codex auth).
 ///
 /// AIBCore-owned translation of runner-specific auth status types so callers
 /// (CLI, App) do not depend on the underlying SDK's auth status type.

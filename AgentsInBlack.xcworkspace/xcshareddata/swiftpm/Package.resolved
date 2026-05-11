@@ -1,5 +1,5 @@
 {
-  "originHash" : "68731543167cf0ff474b5536fcc8fc22c08710c95a61fea73dd1a472db739564",
+  "originHash" : "f9882330e3b3415c7f4118cf95180ed125321bbf8bcd410ac4f196f4816699a4",
   "pins" : [
     {
       "identity" : "async-http-client",
@@ -35,6 +35,24 @@
       "state" : {
         "revision" : "4c6f2467d5bc72b062c7a9b7e4cd77a09635ea8b",
         "version" : "1.3.1"
+      }
+    },
+    {
+      "identity" : "logviewer",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/1amageek/LogViewer.git",
+      "state" : {
+        "branch" : "main",
+        "revision" : "41822c6bb3b9478272bc43356f29f701d9efdf25"
+      }
+    },
+    {
+      "identity" : "mac-component",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/1amageek/mac-component.git",
+      "state" : {
+        "branch" : "main",
+        "revision" : "9695c8a7287dfc60aae9236a17a21ff5d2e46507"
       }
     },
     {
@@ -89,15 +107,6 @@
       "state" : {
         "revision" : "5aa1c0d1bc204908df47c2075bdbb39573d05e8d",
         "version" : "1.19.0"
-      }
-    },
-    {
-      "identity" : "swift-claude-code",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/1amageek/swift-claude-code.git",
-      "state" : {
-        "revision" : "7300311eba80e38e4ffab222edac6778865c601c",
-        "version" : "0.1.0"
       }
     },
     {

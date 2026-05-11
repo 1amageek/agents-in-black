@@ -1,22 +1,22 @@
 import Foundation
 
-public typealias ClaudeCodePluginTemplate = ClaudeCodePluginBundle.Template
-public typealias ClaudeCodePluginBinding = ClaudeCodePluginBundle.Binding
-public typealias ClaudeCodePluginRenderResult = ClaudeCodePluginBundle.RenderResult
+public typealias CodexAppServerPluginTemplate = CodexAppServerPluginBundle.Template
+public typealias CodexAppServerPluginBinding = CodexAppServerPluginBundle.Binding
+public typealias CodexAppServerPluginRenderResult = CodexAppServerPluginBundle.RenderResult
 
-/// Shared contract for generated Claude Code plugin bundles.
+/// Shared contract for generated Codex App Server plugin bundles.
 ///
 /// A bundle is generated per agent service and then rendered with environment-specific
 /// MCP bindings for local runtime or remote deployment.
-public enum ClaudeCodePluginBundle {
-    public static let manifestDirectoryName = ".claude-plugin"
+public enum CodexAppServerPluginBundle {
+    public static let manifestDirectoryName = ".codex-plugin"
     public static let manifestFileName = "plugin.json"
     public static let manifestRelativePath = "\(manifestDirectoryName)/\(manifestFileName)"
     public static let templateFileName = "template.json"
     public static let bindingFileName = "binding.json"
     public static let mcpConfigFileName = ".mcp.json"
-    public static let legacyClaudeConfigFileName = ".claude.json"
-    public static let usageFileName = "USE_WITH_CLAUDE.md"
+    public static let codexConfigFileName = ".codex.json"
+    public static let usageFileName = "USE_WITH_CODEX.md"
 
     public struct Template: Codable, Sendable, Equatable {
         public var serviceID: String
@@ -112,21 +112,23 @@ public enum ClaudeCodePluginBundle {
     }
 
     public static func pluginDirectoryArgument(pluginRootPath: String) -> String {
-        "--plugin-dir \(shellQuoted(pluginRootPath))"
+        "--listen stdio://"
     }
 
     public static func manualLaunchCommand(pluginRootPath: String) -> String {
-        "claude \(pluginDirectoryArgument(pluginRootPath: pluginRootPath))"
+        "codex app-server \(pluginDirectoryArgument(pluginRootPath: pluginRootPath))"
     }
 
     public static func usageDocument(pluginRootPath: String) -> String {
         """
-        # Use With Claude Code
+        # Use With Codex App Server
 
-        Plugin root:
+        Codex artifact root:
         `\(pluginRootPath)`
 
-        Launch Claude Code with this plugin:
+        AIB reads `.mcp.json` from this directory and passes the MCP servers to Codex App Server.
+
+        Manual app-server smoke test:
         ```bash
         \(manualLaunchCommand(pluginRootPath: pluginRootPath))
         ```
@@ -161,7 +163,7 @@ public enum ClaudeCodePluginBundle {
         let plugin = PluginManifest(
             name: manifestPluginName(serviceID: template.serviceID),
             version: "0.1.0",
-            description: "AIB-generated Claude Code plugin for \(template.serviceID)"
+            description: "AIB-generated Codex App Server plugin for \(template.serviceID)"
         )
         let mcpConfig = MCPProjectConfig(mcpServers: mcpServers)
         let encoder = JSONEncoder()
@@ -172,7 +174,7 @@ public enum ClaudeCodePluginBundle {
             File(relativePath: templateFileName, content: encoder.encode(template)),
             File(relativePath: bindingFileName, content: encoder.encode(binding)),
             File(relativePath: mcpConfigFileName, content: encoder.encode(mcpConfig)),
-            File(relativePath: legacyClaudeConfigFileName, content: encoder.encode(mcpConfig)),
+            File(relativePath: codexConfigFileName, content: encoder.encode(mcpConfig)),
         ]
 
         return RenderResult(template: template, binding: binding, files: files)

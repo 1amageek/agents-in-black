@@ -10,7 +10,7 @@ import Foundation
 /// or by fetching the live version from the provider — never persisted in
 /// the committed config.
 public struct SecretRef: Sendable, Codable, Hashable, Equatable {
-    /// Provider-side secret name (e.g. `ANTHROPIC_API_KEY`). Must match the
+    /// Provider-side secret name (e.g. `OPENAI_API_KEY`). Must match the
     /// name registered in the secret store; AIB does not auto-rename.
     public var secret: String
 

@@ -4,9 +4,9 @@ import Foundation
 ///
 /// Two implementations:
 /// - ``A2AAgentRunner``: sends messages via A2A HTTP/JSON-RPC (deployed or container agents).
-/// - ``ClaudeCodeAgentRunner``: runs Claude Code CLI locally using subscription auth (no API cost).
+/// - ``CodexAppServerAgentRunner``: runs Codex App Server CLI locally using subscription auth (no API cost).
 public protocol AgentRunner: Sendable {
-    /// Human-readable name shown in UI (e.g. "Claude Code", "A2A").
+    /// Human-readable name shown in UI (e.g. "Codex App Server", "A2A").
     static var displayName: String { get }
 
     /// Whether host-level prerequisites for this runner are satisfied.
@@ -25,7 +25,7 @@ public protocol AgentRunner: Sendable {
 /// Context passed to the runner for each send.
 public struct AgentRunnerContext: Sendable {
     public var serviceID: String
-    /// Absolute path to the generated Claude Code plugin root for this agent.
+    /// Absolute path to the generated Codex App Server plugin root for this agent.
     public var pluginRootPath: String?
     /// Absolute path to `.mcp.json` for the agent's MCP connections.
     public var mcpConfigPath: String?
@@ -66,7 +66,7 @@ public enum AgentRunnerEvent: Sendable {
     case toolUseComplete(name: String, input: String)
     /// Tool result data returned from a tool call.
     case toolResult(toolUseID: String, content: String)
-    /// System info from the Claude Code session (session ID, model, tools, MCP servers).
+    /// System info from the Codex App Server session (session ID, model, tools, MCP servers).
     case system(AgentRunnerSystemInfo)
     /// Execution metadata on completion.
     case done(AgentRunnerResult)
@@ -74,7 +74,7 @@ public enum AgentRunnerEvent: Sendable {
     case error(String)
 }
 
-/// System-level information from the Claude Code session.
+/// System-level information from the Codex App Server session.
 public struct AgentRunnerSystemInfo: Sendable {
     public var sessionID: String
     public var model: String

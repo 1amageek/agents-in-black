@@ -3,10 +3,10 @@ import AIBRuntimeCore
 import Foundation
 import Logging
 
-/// Handles agent HTTP requests locally via ClaudeCodeAgentRunner.
+/// Handles agent HTTP requests locally via CodexAppServerAgentRunner.
 ///
 /// Intercepts `/agent/chat` and `/a2a` endpoints and processes them
-/// using Claude Code CLI (subscription auth) instead of the container.
+/// using Codex App Server CLI (subscription auth) instead of the container.
 /// Returns nil for other paths so the gateway falls through to the container proxy.
 public enum LocalAgentHandler {
     public static func cancelAllAsyncRuns() async {
@@ -22,7 +22,7 @@ public enum LocalAgentHandler {
         model: String?,
         logger: Logger
     ) -> LocalRequestHandler {
-        let runner = ClaudeCodeAgentRunner(model: model)
+        let runner = CodexAppServerAgentRunner(model: model)
         let serviceIDString = serviceID.rawValue
         let log = logger
 
@@ -34,11 +34,11 @@ public enum LocalAgentHandler {
                 return handleHealth()
 
             case ("GET", "/.well-known/agent.json"):
-                log.info("[local] \(request.method) \(path) → Claude Code (Agent Card)", metadata: ["service_id": "\(serviceIDString)"])
+                log.info("[local] \(request.method) \(path) → Codex App Server (Agent Card)", metadata: ["service_id": "\(serviceIDString)"])
                 return handleAgentCard(serviceID: serviceIDString)
 
             case ("POST", "/agent/chat"):
-                log.info("[local] \(request.method) \(path) → Claude Code", metadata: ["service_id": "\(serviceIDString)"])
+                log.info("[local] \(request.method) \(path) → Codex App Server", metadata: ["service_id": "\(serviceIDString)"])
                 if prefersAsyncResponse(request.headers) {
                     return try await handleAsyncChat(
                         request: request,
@@ -59,7 +59,7 @@ public enum LocalAgentHandler {
                 )
 
             case ("POST", "/a2a"):
-                log.info("[local] \(request.method) \(path) → Claude Code (A2A)", metadata: ["service_id": "\(serviceIDString)"])
+                log.info("[local] \(request.method) \(path) → Codex App Server (A2A)", metadata: ["service_id": "\(serviceIDString)"])
                 return try await handleA2A(
                     request: request,
                     runner: runner,
@@ -88,7 +88,7 @@ public enum LocalAgentHandler {
     private static func handleAgentCard(serviceID: String) -> LocalResponse {
         let card = A2AAgentCard(
             name: serviceID,
-            description: "Local Claude Code agent",
+            description: "Local Codex App Server agent",
             capabilities: A2ACapabilities(streaming: false, pushNotifications: false),
             defaultInputModes: ["text"],
             defaultOutputModes: ["text"],
@@ -96,7 +96,7 @@ public enum LocalAgentHandler {
                 A2ASkill(
                     id: serviceID,
                     name: serviceID,
-                    description: "Local Claude Code-backed agent"
+                    description: "Local Codex App Server-backed agent"
                 ),
             ]
         )
@@ -124,7 +124,7 @@ public enum LocalAgentHandler {
 
     private static func handleChat(
         request: LocalRequest,
-        runner: ClaudeCodeAgentRunner,
+        runner: CodexAppServerAgentRunner,
         serviceID: String,
         pluginRootPath: String?,
         executionDirectory: String?,
@@ -165,26 +165,26 @@ public enum LocalAgentHandler {
 
             case .textComplete(let fullText):
                 logger.info(
-                    "[claude] text complete chars=\(fullText.count)\n\(fullText)",
+                    "[codex] text complete chars=\(fullText.count)\n\(fullText)",
                     metadata: ["service_id": "\(serviceID)"]
                 )
 
             case .toolUse(let name):
-                logger.info("[claude] tool_use: \(name)", metadata: ["service_id": "\(serviceID)"])
+                logger.info("[codex] tool_use: \(name)", metadata: ["service_id": "\(serviceID)"])
                 let payload = try JSONSerialization.data(withJSONObject: ["name": name, "input": [:] as [String: Any]])
                 appendSSE(event: "tool_use", data: payload)
 
             case .toolUseComplete(let name, let input):
-                logger.info("[claude] tool_call: \(name)\n\(formatToolInput(input))", metadata: ["service_id": "\(serviceID)"])
+                logger.info("[codex] tool_call: \(name)\n\(formatToolInput(input))", metadata: ["service_id": "\(serviceID)"])
 
             case .toolResult(let toolUseID, let content):
-                logger.info("[claude] tool_response: id=\(toolUseID.prefix(12)) chars=\(content.count)\n\(content.prefix(1000))", metadata: ["service_id": "\(serviceID)"])
+                logger.info("[codex] tool_response: id=\(toolUseID.prefix(12)) chars=\(content.count)\n\(content.prefix(1000))", metadata: ["service_id": "\(serviceID)"])
 
             case .system(let info):
                 let mcpStatus = zip(info.mcpServerNames, info.mcpServerStatuses)
                     .map { "\($0)=\($1)" }.joined(separator: ", ")
                 logger.info(
-                    "[claude] system session=\(info.sessionID.prefix(8)) model=\(info.model) tools=\(info.tools.count) mcp=[\(mcpStatus)] mode=\(info.permissionMode)",
+                    "[codex] system session=\(info.sessionID.prefix(8)) model=\(info.model) tools=\(info.tools.count) mcp=[\(mcpStatus)] mode=\(info.permissionMode)",
                     metadata: ["service_id": "\(serviceID)"]
                 )
 
@@ -192,7 +192,7 @@ public enum LocalAgentHandler {
                 let cost = result.totalCostUSD.map { String(format: "$%.4f", $0) } ?? "-"
                 let turns = result.numTurns.map { "\($0)" } ?? "-"
                 let duration = result.durationMS.map { "\($0)ms" } ?? "-"
-                logger.info("[claude] done turns=\(turns) cost=\(cost) duration=\(duration)", metadata: ["service_id": "\(serviceID)"])
+                logger.info("[codex] done turns=\(turns) cost=\(cost) duration=\(duration)", metadata: ["service_id": "\(serviceID)"])
                 let payload = try JSONSerialization.data(withJSONObject: [
                     "duration_ms": result.durationMS ?? 0,
                     "num_turns": result.numTurns ?? 0,
@@ -202,7 +202,7 @@ public enum LocalAgentHandler {
                 appendSSE(event: "result", data: payload)
 
             case .error(let message):
-                logger.error("[claude] error: \(message)", metadata: ["service_id": "\(serviceID)"])
+                logger.error("[codex] error: \(message)", metadata: ["service_id": "\(serviceID)"])
                 let payload = try JSONSerialization.data(withJSONObject: ["message": message])
                 appendSSE(event: "error", data: payload)
             }
@@ -249,7 +249,7 @@ public enum LocalAgentHandler {
 
         let runID = UUID()
         let task = Task.detached(priority: .userInitiated) {
-            let runner = ClaudeCodeAgentRunner(model: model)
+            let runner = CodexAppServerAgentRunner(model: model)
 
             defer {
                 cleanupPreparedChatRun(preparedRun)
@@ -266,20 +266,20 @@ public enum LocalAgentHandler {
                             break
                         case .textComplete(let fullText):
                             logger.info(
-                                "[claude] async text complete chars=\(fullText.count)\n\(fullText)",
+                                "[codex] async text complete chars=\(fullText.count)\n\(fullText)",
                                 metadata: ["service_id": "\(serviceID)"]
                             )
                         case .toolUse(let name):
-                            logger.info("[claude] tool_use: \(name)", metadata: ["service_id": "\(serviceID)"])
+                            logger.info("[codex] tool_use: \(name)", metadata: ["service_id": "\(serviceID)"])
                         case .toolUseComplete(let name, let input):
-                            logger.info("[claude] tool_call: \(name)\n\(formatToolInput(input))", metadata: ["service_id": "\(serviceID)"])
+                            logger.info("[codex] tool_call: \(name)\n\(formatToolInput(input))", metadata: ["service_id": "\(serviceID)"])
                         case .toolResult(let toolUseID, let content):
-                            logger.info("[claude] tool_response: id=\(toolUseID.prefix(12)) chars=\(content.count)\n\(content.prefix(1000))", metadata: ["service_id": "\(serviceID)"])
+                            logger.info("[codex] tool_response: id=\(toolUseID.prefix(12)) chars=\(content.count)\n\(content.prefix(1000))", metadata: ["service_id": "\(serviceID)"])
                         case .system(let info):
                             let mcpStatus = zip(info.mcpServerNames, info.mcpServerStatuses)
                                 .map { "\($0)=\($1)" }.joined(separator: ", ")
                             logger.info(
-                                "[claude] system session=\(info.sessionID.prefix(8)) model=\(info.model) tools=\(info.tools.count) mcp=[\(mcpStatus)] mode=\(info.permissionMode)",
+                                "[codex] system session=\(info.sessionID.prefix(8)) model=\(info.model) tools=\(info.tools.count) mcp=[\(mcpStatus)] mode=\(info.permissionMode)",
                                 metadata: ["service_id": "\(serviceID)"]
                             )
                         case .done(let result):
@@ -287,16 +287,16 @@ public enum LocalAgentHandler {
                             let turns = result.numTurns.map { "\($0)" } ?? "-"
                             let duration = result.durationMS.map { "\($0)ms" } ?? "-"
                             logger.info(
-                                "[claude] async done turns=\(turns) cost=\(cost) duration=\(duration)",
+                                "[codex] async done turns=\(turns) cost=\(cost) duration=\(duration)",
                                 metadata: ["service_id": "\(serviceID)"]
                             )
                         case .error(let message):
-                            logger.error("[claude] async error: \(message)", metadata: ["service_id": "\(serviceID)"])
+                            logger.error("[codex] async error: \(message)", metadata: ["service_id": "\(serviceID)"])
                         }
                     }
                 } catch {
                     logger.error(
-                        "[claude] async run failed: \(error.localizedDescription)",
+                        "[codex] async run failed: \(error.localizedDescription)",
                         metadata: ["service_id": "\(serviceID)"]
                     )
                 }
@@ -338,7 +338,7 @@ public enum LocalAgentHandler {
 
     private static func handleA2A(
         request: LocalRequest,
-        runner: ClaudeCodeAgentRunner,
+        runner: CodexAppServerAgentRunner,
         serviceID: String,
         pluginRootPath: String?,
         executionDirectory: String?,
@@ -372,7 +372,7 @@ public enum LocalAgentHandler {
         let context = AgentRunnerContext(
             serviceID: serviceID,
             pluginRootPath: pluginRootPath,
-            mcpConfigPath: pluginRootPath.map { ClaudeCodePluginBundle.mcpConfigPath(pluginRootPath: $0) },
+            mcpConfigPath: pluginRootPath.map { CodexAppServerPluginBundle.mcpConfigPath(pluginRootPath: $0) },
             executionDirectory: executionDirectory
         )
 
@@ -454,7 +454,7 @@ public enum LocalAgentHandler {
         }
 
         let requestContext = json["context"] as? [String: Any]
-        let baseMCPConfigPath = pluginRootPath.map { ClaudeCodePluginBundle.mcpConfigPath(pluginRootPath: $0) }
+        let baseMCPConfigPath = pluginRootPath.map { CodexAppServerPluginBundle.mcpConfigPath(pluginRootPath: $0) }
         let effectiveMCPConfigPath: String?
         let tempMCPConfigURL: URL?
         if let requestContext, let basePath = baseMCPConfigPath {

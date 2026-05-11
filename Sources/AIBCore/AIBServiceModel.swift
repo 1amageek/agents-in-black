@@ -28,7 +28,7 @@ public struct AIBServiceModel: Identifiable, Hashable, Sendable {
     public var executionDirectoryPath: String?
     /// Relevant agent-runtime files discovered under the execution directory.
     public var executionDirectoryEntries: [AIBExecutionDirectoryEntry]
-    /// LLM model identifier for agent services (e.g., "claude-sonnet-4-6").
+    /// LLM model identifier for agent services (e.g., "gpt-5.5").
     /// Returns the configured model, or the default for agent services.
     public var model: String? {
         if let configuredModel { return configuredModel }
@@ -48,7 +48,7 @@ public struct AIBServiceModel: Identifiable, Hashable, Sendable {
     public var secrets: [String: AIBServiceSecretRef]
 
     /// Default LLM model for agent services.
-    public static let defaultAgentModel = "claude-sonnet-4-6"
+    public static let defaultAgentModel = "gpt-5.5"
 
     public init(
         repoID: String,

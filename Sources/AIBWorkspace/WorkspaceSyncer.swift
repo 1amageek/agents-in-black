@@ -135,7 +135,7 @@ public enum WorkspaceSyncer {
             workspaceRoot: workspaceRoot,
             gatewayPort: workspace.gateway.port
         )
-        try writeRuntimeClaudeCodePlugins(
+        try writeRuntimeCodexAppServerPlugins(
             resolved: resolved,
             workspaceRoot: workspaceRoot,
             workspace: workspace
@@ -204,9 +204,9 @@ public enum WorkspaceSyncer {
         }
     }
 
-    /// Write per-agent Claude Code plugin bundles for local runtime.
+    /// Write per-agent Codex App Server plugin bundles for local runtime.
     /// Bundles are staged under `.aib/generated/runtime/plugins/{service-id}/`.
-    public static func writeRuntimeClaudeCodePlugins(
+    public static func writeRuntimeCodexAppServerPlugins(
         resolved: ResolvedConfig,
         workspaceRoot: String,
         workspace: AIBWorkspaceConfig
@@ -253,11 +253,11 @@ public enum WorkspaceSyncer {
                 defaultPathProvider: { target in target.mcp?.path ?? "/mcp" }
             )
 
-            let template = ClaudeCodePluginTemplate(
+            let template = CodexAppServerPluginTemplate(
                 serviceID: namespacedID,
                 servers: mcpTargets.map { target in
                     .init(
-                        name: ClaudeCodePluginBundle.mcpServerName(
+                        name: CodexAppServerPluginBundle.mcpServerName(
                             serviceRef: target.serviceRef,
                             resolvedURL: target.resolvedURL
                         ),
@@ -266,11 +266,11 @@ public enum WorkspaceSyncer {
                     )
                 }
             )
-            let binding = ClaudeCodePluginBinding(
+            let binding = CodexAppServerPluginBinding(
                 serviceID: namespacedID,
                 servers: mcpTargets.map { target in
                     .init(
-                        name: ClaudeCodePluginBundle.mcpServerName(
+                        name: CodexAppServerPluginBundle.mcpServerName(
                             serviceRef: target.serviceRef,
                             resolvedURL: target.resolvedURL
                         ),
@@ -279,7 +279,7 @@ public enum WorkspaceSyncer {
                 }
             )
 
-            try writeRuntimeClaudeCodePlugin(
+            try writeRuntimeCodexAppServerPlugin(
                 serviceID: namespacedID,
                 assignedSkillIDs: assignedSkillIDs,
                 workspaceSkillsByID: workspaceSkillsByID,
@@ -352,7 +352,8 @@ public enum WorkspaceSyncer {
                 health: .init(),
                 restart: .init(),
                 concurrency: .init(),
-                auth: .init()
+                auth: .init(),
+                codex: resolvedKind == .agent ? .defaultChatGPTAuth : nil
             )]
         }
 
@@ -381,7 +382,8 @@ public enum WorkspaceSyncer {
                 health: .init(),
                 restart: .init(),
                 concurrency: .init(),
-                auth: .init()
+                auth: .init(),
+                codex: resolvedKind == .agent ? .defaultChatGPTAuth : nil
             ))
         }
         return services
@@ -409,6 +411,15 @@ public enum WorkspaceSyncer {
             mcpConfig = nil
         }
         let a2aConfig = inline.a2a.map { A2AServiceConfig(cardPath: $0.cardPath ?? "/.well-known/agent.json", rpcPath: $0.rpcPath ?? "/a2a") }
+        let codexConfig = inline.codex.map { codex in
+            CodexServiceConfig(auth: codex.auth.map { auth in
+                CodexAuthConfig(
+                    mode: CodexAuthMode(rawValue: auth.mode) ?? .chatgpt,
+                    secret: auth.secret,
+                    version: auth.version
+                )
+            })
+        } ?? (resolvedKind == .agent ? .defaultChatGPTAuth : nil)
 
         return ServiceConfig(
             id: ServiceID(inline.id),
@@ -449,12 +460,13 @@ public enum WorkspaceSyncer {
             auth: .init(mode: authMode),
             connections: connectionConfig,
             mcp: mcpConfig,
-            a2a: a2aConfig
+            a2a: a2aConfig,
+            codex: codexConfig
         )
     }
 
     /// Default LLM model for agent services when none is explicitly configured.
-    static let defaultAgentModel = "claude-sonnet-4-6"
+    static let defaultAgentModel = "gpt-5.5"
 
     /// Merge the dedicated `model` field into the env dict as `MODEL`.
     /// Uses `defaultAgentModel` when no model is specified for agent services.
@@ -524,22 +536,22 @@ public enum WorkspaceSyncer {
         value.replacingOccurrences(of: "/", with: "__")
     }
 
-    private static func writeRuntimeClaudeCodePlugin(
+    private static func writeRuntimeCodexAppServerPlugin(
         serviceID: String,
         assignedSkillIDs: [String],
         workspaceSkillsByID: [String: WorkspaceSkillConfig],
         workspaceRoot: String,
         executionRootPath: String,
         outputRoot: URL,
-        template: ClaudeCodePluginTemplate,
-        binding: ClaudeCodePluginBinding
+        template: CodexAppServerPluginTemplate,
+        binding: CodexAppServerPluginBinding
     ) throws {
         let workspaceSkillsRoot = SkillBundleLoader.workspaceSkillsRootURL(workspaceRoot: workspaceRoot)
         let executionRootURL = URL(fileURLWithPath: executionRootPath)
-        let serviceOutputRoot = ClaudeCodePluginBundle.pluginRootURL(baseURL: outputRoot, serviceID: serviceID)
+        let serviceOutputRoot = CodexAppServerPluginBundle.pluginRootURL(baseURL: outputRoot, serviceID: serviceID)
 
         try FileManager.default.createDirectory(at: serviceOutputRoot, withIntermediateDirectories: true)
-        let rendered = try ClaudeCodePluginBundle.render(template: template, binding: binding)
+        let rendered = try CodexAppServerPluginBundle.render(template: template, binding: binding)
         for file in rendered.files {
             let destinationURL = serviceOutputRoot.appendingPathComponent(file.relativePath, isDirectory: false)
             try FileManager.default.createDirectory(
@@ -579,8 +591,8 @@ public enum WorkspaceSyncer {
             }
         }
 
-        let usageURL = serviceOutputRoot.appendingPathComponent(ClaudeCodePluginBundle.usageFileName, isDirectory: false)
-        try ClaudeCodePluginBundle
+        let usageURL = serviceOutputRoot.appendingPathComponent(CodexAppServerPluginBundle.usageFileName, isDirectory: false)
+        try CodexAppServerPluginBundle
             .usageDocument(pluginRootPath: serviceOutputRoot.path)
             .write(to: usageURL, atomically: true, encoding: .utf8)
     }

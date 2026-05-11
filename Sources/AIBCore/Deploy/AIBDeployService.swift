@@ -637,14 +637,39 @@ public enum AIBDeployService {
                 envVars["AIB_CONNECTIONS_FILE"] = "/app/.aib-connections.json"
             }
             if service.kind == .agent {
-                // Surface the staged Claude Code plugin path so the agent runtime can
-                // pass it to the SDK's `plugins: [{ type: 'local', path }]` option.
+                // Surface the staged Codex artifact path so the agent runtime can
+                // pass MCP and skill files to Codex App Server.
                 envVars["AIB_PLUGIN_DIR"] = pluginRuntimePath
                 // Agent services run as unattended backend workers. AIB owns that runtime
-                // contract, so deploys must bypass Claude Code permission prompts instead
+                // contract, so deploys must bypass Codex permission prompts instead
                 // of hanging on approvals that cannot be answered in Cloud Run.
                 envVars["AIB_AGENT_PERMISSION_MODE"] = "bypassPermissions"
                 envVars["AIB_AGENT_ALLOW_DANGEROUSLY_SKIP_PERMISSIONS"] = "true"
+            }
+
+            var declaredSecretRefs = service.secrets
+            var suppressedDetectedSecrets = Set<String>()
+            if service.kind == .agent, let codexAuth = service.codex?.auth {
+                switch codexAuth.mode {
+                case .chatgpt:
+                    let secretName = codexAuth.secret.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if secretName.isEmpty {
+                        fatalErrors.append(
+                            "Service '\(service.id.rawValue)': codex.auth.secret is required when codex.auth.mode is chatgpt."
+                        )
+                        continue
+                    }
+                    envVars.removeValue(forKey: "OPENAI_API_KEY")
+                    envVars.removeValue(forKey: "CODEX_API_KEY")
+                    suppressedDetectedSecrets.formUnion(["OPENAI_API_KEY", "CODEX_API_KEY"])
+                    envVars["AIB_CODEX_AUTH_MODE"] = "chatgpt"
+                    envVars["AIB_CODEX_AUTH_JSON"] = "/var/secrets/aib/codex/auth.json"
+                    envVars["CODEX_HOME"] = "/tmp/aib-codex-home"
+                    declaredSecretRefs["/var/secrets/aib/codex/auth.json"] = SecretRef(
+                        secret: secretName,
+                        version: codexAuth.version
+                    )
+                }
             }
 
             // Scan source for env var references to detect secrets and missing vars
@@ -657,9 +682,9 @@ public enum AIBDeployService {
             // a secret pinned via SecretRef is mounted from Secret Manager
             // automatically, so it should NOT appear in the unresolved list
             // (which is the set the UI prompts for).
-            let declaredSecretRefs = service.secrets
             let unresolvedSecrets = detectedVars
                 .filter { $0.kind == .secret }
+                .filter { !suppressedDetectedSecrets.contains($0.name) }
                 .filter { !declaredSecretRefs.keys.contains($0.name) }
                 .filter { !envVars.keys.contains($0.name) }
                 .map(\.name)
@@ -697,17 +722,17 @@ public enum AIBDeployService {
                 )
             }
 
-            let claudeCodePluginArtifacts: [AIBDeployArtifact]
+            let codexAppServerPluginArtifacts: [AIBDeployArtifact]
             do {
                 if service.kind == .agent {
-                    claudeCodePluginArtifacts = try resolveClaudeCodePluginArtifacts(
+                    codexAppServerPluginArtifacts = try resolveCodexAppServerPluginArtifacts(
                         serviceID: service.id.rawValue,
                         workspaceRoot: workspaceRoot,
                         repoPath: repoPath,
                         resolvedConnections: resolvedConnections
                     )
                 } else {
-                    claudeCodePluginArtifacts = []
+                    codexAppServerPluginArtifacts = []
                 }
             } catch {
                 fatalErrors.append(
@@ -728,7 +753,7 @@ public enum AIBDeployService {
                     deployConfig: AIBDeployArtifact(relativePath: "", content: "", source: .generated),
                     mcpConnectionConfig: mcpConnectionArtifact,
                     skillConfigs: skillArtifacts,
-                    claudeCodePluginArtifacts: claudeCodePluginArtifacts,
+                    codexAppServerPluginArtifacts: codexAppServerPluginArtifacts,
                     executionDirectoryConfigs: executionDirectoryArtifacts
                 ),
                 resourceConfig: resourceConfig,
@@ -893,12 +918,12 @@ public enum AIBDeployService {
                 }
             }
 
-            if !service.artifacts.claudeCodePluginArtifacts.isEmpty {
+            if !service.artifacts.codexAppServerPluginArtifacts.isEmpty {
                 let pluginDir = serviceDeployDir.appendingPathComponent("plugin")
                 try fm.createDirectory(at: pluginDir, withIntermediateDirectories: true)
 
                 let stagingPrefix = "\(pluginStagingRoot)/"
-                for artifact in service.artifacts.claudeCodePluginArtifacts {
+                for artifact in service.artifacts.codexAppServerPluginArtifacts {
                     // Plugin artifacts are produced with a build-context staging prefix
                     // (`__aib_deploy/plugin/...`). Strip it for the local inspection copy
                     // so the on-disk layout matches what the runtime sees at /app/.aib-plugin.
@@ -916,8 +941,8 @@ public enum AIBDeployService {
                     try artifact.content.write(to: destination, options: .atomic)
                 }
 
-                let usageURL = pluginDir.appendingPathComponent(ClaudeCodePluginBundle.usageFileName)
-                try ClaudeCodePluginBundle
+                let usageURL = pluginDir.appendingPathComponent(CodexAppServerPluginBundle.usageFileName)
+                try CodexAppServerPluginBundle
                     .usageDocument(pluginRootPath: pluginDir.path)
                     .write(to: usageURL, atomically: true, encoding: .utf8)
             }
@@ -1219,7 +1244,7 @@ extension AIBDeployService {
     /// Read repository-bundled skill directories at `<repoPath>/skills/<id>/`.
     /// These are skills shipped with the agent code itself (as opposed to workspace-level
     /// skills declared via `services[].skills:` in workspace.yaml). They are folded into
-    /// the Claude Code plugin bundle so the SDK discovers them at runtime.
+    /// the Codex App Server bundle so the runtime discovers them.
     static func collectRepoSkillFiles(
         workspaceRoot: String,
         repoPath: String
@@ -1268,18 +1293,18 @@ extension AIBDeployService {
         return results
     }
 
-    static func resolveClaudeCodePluginArtifacts(
+    static func resolveCodexAppServerPluginArtifacts(
         serviceID: String,
         workspaceRoot: String,
         repoPath: String,
         resolvedConnections: AIBDeployResolvedConnections
     ) throws -> [AIBDeployArtifact] {
-        let template = ClaudeCodePluginTemplate(
+        let template = CodexAppServerPluginTemplate(
             serviceID: serviceID,
             servers: resolvedConnections.mcpServers.map { target in
                 let serviceRef = pluginServiceRef(from: target)
                 return .init(
-                    name: ClaudeCodePluginBundle.mcpServerName(
+                    name: CodexAppServerPluginBundle.mcpServerName(
                         serviceRef: serviceRef,
                         resolvedURL: target.resolvedURL
                     ),
@@ -1288,12 +1313,12 @@ extension AIBDeployService {
                 )
             }
         )
-        let binding = ClaudeCodePluginBinding(
+        let binding = CodexAppServerPluginBinding(
             serviceID: serviceID,
             servers: resolvedConnections.mcpServers.map { target in
                 let serviceRef = pluginServiceRef(from: target)
                 return .init(
-                    name: ClaudeCodePluginBundle.mcpServerName(
+                    name: CodexAppServerPluginBundle.mcpServerName(
                         serviceRef: serviceRef,
                         resolvedURL: target.resolvedURL
                     ),
@@ -1301,7 +1326,7 @@ extension AIBDeployService {
                 )
             }
         )
-        let rendered = try ClaudeCodePluginBundle.render(template: template, binding: binding)
+        let rendered = try CodexAppServerPluginBundle.render(template: template, binding: binding)
 
         var artifacts: [AIBDeployArtifact] = rendered.files.map {
             AIBDeployArtifact(

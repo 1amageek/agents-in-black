@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import AIBConfig
 @testable import AIBCore
 
 /// Locks in the env-flag contract for `gcloud run deploy`. AIB previously used
@@ -60,9 +61,35 @@ struct GCPCloudRunProviderDeployCommandTests {
         #expect(envValue.contains("INTERNAL_SIGNING_SECRET=s3cret"))
     }
 
+    @Test("Declared secret refs can mount Codex auth.json as a file")
+    func declaredSecretRefsCanMountCodexAuthFile() {
+        let provider = GCPCloudRunProvider()
+        let plan = makePlan(
+            envVars: [
+                "AIB_CODEX_AUTH_MODE": "chatgpt",
+                "AIB_CODEX_AUTH_JSON": "/var/secrets/aib/codex/auth.json",
+                "CODEX_HOME": "/tmp/aib-codex-home",
+            ],
+            declaredSecretRefs: [
+                "/var/secrets/aib/codex/auth.json": SecretRef(secret: "codex-auth-json", version: "latest"),
+            ]
+        )
+        let target = makeTarget()
+
+        let commands = provider.deployCommands(service: plan, imageTag: "img:latest", targetConfig: target)
+        let args = try! #require(commands.first).arguments
+        let secretsIndex = try! #require(args.firstIndex(of: "--set-secrets"))
+        let secretsValue = args[secretsIndex + 1]
+
+        #expect(secretsValue.contains("/var/secrets/aib/codex/auth.json=codex-auth-json:latest"))
+    }
+
     // MARK: - Helpers
 
-    private func makePlan(envVars: [String: String]) -> AIBDeployServicePlan {
+    private func makePlan(
+        envVars: [String: String],
+        declaredSecretRefs: [String: SecretRef] = [:]
+    ) -> AIBDeployServicePlan {
         AIBDeployServicePlan(
             id: "svc",
             serviceKind: .mcp,
@@ -75,7 +102,8 @@ struct GCPCloudRunProviderDeployCommandTests {
                 deployConfig: AIBDeployArtifact(relativePath: "clouddeploy.yaml", content: "", source: .generated)
             ),
             envVars: envVars,
-            isPublic: true
+            isPublic: true,
+            declaredSecretRefs: declaredSecretRefs
         )
     }
 

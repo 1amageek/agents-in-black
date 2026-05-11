@@ -867,6 +867,12 @@ public actor ContainerProcessController: ProcessController {
         let imageStoreRoot = cacheRoot.appendingPathComponent("images")
         try FileManager.default.createDirectory(at: imageStoreRoot, withIntermediateDirectories: true)
 
+        // Reap orphaned container directories from previous runs that crashed or were
+        // force-killed before they could call ContainerManager.delete(id). Each
+        // leaked directory holds a ~3.7 GB rootfs ext4 image, so without this they
+        // accumulate without bound.
+        purgeOrphanedContainerDirectories(at: imageStoreRoot.appendingPathComponent("containers"))
+
         // Initialize ContainerManager with kernel, init filesystem reference, image store root,
         // and vmnet shared-mode networking for guest outbound access.
         // Requires `com.apple.developer.networking.vmnet` entitlement.
@@ -882,6 +888,73 @@ public actor ContainerProcessController: ProcessController {
             "kernel": .string(kernel.path.path),
             "cache": .string(cacheRoot.path),
         ])
+    }
+
+    /// Remove `aib-`-prefixed container directories left over from previous runs.
+    ///
+    /// Containers are tracked only in memory; if the host process dies before
+    /// `ContainerManager.delete(id)` runs, the on-disk directory is leaked.
+    /// A 60-second mtime threshold avoids racing with another in-flight AIB
+    /// process that may have just created a directory it is about to use.
+    private func purgeOrphanedContainerDirectories(at containersRoot: URL) {
+        let fileManager = FileManager.default
+        guard let entries = try? fileManager.contentsOfDirectory(
+            at: containersRoot,
+            includingPropertiesForKeys: [.contentModificationDateKey, .isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return
+        }
+
+        let now = Date()
+        let safetyThreshold: TimeInterval = 60
+        var purgedCount = 0
+        var purgedBytes: UInt64 = 0
+
+        for entry in entries {
+            guard entry.lastPathComponent.hasPrefix("aib-") else { continue }
+            let resourceValues = try? entry.resourceValues(forKeys: [.contentModificationDateKey, .isDirectoryKey])
+            guard resourceValues?.isDirectory == true else { continue }
+            if let mtime = resourceValues?.contentModificationDate,
+               now.timeIntervalSince(mtime) < safetyThreshold {
+                continue
+            }
+            let size = directorySize(at: entry)
+            do {
+                try fileManager.removeItem(at: entry)
+                purgedCount += 1
+                purgedBytes += size
+            } catch {
+                logger.debug("Failed to purge orphaned container directory", metadata: [
+                    "path": .string(entry.path),
+                    "error": .string("\(error)"),
+                ])
+            }
+        }
+
+        if purgedCount > 0 {
+            logger.info("Purged orphaned container directories", metadata: [
+                "count": .stringConvertible(purgedCount),
+                "bytes_freed": .stringConvertible(purgedBytes),
+            ])
+        }
+    }
+
+    private func directorySize(at url: URL) -> UInt64 {
+        let fileManager = FileManager.default
+        guard let enumerator = fileManager.enumerator(
+            at: url,
+            includingPropertiesForKeys: [.totalFileAllocatedSizeKey, .fileAllocatedSizeKey]
+        ) else {
+            return 0
+        }
+        var total: UInt64 = 0
+        for case let fileURL as URL in enumerator {
+            let values = try? fileURL.resourceValues(forKeys: [.totalFileAllocatedSizeKey, .fileAllocatedSizeKey])
+            let size = values?.totalFileAllocatedSize ?? values?.fileAllocatedSize ?? 0
+            total += UInt64(size)
+        }
+        return total
     }
 
     // MARK: - Cleanup
@@ -907,7 +980,10 @@ public actor ContainerProcessController: ProcessController {
         for containerID in containers.keys {
             cleanupSocket(containerID: containerID)
         }
-        // Stop all containers (releases their EventLoopGroups)
+        // Stop all containers (releases their EventLoopGroups) and remove their
+        // on-disk container directories under `~/.aib/container-cache/images/containers/`.
+        // Without delete, each leftover directory keeps the rootfs ext4 image
+        // (~3.7 GB per container) and accumulates indefinitely.
         for (containerID, container) in containers {
             do {
                 try await container.stop()
@@ -917,6 +993,7 @@ public actor ContainerProcessController: ProcessController {
                     "error": .string("\(error)"),
                 ])
             }
+            cleanupManager(id: containerID)
         }
         containers.removeAll()
         logger.info("ProcessController stopAll complete", metadata: [

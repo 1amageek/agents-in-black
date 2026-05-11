@@ -103,16 +103,19 @@ Status: Draft (Spec Freeze for v1 implementation)
 
 ### 4.2 Agent サービスのローカル契約
 
-`kind: agent` のローカル実行は、通常の service container ではなく Claude Code CLI
+`kind: agent` のローカル実行は、通常の service container ではなく Codex App Server
 を使う local handler を優先する。
 
 - `agent` は local target で container 起動対象にしない
 - Agent Card (`/.well-known/agent.json`) は local handler が返す
 - MCP / その他 HTTP service は build mode に応じて host process または container で実行する
-- Claude Code 向け artifact は `.aib/generated/runtime/plugins/{agent-id}/` に生成する
-- plugin root は `.claude-plugin/plugin.json` を含み、Claude Code には `--plugin-dir` で渡す
-- plugin root には `USE_WITH_CLAUDE.md` を生成し、外部 Claude Code session からの利用コマンドを明示する
+- Codex App Server 向け artifact は `.aib/generated/runtime/plugins/{agent-id}/` に生成する
+- plugin root は `.codex-plugin/plugin.json` と `.mcp.json` を含み、local handler が MCP 設定を app-server に渡す
+- plugin root には `USE_WITH_CODEX.md` を生成し、手動 smoke test の app-server 起動コマンドを明示する
 - plugin bundle は static package、`binding.json` は local / remote で別 render する
+- Cloud Run の Codex サブスク認証は `codex.auth.mode: chatgpt` で宣言し、AIB が Secret Manager の
+  `auth.json` を `/var/secrets/aib/codex/auth.json` に mount する。agent runtime はこれを writable な
+  `CODEX_HOME/auth.json` にコピーしてから `codex app-server` を起動する。
 
 ## 5. 設定ソース（workspace.yaml）
 

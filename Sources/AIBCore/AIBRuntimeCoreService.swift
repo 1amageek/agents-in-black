@@ -75,7 +75,16 @@ public enum AIBRuntimeCoreService {
 
         let gatewayControl = GatewayControl()
         let gateway = DevGateway(gatewayConfig: initial.config.gateway, control: gatewayControl, logger: logger)
-        try await gateway.start()
+        do {
+            try await gateway.start()
+        } catch {
+            do {
+                try await gateway.stop()
+            } catch {
+                logger.warning("Gateway stop after start failure also failed", metadata: ["error": "\(error)"])
+            }
+            throw error
+        }
         do {
             let workspaceRoot = options.workspaceRoot
             let gatewayPort = options.gatewayPort
@@ -165,7 +174,7 @@ public enum AIBRuntimeCoreService {
             workspaceRoot: workspaceRoot,
             gatewayPort: resolved.config.gateway.port
         )
-        try WorkspaceSyncer.writeRuntimeClaudeCodePlugins(
+        try WorkspaceSyncer.writeRuntimeCodexAppServerPlugins(
             resolved: resolved,
             workspaceRoot: workspaceRoot,
             workspace: workspace
@@ -228,7 +237,7 @@ public enum AIBRuntimeCoreService {
             workspaceRoot: workspaceRoot,
             gatewayPort: resolved.config.gateway.port
         )
-        try WorkspaceSyncer.writeRuntimeClaudeCodePlugins(
+        try WorkspaceSyncer.writeRuntimeCodexAppServerPlugins(
             resolved: resolved,
             workspaceRoot: workspaceRoot,
             workspace: workspace
@@ -416,40 +425,40 @@ public enum AIBRuntimeCoreService {
             .path
     }
 
-    public static func localClaudeCodePluginRootPath(
+    public static func localCodexAppServerPluginRootPath(
         workspaceRoot: String,
         serviceID: String
     ) -> String {
-        ClaudeCodePluginBundle.pluginRootURL(
+        CodexAppServerPluginBundle.pluginRootURL(
             baseURL: URL(fileURLWithPath: workspaceRoot)
                 .appendingPathComponent(".aib/generated/runtime/plugins", isDirectory: true),
             serviceID: serviceID
         ).path
     }
 
-    public static func localClaudeCodePluginBinding(
+    public static func localCodexAppServerPluginBinding(
         workspaceRoot: String,
         serviceID: String
-    ) throws -> ClaudeCodePluginBinding {
-        let path = URL(fileURLWithPath: localClaudeCodePluginRootPath(workspaceRoot: workspaceRoot, serviceID: serviceID))
-            .appendingPathComponent(ClaudeCodePluginBundle.bindingFileName)
+    ) throws -> CodexAppServerPluginBinding {
+        let path = URL(fileURLWithPath: localCodexAppServerPluginRootPath(workspaceRoot: workspaceRoot, serviceID: serviceID))
+            .appendingPathComponent(CodexAppServerPluginBundle.bindingFileName)
         let data = try Data(contentsOf: path)
-        return try JSONDecoder().decode(ClaudeCodePluginBinding.self, from: data)
+        return try JSONDecoder().decode(CodexAppServerPluginBinding.self, from: data)
     }
 
-    public static func localClaudeCodePluginLaunchCommand(
+    public static func localCodexAppServerPluginLaunchCommand(
         workspaceRoot: String,
         serviceID: String
     ) -> String {
-        ClaudeCodePluginBundle.manualLaunchCommand(
-            pluginRootPath: localClaudeCodePluginRootPath(
+        CodexAppServerPluginBundle.manualLaunchCommand(
+            pluginRootPath: localCodexAppServerPluginRootPath(
                 workspaceRoot: workspaceRoot,
                 serviceID: serviceID
             )
         )
     }
 
-    public static func deployClaudeCodePluginRootPath(
+    public static func deployCodexAppServerPluginRootPath(
         workspaceRoot: String,
         deployedServiceName: String
     ) -> String {
@@ -459,24 +468,24 @@ public enum AIBRuntimeCoreService {
             .path
     }
 
-    public static func deployClaudeCodePluginBinding(
+    public static func deployCodexAppServerPluginBinding(
         workspaceRoot: String,
         deployedServiceName: String
-    ) throws -> ClaudeCodePluginBinding {
-        let path = URL(fileURLWithPath: deployClaudeCodePluginRootPath(
+    ) throws -> CodexAppServerPluginBinding {
+        let path = URL(fileURLWithPath: deployCodexAppServerPluginRootPath(
             workspaceRoot: workspaceRoot,
             deployedServiceName: deployedServiceName
-        )).appendingPathComponent(ClaudeCodePluginBundle.bindingFileName)
+        )).appendingPathComponent(CodexAppServerPluginBundle.bindingFileName)
         let data = try Data(contentsOf: path)
-        return try JSONDecoder().decode(ClaudeCodePluginBinding.self, from: data)
+        return try JSONDecoder().decode(CodexAppServerPluginBinding.self, from: data)
     }
 
-    public static func deployClaudeCodePluginLaunchCommand(
+    public static func deployCodexAppServerPluginLaunchCommand(
         workspaceRoot: String,
         deployedServiceName: String
     ) -> String {
-        ClaudeCodePluginBundle.manualLaunchCommand(
-            pluginRootPath: deployClaudeCodePluginRootPath(
+        CodexAppServerPluginBundle.manualLaunchCommand(
+            pluginRootPath: deployCodexAppServerPluginRootPath(
                 workspaceRoot: workspaceRoot,
                 deployedServiceName: deployedServiceName
             )

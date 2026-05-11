@@ -123,12 +123,13 @@ public struct WorkspaceRepoServiceConfig: Codable, Sendable, Equatable {
     public var connections: WorkspaceRepoConnectionsConfig?
     public var mcp: WorkspaceRepoMCPConfig?
     public var a2a: WorkspaceRepoA2AConfig?
+    public var codex: WorkspaceRepoCodexConfig?
     public var ui: WorkspaceRepoUIConfig?
     /// Deployed endpoint URLs keyed by provider ID (e.g., `"gcp-cloudrun": "https://...run.app"`).
     public var endpoints: [String: String]?
     /// Skill IDs assigned to this service. References workspace-level skill definitions.
     public var skills: [String]?
-    /// LLM model identifier for agent services (e.g., "claude-sonnet-4-6").
+    /// LLM model identifier for agent services (e.g., "gpt-5.5").
     /// Injected as `MODEL` environment variable at runtime.
     public var model: String?
 
@@ -157,6 +158,7 @@ public struct WorkspaceRepoServiceConfig: Codable, Sendable, Equatable {
         connections: WorkspaceRepoConnectionsConfig? = nil,
         mcp: WorkspaceRepoMCPConfig? = nil,
         a2a: WorkspaceRepoA2AConfig? = nil,
+        codex: WorkspaceRepoCodexConfig? = nil,
         ui: WorkspaceRepoUIConfig? = nil,
         endpoints: [String: String]? = nil,
         skills: [String]? = nil,
@@ -186,10 +188,41 @@ public struct WorkspaceRepoServiceConfig: Codable, Sendable, Equatable {
         self.connections = connections
         self.mcp = mcp
         self.a2a = a2a
+        self.codex = codex
         self.ui = ui
         self.endpoints = endpoints
         self.skills = skills
         self.model = model
+    }
+}
+
+public struct WorkspaceRepoCodexConfig: Codable, Sendable, Equatable {
+    public var auth: WorkspaceRepoCodexAuthConfig?
+
+    public init(auth: WorkspaceRepoCodexAuthConfig? = nil) {
+        self.auth = auth
+    }
+
+    public static var defaultChatGPTAuth: WorkspaceRepoCodexConfig {
+        WorkspaceRepoCodexConfig(
+            auth: WorkspaceRepoCodexAuthConfig(
+                mode: "chatgpt",
+                secret: "codex-auth-json",
+                version: "latest"
+            )
+        )
+    }
+}
+
+public struct WorkspaceRepoCodexAuthConfig: Codable, Sendable, Equatable {
+    public var mode: String
+    public var secret: String
+    public var version: String?
+
+    public init(mode: String, secret: String, version: String? = nil) {
+        self.mode = mode
+        self.secret = secret
+        self.version = version
     }
 }
 

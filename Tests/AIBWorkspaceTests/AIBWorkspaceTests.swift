@@ -441,7 +441,7 @@ func workspaceSyncWritesRuntimeConnectionArtifacts() throws {
         .appendingPathComponent(".aib/generated/runtime/plugins")
         .appendingPathComponent("agent-a__app")
     let pluginManifest = pluginRoot
-        .appendingPathComponent(".claude-plugin")
+        .appendingPathComponent(".codex-plugin")
         .appendingPathComponent("plugin.json")
     #expect(FileManager.default.fileExists(atPath: pluginManifest.path))
 
@@ -459,15 +459,15 @@ func workspaceSyncWritesRuntimeConnectionArtifacts() throws {
     let mcpWebConfig = mcpProjectServers?["mcp-web-web"] as? [String: Any]
     #expect((mcpWebConfig?["url"] as? String)?.contains("http://localhost:9090") == true)
 
-    let claudeConfig = pluginRoot.appendingPathComponent(".claude.json")
-    let claudeConfigData = try Data(contentsOf: claudeConfig)
-    let claudeConfigDecoded = try JSONSerialization.jsonObject(with: claudeConfigData) as? [String: Any]
-    let claudeServers = claudeConfigDecoded?["mcpServers"] as? [String: Any]
-    #expect(claudeServers?["mcp-web-web"] != nil)
+    let codexConfig = pluginRoot.appendingPathComponent(".codex.json")
+    let codexConfigData = try Data(contentsOf: codexConfig)
+    let codexConfigDecoded = try JSONSerialization.jsonObject(with: codexConfigData) as? [String: Any]
+    let codexServers = codexConfigDecoded?["mcpServers"] as? [String: Any]
+    #expect(codexServers?["mcp-web-web"] != nil)
 
-    let usageDoc = pluginRoot.appendingPathComponent("USE_WITH_CLAUDE.md")
+    let usageDoc = pluginRoot.appendingPathComponent("USE_WITH_CODEX.md")
     let usageText = try String(contentsOf: usageDoc, encoding: .utf8)
-    #expect(usageText.contains("claude --plugin-dir"))
+    #expect(usageText.contains("codex app-server"))
 }
 
 @Test(.timeLimit(.minutes(1)))
@@ -568,7 +568,7 @@ func workspaceSyncWritesRuntimeSkillArtifacts() throws {
     #expect(
         FileManager.default.fileExists(
             atPath: stagedRoot
-                .appendingPathComponent(".claude-plugin")
+                .appendingPathComponent(".codex-plugin")
                 .appendingPathComponent("plugin.json")
                 .path
         )
@@ -580,7 +580,7 @@ func workspaceSyncWritesRuntimeSkillArtifacts() throws {
     #expect(FileManager.default.fileExists(atPath: stagedRoot.appendingPathComponent(".claude/skills/deploy/scripts/deploy.sh").path))
     #expect(FileManager.default.fileExists(atPath: stagedRoot.appendingPathComponent(".agents/skills/deploy/agents/openai.yaml").path))
     #expect(FileManager.default.fileExists(atPath: stagedRoot.appendingPathComponent("skills/deploy/SKILL.md").path))
-    #expect(FileManager.default.fileExists(atPath: stagedRoot.appendingPathComponent("USE_WITH_CLAUDE.md").path))
+    #expect(FileManager.default.fileExists(atPath: stagedRoot.appendingPathComponent("USE_WITH_CODEX.md").path))
 }
 
 @MainActor
@@ -887,7 +887,7 @@ func serviceModelYAMLRoundTrip() throws {
                         kind: "agent",
                         mountPath: "/agents/a",
                         run: ["swift", "run"],
-                        model: "claude-opus-4-7"
+                        model: "gpt-5.5"
                     ),
                 ]
             ),
@@ -899,7 +899,54 @@ func serviceModelYAMLRoundTrip() throws {
     let loaded = try WorkspaceYAMLCodec.loadWorkspace(at: configPath)
 
     let service = loaded.repos.first?.services?.first
-    #expect(service?.model == "claude-opus-4-7")
+    #expect(service?.model == "gpt-5.5")
+}
+
+@Test(.timeLimit(.minutes(1)))
+func configureServicesAddsDefaultCodexAuthToAgent() throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("aib-configure-agent-codex-auth-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let repo = root.appendingPathComponent("agent", isDirectory: true)
+    try FileManager.default.createDirectory(at: repo.appendingPathComponent(".git"), withIntermediateDirectories: true)
+    try """
+    {
+      "scripts": {
+        "dev": "node server.js"
+      }
+    }
+    """.write(to: repo.appendingPathComponent("package.json"), atomically: true, encoding: .utf8)
+    try "console.log('agent')\n".write(to: repo.appendingPathComponent("server.js"), atomically: true, encoding: .utf8)
+
+    let workspace = AIBWorkspaceConfig(
+        workspaceName: "test",
+        repos: [
+            WorkspaceRepo(
+                name: "agent",
+                path: "agent",
+                runtime: .node,
+                framework: .hono,
+                packageManager: .pnpm,
+                status: .discoverable,
+                detectionConfidence: .medium
+            ),
+        ]
+    )
+    try AIBWorkspaceManager.saveWorkspace(workspace, workspaceRoot: root.path)
+
+    _ = try AIBWorkspaceManager.configureServices(
+        workspaceRoot: root.path,
+        path: "agent",
+        runtimes: [.node]
+    )
+
+    let loaded = try AIBWorkspaceManager.loadWorkspace(workspaceRoot: root.path)
+    let auth = try #require(loaded.repos.first?.services?.first?.codex?.auth)
+    #expect(auth.mode == "chatgpt")
+    #expect(auth.secret == "codex-auth-json")
+    #expect(auth.version == "latest")
 }
 
 @Test(.timeLimit(.minutes(1)))
@@ -934,11 +981,11 @@ func updateServiceModelPersistsToYAML() throws {
     try AIBWorkspaceManager.updateServiceModel(
         workspaceRoot: root.path,
         namespacedServiceID: "\(namespace)/main",
-        model: "claude-opus-4-7"
+        model: "gpt-5.5"
     )
 
     let reloaded = try AIBWorkspaceManager.loadWorkspace(workspaceRoot: root.path)
-    #expect(reloaded.repos[0].services?.first?.model == "claude-opus-4-7")
+    #expect(reloaded.repos[0].services?.first?.model == "gpt-5.5")
 
     try AIBWorkspaceManager.updateServiceModel(
         workspaceRoot: root.path,
@@ -1378,6 +1425,17 @@ func deployPlanProjectsAssignedSkillBundlesIntoRuntimeDirectories() async throws
         atomically: true,
         encoding: .utf8
     )
+    try """
+    import Foundation
+
+    let env = ProcessInfo.processInfo.environment
+    _ = env["OPENAI_API_KEY"]
+    _ = env["CODEX_API_KEY"]
+    """.write(
+        to: repo.appendingPathComponent("main.swift"),
+        atomically: true,
+        encoding: .utf8
+    )
 
     let workspace = AIBWorkspaceConfig(
         workspaceName: "test",
@@ -1396,6 +1454,13 @@ func deployPlanProjectsAssignedSkillBundlesIntoRuntimeDirectories() async throws
                         kind: "agent",
                         mountPath: "/agents/a",
                         run: ["swift", "run"],
+                        codex: WorkspaceRepoCodexConfig(
+                            auth: WorkspaceRepoCodexAuthConfig(
+                                mode: "chatgpt",
+                                secret: "codex-auth-json",
+                                version: "latest"
+                            )
+                        ),
                         skills: ["deploy"]
                     ),
                 ]
@@ -1411,6 +1476,10 @@ func deployPlanProjectsAssignedSkillBundlesIntoRuntimeDirectories() async throws
         ]
     )
     try AIBWorkspaceManager.saveWorkspace(workspace, workspaceRoot: root.path)
+    let resolvedWorkspace = try AIBWorkspaceManager.loadWorkspace(workspaceRoot: root.path)
+    #expect(resolvedWorkspace.repos.first?.services?.first?.codex?.auth?.secret == "codex-auth-json")
+    let resolvedConfig = try WorkspaceSyncer.resolveConfig(workspaceRoot: root.path, workspace: resolvedWorkspace)
+    #expect(resolvedConfig.config.services.first?.codex?.auth?.secret == "codex-auth-json")
 
     let workspaceSkillsRoot = SkillBundleLoader.workspaceSkillsRootURL(workspaceRoot: root.path)
     let skillDir = SkillBundleLoader.skillURL(id: "deploy", rootURL: workspaceSkillsRoot)
@@ -1473,14 +1542,14 @@ func deployPlanProjectsAssignedSkillBundlesIntoRuntimeDirectories() async throws
     #expect(plan.services.count == 1)
     let service = try #require(plan.services.first)
     let skillPaths = Set(service.artifacts.skillConfigs.map(\.relativePath))
-    let pluginPaths = Set(service.artifacts.claudeCodePluginArtifacts.map(\.relativePath))
+    let pluginPaths = Set(service.artifacts.codexAppServerPluginArtifacts.map(\.relativePath))
     let executionPaths = Set(service.artifacts.executionDirectoryConfigs.map(\.relativePath))
     #expect(skillPaths.contains("__aib_deploy/claude/skills/deploy/SKILL.md"))
     #expect(skillPaths.contains("__aib_deploy/claude/skills/deploy/scripts/deploy.sh"))
     #expect(skillPaths.contains("__aib_deploy/agents/skills/deploy/agents/openai.yaml"))
     #expect(skillPaths.contains("__aib_deploy/skills/deploy/SKILL.md"))
     // Plugin bundle artifacts now live under the staged `__aib_deploy/plugin/` build-context root.
-    #expect(pluginPaths.contains("__aib_deploy/plugin/.claude-plugin/plugin.json"))
+    #expect(pluginPaths.contains("__aib_deploy/plugin/.codex-plugin/plugin.json"))
     #expect(pluginPaths.contains("__aib_deploy/plugin/.mcp.json"))
     #expect(pluginPaths.contains("__aib_deploy/plugin/template.json"))
     #expect(pluginPaths.contains("__aib_deploy/plugin/binding.json"))
@@ -1490,6 +1559,13 @@ func deployPlanProjectsAssignedSkillBundlesIntoRuntimeDirectories() async throws
     #expect(service.envVars["AIB_PLUGIN_DIR"] == "/app/.aib-plugin")
     #expect(service.envVars["AIB_AGENT_PERMISSION_MODE"] == "bypassPermissions")
     #expect(service.envVars["AIB_AGENT_ALLOW_DANGEROUSLY_SKIP_PERMISSIONS"] == "true")
+    #expect(service.envVars["AIB_CODEX_AUTH_MODE"] == "chatgpt")
+    #expect(service.envVars["AIB_CODEX_AUTH_JSON"] == "/var/secrets/aib/codex/auth.json")
+    #expect(service.envVars["CODEX_HOME"] == "/tmp/aib-codex-home")
+    #expect(service.declaredSecretRefs["/var/secrets/aib/codex/auth.json"]?.secret == "codex-auth-json")
+    #expect(service.declaredSecretRefs["/var/secrets/aib/codex/auth.json"]?.version == "latest")
+    #expect(!service.unresolvedSecrets.contains("OPENAI_API_KEY"))
+    #expect(!service.unresolvedSecrets.contains("CODEX_API_KEY"))
     #expect(executionPaths.contains("__aib_deploy/claude/commands/deploy.md"))
     #expect(executionPaths.contains("__aib_deploy/root/CLAUDE.md"))
 
@@ -1543,7 +1619,7 @@ func deployPlanProjectsAssignedSkillBundlesIntoRuntimeDirectories() async throws
         .appendingPathComponent("services")
         .appendingPathComponent(service.deployedServiceName)
         .appendingPathComponent("plugin")
-        .appendingPathComponent(".claude-plugin")
+        .appendingPathComponent(".codex-plugin")
         .appendingPathComponent("plugin.json")
     #expect(FileManager.default.fileExists(atPath: stagedPluginManifest.path))
 
@@ -1554,7 +1630,7 @@ func deployPlanProjectsAssignedSkillBundlesIntoRuntimeDirectories() async throws
         .appendingPathComponent("services")
         .appendingPathComponent(service.deployedServiceName)
         .appendingPathComponent("plugin")
-        .appendingPathComponent("USE_WITH_CLAUDE.md")
+        .appendingPathComponent("USE_WITH_CODEX.md")
     #expect(FileManager.default.fileExists(atPath: stagedUsageDoc.path))
 
     let stagedExecutionFile = root
@@ -1666,7 +1742,7 @@ func deployPluginKeepsServiceRefBasedMCPNamesStable() async throws {
 
     let agentService = try #require(plan.services.first(where: { $0.id == "agent/node" }))
     let mcpConfigArtifact = try #require(
-        agentService.artifacts.claudeCodePluginArtifacts.first(where: {
+        agentService.artifacts.codexAppServerPluginArtifacts.first(where: {
             $0.relativePath == "__aib_deploy/plugin/.mcp.json"
         })
     )

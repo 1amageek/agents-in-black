@@ -100,6 +100,7 @@ public struct ServiceConfig: Sendable, Codable, Equatable {
     public var connections: ServiceConnectionsConfig
     public var mcp: MCPServiceConfig?
     public var a2a: A2AServiceConfig?
+    public var codex: CodexServiceConfig?
 
     public init(
         id: ServiceID,
@@ -125,7 +126,8 @@ public struct ServiceConfig: Sendable, Codable, Equatable {
         auth: ServiceAuthConfig = .init(),
         connections: ServiceConnectionsConfig = .init(),
         mcp: MCPServiceConfig? = nil,
-        a2a: A2AServiceConfig? = nil
+        a2a: A2AServiceConfig? = nil,
+        codex: CodexServiceConfig? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -151,6 +153,7 @@ public struct ServiceConfig: Sendable, Codable, Equatable {
         self.connections = connections
         self.mcp = mcp
         self.a2a = a2a
+        self.codex = codex
     }
 
     /// Materialises the effective env map for the given target by merging
@@ -164,6 +167,40 @@ public struct ServiceConfig: Sendable, Codable, Equatable {
             return env.merging(deployEnv) { _, new in new }
         }
     }
+}
+
+public struct CodexServiceConfig: Sendable, Codable, Equatable {
+    public var auth: CodexAuthConfig?
+
+    public init(auth: CodexAuthConfig? = nil) {
+        self.auth = auth
+    }
+
+    public static var defaultChatGPTAuth: CodexServiceConfig {
+        CodexServiceConfig(
+            auth: CodexAuthConfig(
+                mode: .chatgpt,
+                secret: "codex-auth-json",
+                version: "latest"
+            )
+        )
+    }
+}
+
+public struct CodexAuthConfig: Sendable, Codable, Equatable {
+    public var mode: CodexAuthMode
+    public var secret: String
+    public var version: String?
+
+    public init(mode: CodexAuthMode, secret: String, version: String? = nil) {
+        self.mode = mode
+        self.secret = secret
+        self.version = version
+    }
+}
+
+public enum CodexAuthMode: String, Sendable, Codable, Equatable {
+    case chatgpt
 }
 
 public struct ServiceConnectionsConfig: Sendable, Codable, Equatable {

@@ -273,7 +273,8 @@ public enum AIBWorkspaceManager {
                 build: defaults.buildCommand,
                 install: defaults.installCommand,
                 watchMode: defaults.watchMode.rawValue,
-                watchPaths: defaults.watchPaths
+                watchPaths: defaults.watchPaths,
+                codex: kind == "agent" ? .defaultChatGPTAuth : nil
             ))
         }
 
@@ -332,7 +333,8 @@ public enum AIBWorkspaceManager {
                     build: defaults.buildCommand,
                     install: defaults.installCommand,
                     watchMode: defaults.watchMode.rawValue,
-                    watchPaths: defaults.watchPaths
+                    watchPaths: defaults.watchPaths,
+                    codex: kind == "agent" ? .defaultChatGPTAuth : nil
                 )
             }
         }

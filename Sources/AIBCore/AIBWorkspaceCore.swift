@@ -39,7 +39,7 @@ public enum AIBWorkspaceCore {
     @discardableResult
     public static func scaffoldDefaultAgent(
         workspaceRoot: String,
-        serviceName: String = "claude-code-agent",
+        serviceName: String = "codex-app-server-agent",
         runtime: RuntimeKind = .node,
         framework: FrameworkKind = .hono
     ) throws -> WorkspaceInitResult {

@@ -51,7 +51,23 @@ Internally wraps the existing DevGateway + DevSupervisor runtime.
 For `local` targets:
 - default `buildMode` is `convenience`
 - Node MCP/services run as host processes for fast local iteration
-- agent services run via Claude Code CLI, not local containers
+- agent services run via Codex App Server, not local containers
+
+Agent services that should use a Codex ChatGPT subscription declare auth through
+the service-level `codex.auth` block. The user stores `auth.json` in the
+provider secret store; AIB mounts it as a file and exposes a writable
+`CODEX_HOME` to the runtime.
+
+```yaml
+services:
+  - id: node
+    kind: agent
+    codex:
+      auth:
+        mode: chatgpt
+        secret: codex-auth-json
+        version: latest
+```
 
 ### `aib emulator validate`
 

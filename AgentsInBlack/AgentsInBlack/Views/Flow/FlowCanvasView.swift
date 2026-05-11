@@ -665,8 +665,8 @@ struct FlowCanvasView: View {
                 }
                 let runnerLabel: String? = node.serviceKind == .agent
                     && model.emulatorState.isRunning
-                    && ClaudeCodeAgentRunner.isHostAvailable
-                    ? ClaudeCodeAgentRunner.displayName : nil
+                    && CodexAppServerAgentRunner.isHostAvailable
+                    ? CodexAppServerAgentRunner.displayName : nil
                 return (
                     node.id,
                     FlowNodeVisual(
@@ -1023,7 +1023,7 @@ private struct FlowNodeVisual: Equatable {
     let displayName: String?
     /// LLM model identifier for agent services.
     let model: String?
-    /// Local runner type used for this agent (e.g., "Claude Code").
+    /// Local runner type used for this agent (e.g., "Codex App Server").
     /// nil for non-agent services or when using A2A container runner.
     let localRunner: String?
 

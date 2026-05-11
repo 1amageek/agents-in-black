@@ -163,7 +163,7 @@ public struct DefaultDeployExecutor: DeployExecuting {
 
             let projectedArtifacts = service.artifacts.skillConfigs
                 + service.artifacts.executionDirectoryConfigs
-                + service.artifacts.claudeCodePluginArtifacts
+                + service.artifacts.codexAppServerPluginArtifacts
             if !projectedArtifacts.isEmpty {
                 let stagedRoots = try Self.stageProjectedArtifacts(
                     projectedArtifacts,
@@ -868,8 +868,8 @@ public struct DefaultDeployExecutor: DeployExecuting {
             instructions.append("COPY __aib_deploy/skills/ ./skills/")
         }
         if roots.contains("__aib_deploy/plugin") {
-            // Mounts the Claude Code plugin bundle at /app/.aib-plugin so the agent
-            // runtime can pass it to SDK's `plugins: [{ type: 'local', path }]`.
+            // Mounts the Codex App Server artifact bundle at /app/.aib-plugin so the
+            // agent runtime can read MCP and skill files.
             instructions.append("COPY __aib_deploy/plugin/ ./.aib-plugin/")
         }
         if roots.contains("__aib_deploy/root") {

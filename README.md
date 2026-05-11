@@ -8,7 +8,7 @@ It provides:
 - multi-runtime support (Swift / Node / Deno / Python discovery)
 - workspace-level service configuration (`.aib/` at workspace root only)
 - fast local Node execution via `convenience` mode
-- local agent execution via Claude Code CLI
+- local agent execution via Codex App Server
 
 ## Current Status (v1 prototype)
 
@@ -88,5 +88,5 @@ Local execution modes:
 - `convenience`: default for `.aib/targets/local.yaml`; fast host-process execution for local development
 - `strict`: slower containerized execution intended for Cloud Run-aligned validation
 
-Local agent services are not containerized. They run through Claude Code CLI and are
+Local agent services are not containerized. They run through Codex App Server and are
 served by the local handler registered in `AIBCore`.

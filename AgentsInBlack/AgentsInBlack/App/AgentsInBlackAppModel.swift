@@ -669,19 +669,19 @@ final class AgentsInBlackAppModel {
             showUtilityPanel = true
             return
         }
-        // Agent services require Claude Code CLI for local execution (subscription auth).
+        // Agent services require Codex CLI for local app-server execution.
         let hasAgentServices = workspace.services.contains { $0.serviceKind == .agent }
-        if hasAgentServices && !isClaudeCodeAvailable {
-            setError("Claude Code is not installed. Install it to run agent services locally (no API cost).\nhttps://claude.ai/download")
-            appendAIBSystemLogLine("Claude Code CLI not found. Agent services require Claude Code for local execution.")
+        if hasAgentServices && !isCodexAppServerAvailable {
+            setError("codex CLI is not installed. Install Codex to run agent services locally.")
+            appendAIBSystemLogLine("codex CLI not found. Agent services require Codex App Server for local execution.")
             registerIssue(
                 severity: .error,
                 sourceTitle: "AIB Runtime",
-                message: "Claude Code CLI not installed. Required for local agent execution.",
+                message: "codex CLI not installed. Required for local agent execution.",
                 serviceSelectionID: nil,
                 repoID: nil
             )
-            emulatorState = .error("Claude Code not installed")
+            emulatorState = .error("codex CLI not installed")
             utilityPanelMode = .aibRuntime
             showUtilityPanel = true
             return
@@ -1197,20 +1197,20 @@ final class AgentsInBlackAppModel {
         service.serviceKind == .agent
     }
 
-    /// Whether Claude Code CLI is installed and available for local agent execution.
-    var isClaudeCodeAvailable: Bool {
-        ClaudeCodeAgentRunner.isHostAvailable
+    /// Whether Codex CLI is installed and available for local app-server execution.
+    var isCodexAppServerAvailable: Bool {
+        CodexAppServerAgentRunner.isHostAvailable
     }
 
-    /// Create the local runner for a service using Claude Code CLI (subscription auth).
+    /// Create the local runner for a service using Codex App Server.
     private func makeLocalRunner(for service: AIBServiceModel) -> any AgentRunner {
-        return ClaudeCodeAgentRunner(model: service.model)
+        return CodexAppServerAgentRunner(model: service.model)
     }
 
     /// Build the runner context for a local session.
     private func makeRunnerContext(for service: AIBServiceModel) -> AgentRunnerContext {
         let pluginRootPath: String? = workspace.map { ws in
-            AIBRuntimeCoreService.localClaudeCodePluginRootPath(
+            AIBRuntimeCoreService.localCodexAppServerPluginRootPath(
                 workspaceRoot: ws.rootURL.path,
                 serviceID: service.namespacedID
             )
@@ -2797,7 +2797,7 @@ final class AgentsInBlackAppModel {
     }
 
     private func appendServiceLog(_ text: String, to namespacedID: String) {
-        var buffer = serviceLogBuffersByServiceID[namespacedID]
+        let buffer = serviceLogBuffersByServiceID[namespacedID]
             ?? LogBuffer(maxLines: 2_000, idNamespace: namespacedID)
         buffer.append(text)
         serviceLogBuffersByServiceID[namespacedID] = buffer
