@@ -18,20 +18,25 @@ struct DeploySheet: View {
         switch model.deployPhase {
         case .idle, .preflight, .planning:
             DeployProgressView(phase: model.deployPhase, onCancel: {
-                model.deployController.cancel()
+                Task { await model.deployController.cancel() }
             })
         case .reviewing(let plan):
             DeployReviewView(plan: plan, model: model)
-        case .secretsInput(let plan, let unresolvedSecrets):
-            DeploySecretsInputView(plan: plan, unresolvedSecrets: unresolvedSecrets, model: model)
+        case .secretsInput(let plan, let unresolvedSecrets, let missingDeclaredSecrets):
+            DeploySecretsInputView(
+                plan: plan,
+                unresolvedSecrets: unresolvedSecrets,
+                missingDeclaredSecrets: missingDeclaredSecrets,
+                model: model
+            )
         case .applying(let plan):
             if let progress = model.deployController.deployProgress {
                 DeployApplyingView(plan: plan, progress: progress) {
-                    model.deployController.cancel()
+                    Task { await model.deployController.cancel() }
                 }
             } else {
                 DeployProgressView(phase: model.deployPhase, onCancel: {
-                    model.deployController.cancel()
+                    Task { await model.deployController.cancel() }
                 })
             }
         case .completed(let result):

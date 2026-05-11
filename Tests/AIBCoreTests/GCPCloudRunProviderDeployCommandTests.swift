@@ -68,7 +68,7 @@ struct GCPCloudRunProviderDeployCommandTests {
             envVars: [
                 "AIB_CODEX_AUTH_MODE": "chatgpt",
                 "AIB_CODEX_AUTH_JSON": "/var/secrets/aib/codex/auth.json",
-                "CODEX_HOME": "/tmp/aib-codex-home",
+                "CODEX_HOME": "/home/node/.codex",
             ],
             declaredSecretRefs: [
                 "/var/secrets/aib/codex/auth.json": SecretRef(secret: "codex-auth-json", version: "latest"),

@@ -14,24 +14,30 @@ public struct DefaultDeployPlanGenerator: DeployPlanGenerator {
     public func loadTargetConfig(
         workspaceRoot: String,
         providerID: String,
-        overrides: [String: String]
+        overrides: [String: String],
+        environmentName: String?
     ) throws -> AIBDeployTargetConfig {
         try AIBDeployService.loadTargetConfig(
             workspaceRoot: workspaceRoot,
             providerID: providerID,
-            overrides: overrides
+            overrides: overrides,
+            environmentName: environmentName
         )
     }
 
     public func generatePlan(
         workspaceRoot: String,
         targetConfig: AIBDeployTargetConfig,
-        provider: any DeploymentProvider
+        provider: any DeploymentProvider,
+        selection: AIBDeploySelection?,
+        environmentName: String?
     ) async throws -> AIBDeployPlan {
         try await AIBDeployService.generatePlan(
             workspaceRoot: workspaceRoot,
             targetConfig: targetConfig,
-            provider: provider
+            provider: provider,
+            selection: selection,
+            environmentName: environmentName
         )
     }
 

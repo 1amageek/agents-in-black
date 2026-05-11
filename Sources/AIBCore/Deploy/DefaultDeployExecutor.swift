@@ -97,16 +97,37 @@ public struct DefaultDeployExecutor: DeployExecuting {
             }
         }
 
-        // Validate declared SecretRefs exist in Secret Manager up front.
-        // --set-secrets fails mid-deploy with a less informative error if the
-        // secret is missing, leaving services in a partially-applied state.
-        // Catch it here so users get a single clear remediation step.
-        if !plan.allDeclaredSecretRefs.isEmpty {
-            let declaredNames = Set(plan.allDeclaredSecretRefs.values.map(\.secret))
+        // Validate up front that every Secret Manager secret this deploy
+        // depends on actually exists. Two categories are checked together
+        // so the user sees a single remediation list:
+        //
+        //   1. Declared SecretRefs from workspace.yaml `secrets:` — these
+        //      become `--set-secrets KEY=secret:version` flags on the
+        //      Cloud Run service.
+        //
+        //   2. Cloud source auth secrets — private SSH key (and optional
+        //      known_hosts) names pulled from
+        //      `service.sourceCredential.cloudPrivateKeySecret /
+        //      cloudKnownHostsSecret`. These are read mid-build via
+        //      `gcloud secrets versions access`; if missing the build fails
+        //      partway through with a less informative error.
+        let declaredSecretNames = Set(plan.allDeclaredSecretRefs.values.map(\.secret))
+        var sourceAuthSecretNames: Set<String> = []
+        for service in plan.services where !service.sourceDependencies.isEmpty {
+            if let name = service.sourceCredential?.cloudPrivateKeySecret, !name.isEmpty {
+                sourceAuthSecretNames.insert(name)
+            }
+            if let name = service.sourceCredential?.cloudKnownHostsSecret, !name.isEmpty {
+                sourceAuthSecretNames.insert(name)
+            }
+        }
+        let allRequiredSecretNames = declaredSecretNames.union(sourceAuthSecretNames)
+        if !allRequiredSecretNames.isEmpty {
             logHandler(AIBDeployLogEntry(
                 level: .info,
                 step: .serviceDeploy,
-                message: "Validating \(declaredNames.count) declared SecretRef(s) against Secret Manager"
+                message: "Validating \(allRequiredSecretNames.count) required Secret Manager secret(s) "
+                    + "(declared: \(declaredSecretNames.count), source-auth: \(sourceAuthSecretNames.count))"
             ))
             let existingSecrets: Set<String>
             do {
@@ -119,13 +140,25 @@ public struct DefaultDeployExecutor: DeployExecuting {
                     message: "Failed to list Secret Manager secrets: \(error.localizedDescription)"
                 )
             }
-            let missing = declaredNames.subtracting(existingSecrets).sorted()
-            if !missing.isEmpty {
+            let missingDeclared = declaredSecretNames.subtracting(existingSecrets).sorted()
+            let missingSourceAuth = sourceAuthSecretNames.subtracting(existingSecrets).sorted()
+            if !missingDeclared.isEmpty || !missingSourceAuth.isEmpty {
+                var sections: [String] = []
+                if !missingDeclared.isEmpty {
+                    sections.append("Declared SecretRefs missing: " + missingDeclared.joined(separator: ", "))
+                }
+                if !missingSourceAuth.isEmpty {
+                    sections.append(
+                        "Cloud source auth secrets missing: "
+                            + missingSourceAuth.joined(separator: ", ")
+                            + ". Provision them via the AIB Inspector (\"Provision from local SSH\") or "
+                            + "rename `sourceCredentials[*].cloudPrivateKeySecret` in the target config to "
+                            + "match an existing secret."
+                    )
+                }
                 throw AIBDeployError(
                     phase: "secrets",
-                    message: "Declared SecretRefs missing in Secret Manager: "
-                        + missing.joined(separator: ", ")
-                        + ". Create them with `gcloud secrets create <name>` or via the AIB Inspector before deploying."
+                    message: sections.joined(separator: " | ")
                 )
             }
         }
@@ -175,6 +208,7 @@ public struct DefaultDeployExecutor: DeployExecuting {
             if let sourceAuthInstructions = try await stageCloudBuildSourceAuthIfNeeded(
                 service: service,
                 buildContext: buildContext,
+                targetConfig: plan.targetConfig,
                 logHandler: logHandler
             ) {
                 topStageInstructions.append(contentsOf: sourceAuthInstructions.injectedInstructions)
@@ -927,6 +961,7 @@ public struct DefaultDeployExecutor: DeployExecuting {
     private func stageCloudBuildSourceAuthIfNeeded(
         service: AIBDeployServicePlan,
         buildContext: String,
+        targetConfig: AIBDeployTargetConfig,
         logHandler: @escaping @Sendable (AIBDeployLogEntry) -> Void
     ) async throws -> SourceAuthDockerfileInstructions? {
         guard !service.sourceDependencies.isEmpty else { return nil }
@@ -942,6 +977,12 @@ public struct DefaultDeployExecutor: DeployExecuting {
                 message: "Cloud source credential for service '\(service.id)' is missing cloudPrivateKeySecret."
             )
         }
+        guard let gcpProject = targetConfig.providerConfig["gcpProject"], !gcpProject.isEmpty else {
+            throw AIBDeployError(
+                phase: "build",
+                message: "Cannot fetch source auth secret '\(privateKeySecret)': target config is missing 'gcpProject'."
+            )
+        }
 
         let authRoot = URL(fileURLWithPath: buildContext).appendingPathComponent(".aib-build-auth")
         let fileManager = FileManager.default
@@ -950,7 +991,10 @@ public struct DefaultDeployExecutor: DeployExecuting {
         }
         try fileManager.createDirectory(at: authRoot, withIntermediateDirectories: true)
 
-        let privateKey = try await fetchSecretValue(secretName: privateKeySecret)
+        let privateKey = try await fetchSecretValue(
+            secretName: privateKeySecret,
+            gcpProject: gcpProject
+        )
         try privateKey.write(
             to: authRoot.appendingPathComponent("id_ed25519"),
             atomically: true,
@@ -959,7 +1003,10 @@ public struct DefaultDeployExecutor: DeployExecuting {
 
         let knownHosts: String
         if let cloudKnownHostsSecret = credential.cloudKnownHostsSecret, !cloudKnownHostsSecret.isEmpty {
-            knownHosts = try await fetchSecretValue(secretName: cloudKnownHostsSecret)
+            knownHosts = try await fetchSecretValue(
+                secretName: cloudKnownHostsSecret,
+                gcpProject: gcpProject
+            )
         } else {
             knownHosts = AIBSourceDependencyAnalyzer.defaultKnownHosts(for: credential.host) ?? ""
         }
@@ -990,18 +1037,30 @@ public struct DefaultDeployExecutor: DeployExecuting {
         )
     }
 
-    private func fetchSecretValue(secretName: String) async throws -> String {
+    private func fetchSecretValue(
+        secretName: String,
+        gcpProject: String
+    ) async throws -> String {
+        // `--project` is passed explicitly so the fetch does not silently
+        // depend on the ambient `gcloud config` (which may point at a
+        // different environment than this deploy targets).
         let result = try await processRunner.run(
             arguments: [
                 "bash", "-lc",
-                "gcloud secrets versions access latest --secret=\(shellQuoted(secretName))",
+                "gcloud secrets versions access latest"
+                    + " --secret=\(shellQuoted(secretName))"
+                    + " --project=\(shellQuoted(gcpProject))",
             ],
             outputHandler: { _ in }
         )
         guard result.exitCode == 0 else {
+            let stderr = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            let detail = stderr.isEmpty
+                ? "gcloud exited with status \(result.exitCode)."
+                : stderr
             throw AIBDeployError(
                 phase: "build",
-                message: "Failed to fetch source auth secret '\(secretName)'."
+                message: "Failed to fetch source auth secret '\(secretName)' from project '\(gcpProject)': \(detail)"
             )
         }
         return result.stdout

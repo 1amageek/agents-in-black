@@ -25,7 +25,14 @@ public enum DeploySecretValueGenerator {
     ]
 
     public static func canGenerate(name: String) -> Bool {
-        let normalized = name.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        // Accept both ENV_KEY (`STORAGE_SIGNING_SECRET`) and Secret Manager
+        // names (`storage-signing-secret`) — Secret Manager forbids `_`,
+        // workspace env vars require it. Treating them interchangeably lets
+        // the same rule cover both buckets.
+        let normalized = name
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .uppercased()
+            .replacingOccurrences(of: "-", with: "_")
         guard !normalized.isEmpty else { return false }
         guard !externallyIssuedMarkers.contains(where: { normalized.contains($0) }) else { return false }
         return generatedExactNames.contains(normalized)

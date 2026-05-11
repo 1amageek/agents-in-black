@@ -521,7 +521,7 @@ struct DeployReviewView: View {
     private var bottomBar: some View {
         HStack {
             Button("Cancel") {
-                model.deployController.cancel()
+                Task { await model.deployController.cancel() }
             }
             .keyboardShortcut(.cancelAction)
             Spacer()

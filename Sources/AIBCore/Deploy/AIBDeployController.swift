@@ -1,3 +1,4 @@
+import AIBRuntimeCore
 import Foundation
 
 /// Controls the deployment pipeline.
@@ -8,8 +9,22 @@ import Foundation
 /// from AIBSupervisor: `protocol + default + constructor injection`).
 @MainActor
 public final class AIBDeployController {
+    /// Resolves a passphrase environment key (e.g. an entry from
+    /// `local.yaml`'s `localPrivateKeyPassphraseEnv`) to the actual
+    /// passphrase string. Returning `nil` means "no passphrase known for
+    /// this key — try environment variables or fail."
+    ///
+    /// Sync + Sendable to match the shape `CloudSourceAuthBootstrapService`
+    /// expects as `secretLookup`. The caller is responsible for routing the
+    /// call to a thread-safe backing store (Keychain APIs are thread-safe,
+    /// so a Sendable wrapper around `TargetSourceAuthKeychainStore`
+    /// suffices).
+    public typealias SourceAuthPassphraseResolver = @Sendable (String) throws -> String?
+
     private let planGenerator: DeployPlanGenerator
     private let executor: DeployExecuting
+    private let secretValueResolver: SecretValueResolver
+    private let sourceAuthPassphraseResolver: SourceAuthPassphraseResolver?
     private var eventContinuations: [UUID: AsyncStream<AIBDeployEvent>.Continuation] = [:]
     private var currentTask: Task<Void, Never>?
     private var approvalGate: ApprovalGate?
@@ -31,10 +46,14 @@ public final class AIBDeployController {
 
     public init(
         planGenerator: DeployPlanGenerator = DefaultDeployPlanGenerator(),
-        executor: DeployExecuting = DefaultDeployExecutor()
+        executor: DeployExecuting = DefaultDeployExecutor(),
+        secretValueResolver: SecretValueResolver = ChainedSecretValueResolver.default,
+        sourceAuthPassphraseResolver: SourceAuthPassphraseResolver? = nil
     ) {
         self.planGenerator = planGenerator
         self.executor = executor
+        self.secretValueResolver = secretValueResolver
+        self.sourceAuthPassphraseResolver = sourceAuthPassphraseResolver
     }
 
     // MARK: - Event Stream
@@ -70,7 +89,8 @@ public final class AIBDeployController {
     public func startPlan(
         workspaceRoot: String,
         targetConfig: AIBDeployTargetConfig,
-        provider: any DeploymentProvider
+        provider: any DeploymentProvider,
+        selection: AIBDeploySelection? = nil
     ) {
         guard case .idle = phase else { return }
         cancellationRequested = false
@@ -109,7 +129,8 @@ public final class AIBDeployController {
                 let plan = try await self.planGenerator.generatePlan(
                     workspaceRoot: workspaceRoot,
                     targetConfig: enrichedConfig,
-                    provider: provider
+                    provider: provider,
+                    selection: selection
                 )
 
                 // Phase 3: Review — block until user approves or cancels
@@ -124,66 +145,235 @@ public final class AIBDeployController {
                     return
                 }
 
-                // Phase 3.5: Secrets Input — pre-populate from the live service so
-                // values entered on a previous deploy are reused. Only prompt for
-                // ones that are not yet on the remote.
+                // Phase 3.5: Secrets Input — collect values for two distinct
+                // buckets in a single user-facing step:
                 //
-                // Why pre-populate: deploy uses authoritative `--set-env-vars`,
-                // which replaces the env wholesale. If we skipped already-set
-                // secrets but did NOT carry their values forward, the deploy
-                // would wipe them from the live service. So we fetch the
-                // existing values, merge them into `secretValues`, and only
-                // prompt the user for the names we couldn't fetch.
+                //   (a) unresolved env secrets: source-code-referenced env vars
+                //       that are not yet pinned. Injected directly via
+                //       `--set-env-vars`. Pre-populated from the live service
+                //       so that an authoritative env-var replacement on deploy
+                //       does not silently wipe values entered on a previous
+                //       deploy.
                 //
-                // Declared SecretRefs are mounted via `--set-secrets` (Secret
-                // Manager-backed) and never appear in `unresolvedSecrets`, so
-                // they are not part of this flow.
+                //   (b) declared SecretRefs missing in Secret Manager:
+                //       workspace.yaml `secrets:` bindings whose backing
+                //       Secret Manager secret does not exist yet. Values
+                //       entered here are uploaded via `provider.upsertSecret`
+                //       *before* `applying` so the subsequent `--set-secrets`
+                //       mount succeeds. Declared SecretRefs that already
+                //       exist are NOT prompted for — they are mounted from
+                //       Secret Manager as-is.
                 var secretValues: [String: String] = [:]
+                var aggregatedExistingEnv: [String: String] = [:]
                 if plan.hasUnresolvedSecrets {
-                    var aggregatedExistingEnv: [String: String] = [:]
                     for service in plan.services where !service.unresolvedSecrets.isEmpty {
                         let existing = await provider.existingEnvVars(
                             serviceName: service.deployedServiceName,
                             targetConfig: enrichedConfig
                         )
-                        // Last writer wins on collisions across services. The
-                        // SecretsInput dialog deduplicates by name (one input
-                        // per secret name across all services), so we only
-                        // need a single value per name.
                         for (key, value) in existing {
                             aggregatedExistingEnv[key] = value
                         }
                     }
 
+                    // Reuse previously-deployed env values verbatim so
+                    // `--set-env-vars` (which fully replaces, not merges)
+                    // does not rotate live values. Rotation requires the
+                    // user to re-enter the value in the secretsInput UI.
                     for name in plan.allUnresolvedSecrets {
                         if let existingValue = aggregatedExistingEnv[name], !existingValue.isEmpty {
                             secretValues[name] = existingValue
+                            self.emit(.log(AIBDeployLogEntry(
+                                timestamp: Date(),
+                                level: .info,
+                                message: "Reusing existing env value for '\(name)' from running service — value preserved"
+                            )))
                         }
                     }
+                }
+                let unresolvedStillMissing = plan.allUnresolvedSecrets
+                    .filter { secretValues[$0] == nil }
 
-                    let stillMissing = plan.allUnresolvedSecrets
-                        .filter { secretValues[$0] == nil }
+                // Compute which Secret Manager secrets are missing for this
+                // deploy. Two buckets share a single `listSecrets()` call:
+                //
+                //   * declared SecretRefs (workspace.yaml `secrets:`)
+                //   * source auth secrets (private SSH key + known_hosts
+                //     referenced by `sourceCredential`)
+                //
+                // **Invariant**: only names in the "missing" sets ever
+                // reach a resolver, `provisionFromLocalSSH`, or
+                // `upsertSecret`. Secrets that already exist in Secret
+                // Manager are deliberately left untouched — Cloud Run
+                // mounts them as-is via `--set-secrets`, and Cloud Build
+                // fetches them via `gcloud secrets versions access`.
+                // Rotating an existing secret therefore requires an
+                // explicit out-of-band action (e.g. `gcloud secrets
+                // versions add`), never a side effect of running a deploy.
+                let declaredSecretNames = Set(plan.allDeclaredSecretRefs.values.map(\.secret))
+                var sourceAuthSecretNames: Set<String> = []
+                for service in plan.services where !service.sourceDependencies.isEmpty {
+                    if let name = service.sourceCredential?.cloudPrivateKeySecret, !name.isEmpty {
+                        sourceAuthSecretNames.insert(name)
+                    }
+                    if let name = service.sourceCredential?.cloudKnownHostsSecret, !name.isEmpty {
+                        sourceAuthSecretNames.insert(name)
+                    }
+                }
+                let allRequiredSecretNames = declaredSecretNames.union(sourceAuthSecretNames)
+                self.emit(.log(AIBDeployLogEntry(
+                    timestamp: Date(),
+                    level: .info,
+                    message: "[secrets] Pre-check: declared=[\(declaredSecretNames.sorted().joined(separator: ", "))], "
+                        + "sourceAuth=[\(sourceAuthSecretNames.sorted().joined(separator: ", "))]"
+                )))
 
-                    if !stillMissing.isEmpty {
-                        self.transitionTo(.secretsInput(plan, unresolvedSecrets: stillMissing))
+                var existingSecrets: Set<String> = []
+                if !allRequiredSecretNames.isEmpty {
+                    do {
+                        existingSecrets = try await provider.listSecrets(targetConfig: enrichedConfig)
+                        self.emit(.log(AIBDeployLogEntry(
+                            timestamp: Date(),
+                            level: .info,
+                            message: "[secrets] Secret Manager currently has \(existingSecrets.count) secret(s). "
+                                + "Required & present: [\(allRequiredSecretNames.intersection(existingSecrets).sorted().joined(separator: ", "))]; "
+                                + "Required & missing: [\(allRequiredSecretNames.subtracting(existingSecrets).sorted().joined(separator: ", "))]"
+                        )))
+                    } catch {
+                        // Surface the listing failure as a deploy failure —
+                        // we cannot reason about which secrets need creation.
+                        self.transitionTo(.failed(AIBDeployError(
+                            phase: "secrets",
+                            message: "Failed to list Secret Manager secrets: \(error.localizedDescription)"
+                        )))
+                        return
+                    }
+                }
 
-                        let sGate = SecretsGate()
-                        self.secretsGate = sGate
-                        let result = await sGate.wait()
+                var missingDeclaredSecrets: [String] = declaredSecretNames
+                    .subtracting(existingSecrets)
+                    .sorted()
+                let preservedDeclared = declaredSecretNames
+                    .intersection(existingSecrets)
+                    .sorted()
+                for name in preservedDeclared {
+                    self.emit(.log(AIBDeployLogEntry(
+                        timestamp: Date(),
+                        level: .info,
+                        message: "Reusing existing Secret Manager secret '\(name)' — value preserved"
+                    )))
+                }
 
-                        guard let userSecrets = result else {
-                            self.transitionTo(.cancelled)
-                            return
-                        }
-                        // Merge user-provided values on top of remote values.
-                        // User input takes precedence so a user can rotate a
-                        // secret by re-entering it (the prompt only fires for
-                        // missing names today, but this keeps the contract
-                        // forward-compatible if the UI gains an "override"
-                        // flow later).
-                        for (key, value) in userSecrets {
-                            secretValues[key] = value
-                        }
+                // Auto-provision missing source auth secrets from the
+                // user's local SSH key. Same UX principle as the codex
+                // auth resolver: if the developer already has the material
+                // locally, AIB should upload it instead of asking them to
+                // do it by hand. If `localPrivateKeyPath` is unset or the
+                // file is missing, fall through — the executor pre-check
+                // will surface a clear "provision via AIB Inspector"
+                // remediation message.
+                let missingSourceAuth = sourceAuthSecretNames.subtracting(existingSecrets)
+                if !missingSourceAuth.isEmpty {
+                    let provisioningOutcome = await self.autoProvisionSourceAuthSecrets(
+                        workspaceRoot: workspaceRoot,
+                        plan: plan,
+                        missingSecretNames: missingSourceAuth,
+                        targetConfig: enrichedConfig
+                    )
+                    // Drop names that we just uploaded so the executor
+                    // pre-check sees them as present without us having to
+                    // re-`listSecrets`.
+                    existingSecrets.formUnion(provisioningOutcome.uploadedNames)
+                }
+
+                // Try to auto-resolve missing secrets through the resolver
+                // chain (codex auth file -> random hex generator). Anything
+                // the chain can fill in is held aside in
+                // `autoResolvedDeclared` and uploaded later; anything it
+                // cannot fill stays in `missingDeclaredSecrets` for user
+                // input. This keeps the secretsInput UI focused on what
+                // genuinely needs human attention.
+                var autoResolvedDeclared: [String: String] = [:]
+                var unresolvedDeclaredForUser: [String] = []
+                for name in missingDeclaredSecrets {
+                    if let resolved = await self.secretValueResolver.resolveValue(
+                        secretName: name,
+                        plan: plan
+                    ) {
+                        autoResolvedDeclared[name] = resolved.value
+                        self.emit(.log(AIBDeployLogEntry(
+                            timestamp: Date(),
+                            level: .info,
+                            message: "Auto-resolved secret '\(name)' from \(resolved.sourceDescription)"
+                        )))
+                    } else {
+                        unresolvedDeclaredForUser.append(name)
+                    }
+                }
+                missingDeclaredSecrets = unresolvedDeclaredForUser
+
+                var declaredValuesForUpload: [String: String] = autoResolvedDeclared
+
+                if !unresolvedStillMissing.isEmpty || !missingDeclaredSecrets.isEmpty {
+                    self.transitionTo(.secretsInput(
+                        plan,
+                        unresolvedSecrets: unresolvedStillMissing,
+                        missingDeclaredSecrets: missingDeclaredSecrets
+                    ))
+
+                    let sGate = SecretsGate()
+                    self.secretsGate = sGate
+                    let result = await sGate.wait()
+
+                    guard let userInput = result else {
+                        self.transitionTo(.cancelled)
+                        return
+                    }
+
+                    // Merge user-provided env values on top of remote values.
+                    // User input takes precedence so a user can rotate a
+                    // secret by re-entering it.
+                    for (key, value) in userInput.unresolvedEnv {
+                        secretValues[key] = value
+                    }
+
+                    // User-provided declared values take precedence over
+                    // auto-resolved ones — same rotation principle.
+                    for (key, value) in userInput.declared {
+                        declaredValuesForUpload[key] = value
+                    }
+                }
+
+                // Upload declared SecretRef values (auto-resolved + user-
+                // provided) to Secret Manager so the subsequent
+                // `--set-secrets` mount can resolve them. Sequential —
+                // uploads are idempotent and small; ordering makes the log
+                // easier to follow if one fails.
+                let declaredNamesToUpload = autoResolvedDeclared.keys.sorted()
+                    + missingDeclaredSecrets
+                for name in declaredNamesToUpload {
+                    guard let value = declaredValuesForUpload[name], !value.isEmpty else {
+                        self.transitionTo(.failed(AIBDeployError(
+                            phase: "secrets",
+                            message: "Missing value for declared SecretRef '\(name)'"
+                        )))
+                        return
+                    }
+                    do {
+                        try await provider.upsertSecret(
+                            name: name,
+                            value: value,
+                            targetConfig: enrichedConfig
+                        )
+                    } catch let error as AIBDeployError {
+                        self.transitionTo(.failed(error))
+                        return
+                    } catch {
+                        self.transitionTo(.failed(AIBDeployError(
+                            phase: "secrets",
+                            message: "Failed to upload secret '\(name)': \(error.localizedDescription)"
+                        )))
+                        return
                     }
                 }
                 self.providedSecrets = secretValues
@@ -240,26 +430,61 @@ public final class AIBDeployController {
     }
 
     /// Provide secrets and proceed to deployment.
-    public func provideSecrets(_ secrets: [String: String]) {
-        secretsGate?.provide(secrets: secrets)
+    ///
+    /// `unresolvedEnv` values are injected at deploy time via `--set-env-vars`.
+    /// `declared` values are uploaded to Secret Manager via `upsertSecret`
+    /// before the apply phase begins.
+    public func provideSecrets(
+        unresolvedEnv: [String: String],
+        declared: [String: String]
+    ) {
+        secretsGate?.provide(result: SecretsGateResult(
+            unresolvedEnv: unresolvedEnv,
+            declared: declared
+        ))
     }
 
     /// Cancel the current deployment pipeline.
-    public func cancel() {
+    ///
+    /// Asynchronous because the running pipeline `Task` owns all phase
+    /// transitions to `.cancelled` (it observes the gate denial / cancellation
+    /// in its own body). We await its completion here so that a follow-up
+    /// `reset()` / restart is guaranteed to happen *after* the running task
+    /// has emitted its final `.cancelled` event — otherwise the delayed
+    /// emission would overwrite the freshly-reset `.idle` state and the UI
+    /// would get stuck on "Deployment cancelled" after a context switch.
+    ///
+    /// Only when no pipeline task is running (e.g. cancel called from
+    /// `.idle`) does this method itself perform the terminal transition.
+    public func cancel() async {
         cancellationRequested = true
         deployStartedAt = nil
         approvalGate?.deny()
         approvalGate = nil
         secretsGate?.cancel()
         secretsGate = nil
-        currentTask?.cancel()
+
+        let runningTask = currentTask
         currentTask = nil
+        runningTask?.cancel()
+
+        // Wait for the pipeline task to fully exit so its terminal
+        // `transitionTo(.cancelled)` (or `.failed` / `.completed`) has already
+        // been emitted before this call returns.
+        await runningTask?.value
+
+        // If there was no running task to transition the phase, do it here.
         if !phase.isTerminal {
             transitionTo(.cancelled)
         }
     }
 
     /// Reset to idle state after completion, failure, or cancellation.
+    ///
+    /// **Precondition**: any in-flight pipeline `Task` must already be done.
+    /// Callers that may still have a running task must `await cancel()` before
+    /// calling this method, otherwise the running task can emit a stale
+    /// `.cancelled` event after `phase` has been set back to `.idle`.
     public func reset() {
         cancellationRequested = false
         deployStartedAt = nil
@@ -303,6 +528,194 @@ public final class AIBDeployController {
             continuation.finish()
         }
         eventContinuations.removeAll()
+    }
+
+    // MARK: - Source Auth Auto-Provisioning
+
+    private struct SourceAuthProvisioningOutcome {
+        var uploadedNames: Set<String>
+    }
+
+    /// Auto-provision missing cloud source auth secrets from the user's
+    /// local SSH key, using the same `CloudSourceAuthBootstrapService` that
+    /// the AIB Inspector's "Provision from local SSH" button drives.
+    ///
+    /// The bootstrap service is the right entry point here (not the lower-
+    /// level `CloudSourceCredentialProvisioningService`) because the local
+    /// SSH key path lives in `.aib/targets/local.yaml`, NOT in the cloud
+    /// target config: a fresh deploy's `gcp-cloudrun.yaml` entry typically
+    /// has only `cloudPrivateKeySecret` populated, with `localPrivateKeyPath`
+    /// nil. The bootstrap loads `local.yaml`, matches by host, and writes
+    /// the merged credential back to `gcp-cloudrun.yaml`.
+    ///
+    /// Behaviour is best-effort and silent on partial failure: anything that
+    /// cannot be auto-provisioned (no matching local credential, key file
+    /// missing, host has no `gcpProject` in target config, provisioning
+    /// throws) is left for the executor's pre-check to surface with the
+    /// existing remediation guidance ("Provision them via the AIB
+    /// Inspector ..."). The goal here is to remove friction in the common
+    /// case where the developer already has a working local SSH key, not
+    /// to replace the explicit Inspector flow.
+    private func autoProvisionSourceAuthSecrets(
+        workspaceRoot: String,
+        plan: AIBDeployPlan,
+        missingSecretNames: Set<String>,
+        targetConfig: AIBDeployTargetConfig
+    ) async -> SourceAuthProvisioningOutcome {
+        self.emit(.log(AIBDeployLogEntry(
+            timestamp: Date(),
+            level: .info,
+            message: "[source-auth] Auto-provisioning entered. workspaceRoot=\(workspaceRoot) "
+                + "missingSecrets=[\(missingSecretNames.sorted().joined(separator: ", "))]"
+        )))
+
+        guard let gcpProject = targetConfig.providerConfig["gcpProject"],
+              !gcpProject.isEmpty
+        else {
+            self.emit(.log(AIBDeployLogEntry(
+                timestamp: Date(),
+                level: .warning,
+                message: "[source-auth] Skipping auto-provision: targetConfig.providerConfig[\"gcpProject\"] is missing or empty."
+            )))
+            return SourceAuthProvisioningOutcome(uploadedNames: [])
+        }
+        self.emit(.log(AIBDeployLogEntry(
+            timestamp: Date(),
+            level: .info,
+            message: "[source-auth] Using GCP project '\(gcpProject)' for auto-provisioning."
+        )))
+
+        // Dedup credentials by host — multiple services often share the
+        // same SSH credential, and we only want to upload once per host.
+        var credentialsByHost: [String: AIBSourceCredential] = [:]
+        var servicesWithDependencies = 0
+        var servicesWithoutCredential = 0
+        for service in plan.services {
+            if !service.sourceDependencies.isEmpty {
+                servicesWithDependencies += 1
+            }
+            guard let credential = service.sourceCredential else {
+                if !service.sourceDependencies.isEmpty {
+                    servicesWithoutCredential += 1
+                    self.emit(.log(AIBDeployLogEntry(
+                        timestamp: Date(),
+                        level: .warning,
+                        message: "[source-auth] Service '\(service.id)' has \(service.sourceDependencies.count) "
+                            + "source dependencies but no sourceCredential resolved in plan."
+                    )))
+                }
+                continue
+            }
+            credentialsByHost[credential.host] = credential
+        }
+        self.emit(.log(AIBDeployLogEntry(
+            timestamp: Date(),
+            level: .info,
+            message: "[source-auth] Plan summary: \(plan.services.count) service(s), "
+                + "\(servicesWithDependencies) with source deps, "
+                + "\(servicesWithoutCredential) missing credential, "
+                + "\(credentialsByHost.count) unique host(s): "
+                + "[\(credentialsByHost.keys.sorted().joined(separator: ", "))]"
+        )))
+
+        if credentialsByHost.isEmpty {
+            self.emit(.log(AIBDeployLogEntry(
+                timestamp: Date(),
+                level: .warning,
+                message: "[source-auth] No host credentials to provision — bailing out without upload."
+            )))
+            return SourceAuthProvisioningOutcome(uploadedNames: [])
+        }
+
+        let bootstrap = CloudSourceAuthBootstrapService()
+        var uploaded: Set<String> = []
+
+        for (host, credential) in credentialsByHost.sorted(by: { $0.key < $1.key }) {
+            let privateKeySecretName = credential.cloudPrivateKeySecret ?? ""
+            guard !privateKeySecretName.isEmpty else {
+                self.emit(.log(AIBDeployLogEntry(
+                    timestamp: Date(),
+                    level: .warning,
+                    message: "[source-auth] Skipping host '\(host)': cloudPrivateKeySecret is unset on credential."
+                )))
+                continue
+            }
+
+            // Skip credentials whose private-key secret already exists —
+            // we only want to upload what is missing.
+            guard missingSecretNames.contains(privateKeySecretName) else {
+                self.emit(.log(AIBDeployLogEntry(
+                    timestamp: Date(),
+                    level: .info,
+                    message: "[source-auth] Skipping host '\(host)': secret '\(privateKeySecretName)' "
+                        + "is not in the missing set (probably already exists in Secret Manager)."
+                )))
+                continue
+            }
+
+            self.emit(.log(AIBDeployLogEntry(
+                timestamp: Date(),
+                level: .info,
+                message: "[source-auth] Provisioning host '\(host)' → "
+                    + "privateKey='\(privateKeySecretName)', "
+                    + "knownHosts='\(credential.cloudKnownHostsSecret ?? "<nil>")' "
+                    + "in project '\(gcpProject)' from local.yaml entry"
+            )))
+
+            do {
+                // Bridge to the injected passphrase resolver (typically a
+                // Keychain wrapper from the macOS app). Without this, a
+                // passphrase-protected local SSH key causes the bootstrap
+                // to fail with "configure localPrivateKeyPassphraseEnv".
+                let resolver = self.sourceAuthPassphraseResolver
+                let secretLookup: @Sendable (String) throws -> String? = { key in
+                    try resolver?(key)
+                }
+                let result = try await bootstrap.provisionGCPCloudRunSourceAuth(
+                    workspaceRoot: workspaceRoot,
+                    projectID: gcpProject,
+                    host: credential.host,
+                    preferredPrivateKeySecretName: privateKeySecretName,
+                    preferredKnownHostsSecretName: credential.cloudKnownHostsSecret,
+                    secretLookup: secretLookup
+                )
+                self.emit(.log(AIBDeployLogEntry(
+                    timestamp: Date(),
+                    level: .info,
+                    message: "[source-auth] Bootstrap completed for host '\(host)': "
+                        + "privateKey='\(result.privateKeySecretName)' "
+                        + "createdPrivateKey=\(result.createdPrivateKeySecret), "
+                        + "knownHosts='\(result.knownHostsSecretName ?? "<nil>")' "
+                        + "createdKnownHosts=\(result.createdKnownHostsSecret)"
+                )))
+                // Mark the private-key secret as uploaded whether the bootstrap
+                // *created* a new secret (first deploy) or only *added a new
+                // version* (subsequent re-provision after manual deletion).
+                // Either way, the executor's pre-check will now find it.
+                uploaded.insert(result.privateKeySecretName)
+                if let knownHostsName = result.knownHostsSecretName,
+                   !knownHostsName.isEmpty
+                {
+                    uploaded.insert(knownHostsName)
+                }
+            } catch {
+                self.emit(.log(AIBDeployLogEntry(
+                    timestamp: Date(),
+                    level: .error,
+                    message: "[source-auth] Bootstrap FAILED for host '\(host)' "
+                        + "(secret '\(privateKeySecretName)'): \(error.localizedDescription). "
+                        + "Falling back to manual provisioning via AIB Inspector."
+                )))
+            }
+        }
+
+        self.emit(.log(AIBDeployLogEntry(
+            timestamp: Date(),
+            level: .info,
+            message: "[source-auth] Auto-provisioning finished. uploaded="
+                + "[\(uploaded.sorted().joined(separator: ", "))]"
+        )))
+        return SourceAuthProvisioningOutcome(uploadedNames: uploaded)
     }
 }
 

@@ -7,10 +7,16 @@ public enum AIBDeployPhase: Sendable {
     case planning
     case reviewing(AIBDeployPlan)
     /// Waiting for user to provide secret values before deployment.
-    /// The associated plan and the unresolved secret names are provided for
-    /// the UI. Declared `SecretRef`s are NOT included here — they are mounted
-    /// straight from the provider's secret store and need no user input.
-    case secretsInput(AIBDeployPlan, unresolvedSecrets: [String])
+    /// - `unresolvedSecrets`: env vars referenced in source code that are not
+    ///   pinned anywhere; entered values flow into `--set-env-vars`.
+    /// - `missingDeclaredSecrets`: workspace.yaml `secrets:` bindings whose
+    ///   backing Secret Manager secret does not exist yet; entered values are
+    ///   uploaded via `provider.upsertSecret(...)` before `applying`.
+    case secretsInput(
+        AIBDeployPlan,
+        unresolvedSecrets: [String],
+        missingDeclaredSecrets: [String]
+    )
     case applying(AIBDeployPlan)
     case completed(AIBDeployResult)
     case failed(AIBDeployError)

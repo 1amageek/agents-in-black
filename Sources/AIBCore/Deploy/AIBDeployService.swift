@@ -48,10 +48,14 @@ public enum AIBDeployService {
 
     /// Load the deploy target configuration.
     /// Looks for `.aib/targets/{providerID}.yaml` and merges with defaults.
+    /// When `environmentName` is non-nil, `.aib/environments/<name>.yaml`
+    /// `target` overrides are merged on top of the parsed config (and on top
+    /// of `overrides`), allowing per-environment GCP project / region switches.
     public static func loadTargetConfig(
         workspaceRoot: String,
         providerID: String,
-        overrides: [String: String] = [:]
+        overrides: [String: String] = [:],
+        environmentName: String? = nil
     ) throws -> AIBDeployTargetConfig {
         let targetPath = URL(fileURLWithPath: workspaceRoot)
             .appendingPathComponent(".aib/targets/\(providerID).yaml")
@@ -145,6 +149,22 @@ public enum AIBDeployService {
                     if let strVal = value.scalar?.string, providerConfig[keyStr] == nil {
                         providerConfig[keyStr] = strVal
                     }
+                }
+            }
+        }
+
+        // Apply environment overlay last so overrides win over both the target
+        // file and `overrides`. `region` is mirrored back to the top-level field
+        // because the deploy plan consults it directly (providerConfig is only
+        // used by provider-specific commands).
+        if let environment = try AIBEnvironmentLoader.load(
+            workspaceRoot: workspaceRoot,
+            name: environmentName
+        ) {
+            for (key, value) in environment.targetOverrides {
+                providerConfig[key] = value
+                if key == "region" {
+                    region = value
                 }
             }
         }
@@ -376,11 +396,31 @@ public enum AIBDeployService {
     public static func generatePlan(
         workspaceRoot: String,
         targetConfig: AIBDeployTargetConfig,
-        provider: any DeploymentProvider
+        provider: any DeploymentProvider,
+        selection: AIBDeploySelection? = nil,
+        environmentName: String? = nil
     ) async throws -> AIBDeployPlan {
         let workspacePath = AIBRuntimeCoreService.workspaceYAMLPath(workspaceRoot: workspaceRoot)
         let workspace = try WorkspaceYAMLCodec.loadWorkspace(at: workspacePath)
-        let resolved = try WorkspaceSyncer.resolveConfig(workspaceRoot: workspaceRoot, workspace: workspace)
+        var resolved = try WorkspaceSyncer.resolveConfig(workspaceRoot: workspaceRoot, workspace: workspace)
+
+        // Apply per-service environment overlay before any plan logic reads from
+        // the service. This way `EnvScopeRule.violations`, `SecretRefRule`, and
+        // `service.resolvedEnv(for: .deploy)` all see the environment-merged view.
+        if let environment = try AIBEnvironmentLoader.load(
+            workspaceRoot: workspaceRoot,
+            name: environmentName
+        ), !environment.serviceOverrides.isEmpty {
+            resolved.config.services = resolved.config.services.map { service in
+                let override = environment.override(for: service.id.rawValue)
+                guard !override.isEmpty else { return service }
+                var updated = service
+                updated.env = updated.env.merging(override.env) { _, new in new }
+                updated.deployEnv = updated.deployEnv.merging(override.deployEnv) { _, new in new }
+                updated.secrets = updated.secrets.merging(override.secrets) { _, new in new }
+                return updated
+            }
+        }
         let workspaceSkillsByID = Dictionary(uniqueKeysWithValues: (workspace.skills ?? []).map { ($0.id, $0) })
         let skillIDsByService = Dictionary(uniqueKeysWithValues: workspace.repos.flatMap { repo in
             (repo.services ?? []).map { service in
@@ -409,12 +449,38 @@ public enum AIBDeployService {
             }
         }
 
+        let effectiveSelection = selection ?? AIBDeploySelection()
+        let selectedServiceIDs = Set(resolved.config.services.compactMap { service -> String? in
+            let serviceKind = AIBServiceKind(from: service.kind)
+            guard effectiveSelection.includes(serviceID: service.id.rawValue, kind: serviceKind) else {
+                return nil
+            }
+            return service.id.rawValue
+        })
+        if !effectiveSelection.isEmpty && selectedServiceIDs.isEmpty {
+            throw AIBDeployError(
+                phase: "plan",
+                message: "Deploy selection matched no services: \(effectiveSelection.displayDescription)"
+            )
+        }
+
         var servicePlans: [AIBDeployServicePlan] = []
         var authBindings: [AIBDeployAuthBinding] = []
-        let warnings: [String] = []
+        var warnings: [String] = []
         var fatalErrors: [String] = []
 
+        if !effectiveSelection.isEmpty {
+            warnings.append(
+                "Deploy selection '\(effectiveSelection.displayDescription)' includes \(selectedServiceIDs.count) of \(resolved.config.services.count) services."
+            )
+        }
+
         for service in resolved.config.services {
+            let serviceKind = AIBServiceKind(from: service.kind)
+            guard selectedServiceIDs.contains(service.id.rawValue) else {
+                continue
+            }
+
             // Hard block: refuse to deploy if the universal `env` bucket contains entries
             // that point at the local emulator. These would silently break production by
             // routing Cloud Run traffic to nonexistent emulator hosts (e.g. Firestore
@@ -664,7 +730,7 @@ public enum AIBDeployService {
                     suppressedDetectedSecrets.formUnion(["OPENAI_API_KEY", "CODEX_API_KEY"])
                     envVars["AIB_CODEX_AUTH_MODE"] = "chatgpt"
                     envVars["AIB_CODEX_AUTH_JSON"] = "/var/secrets/aib/codex/auth.json"
-                    envVars["CODEX_HOME"] = "/tmp/aib-codex-home"
+                    envVars["CODEX_HOME"] = "/home/node/.codex"
                     declaredSecretRefs["/var/secrets/aib/codex/auth.json"] = SecretRef(
                         secret: secretName,
                         version: codexAuth.version
@@ -697,7 +763,6 @@ public enum AIBDeployService {
                 "Service '\(service.id.rawValue)': Environment variable '\($0)' referenced in source but not configured in workspace.yaml env."
             }
 
-            let serviceKind = AIBServiceKind(from: service.kind)
             let resourceConfig = targetConfig.resourceConfig(for: serviceKind)
             let isPublic = targetConfig.defaultAuth == .public
 
@@ -743,7 +808,7 @@ public enum AIBDeployService {
 
             var servicePlan = AIBDeployServicePlan(
                 id: service.id.rawValue,
-                serviceKind: AIBServiceKind(from: service.kind),
+                serviceKind: serviceKind,
                 runtime: runtime.rawValue,
                 repoPath: repoPath,
                 deployedServiceName: deployedName,

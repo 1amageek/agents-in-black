@@ -1,4 +1,5 @@
 import AIBCore
+import AIBRuntimeCore
 import SwiftUI
 
 struct SelectionInspectorView: View {
@@ -394,8 +395,7 @@ private struct ServiceInspectorSection: View {
 
     var body: some View {
         Group {
-            Text(service.namespacedID)
-                .font(.title3).bold()
+            ServiceInspectorHeader(model: model, service: service)
 
             VStack(alignment: .leading, spacing: 4) {
                 Text("Kind")
@@ -786,6 +786,22 @@ private struct AgentModelSection: View {
             }
             .labelsHidden()
             .pickerStyle(.menu)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Reasoning")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Picker("Reasoning", selection: reasoningEffortBinding) {
+                    Text("Default (\(AIBReasoningEffort.defaultAgent.displayName))")
+                        .tag(String?.none)
+                    ForEach(AIBReasoningEffort.allCases) { effort in
+                        Text(effort.displayName).tag(Optional(effort.rawValue))
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
         }
     }
 
@@ -798,6 +814,21 @@ private struct AgentModelSection: View {
                     await model.updateServiceModel(
                         namespacedServiceID: service.namespacedID,
                         model: newValue
+                    )
+                }
+            }
+        )
+    }
+
+    private var reasoningEffortBinding: Binding<String?> {
+        Binding(
+            get: { service.configuredReasoningEffort },
+            set: { newValue in
+                guard newValue != service.configuredReasoningEffort else { return }
+                Task {
+                    await model.updateServiceReasoningEffort(
+                        namespacedServiceID: service.namespacedID,
+                        reasoningEffort: newValue
                     )
                 }
             }
@@ -856,6 +887,60 @@ private struct DeployResourcesInspectorSection: View {
                 }
             }
         }
+    }
+}
+
+private struct ServiceInspectorHeader: View {
+    @Bindable var model: AgentsInBlackAppModel
+    var service: AIBServiceModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .center, spacing: 8) {
+                Text(displayName)
+                    .font(.title3)
+                    .bold()
+                    .lineLimit(1)
+
+                Spacer(minLength: 8)
+
+                Button {
+                    model.startDeploy(for: service)
+                } label: {
+                    Label("Deploy This Service", systemImage: "icloud.and.arrow.up.fill")
+                }
+                .labelStyle(.iconOnly)
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .disabled(isDisabled)
+                .help(helpText)
+            }
+
+            Text(service.namespacedID)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+        .padding(.bottom, 4)
+    }
+
+    private var displayName: String {
+        service.packageName ?? service.localID
+    }
+
+    private var isDisabled: Bool {
+        model.workspace == nil || model.hasUnsavedFlowChanges || model.showDeploySheet
+    }
+
+    private var helpText: String {
+        if model.hasUnsavedFlowChanges {
+            return "Save topology changes before deploying this service."
+        }
+        if model.showDeploySheet {
+            return "A deployment is already open."
+        }
+        return "Deploy only this service. Existing connected services are used for URL resolution."
     }
 }
 
