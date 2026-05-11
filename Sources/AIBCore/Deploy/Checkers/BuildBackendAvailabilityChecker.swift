@@ -1,6 +1,6 @@
 import Foundation
 
-/// Checks whether apple/container build backend is available.
+/// Checks whether docker + buildx are available for the deploy build/push pipeline.
 public struct BuildBackendAvailabilityChecker: PreflightChecker {
     public let checkID = PreflightCheckID.buildBackendAvailable
     public let title = "Build Backend"
@@ -23,107 +23,75 @@ public struct BuildBackendAvailabilityChecker: PreflightChecker {
         }
 
         do {
-            let installedCommand = "command -v container"
-            let installed = try await ShellProbe.run(command: installedCommand)
-            diagnostics.append(contentsOf: PreflightDiagnostics.lines(command: installedCommand, result: installed))
-            if installed.exitCode != 0 {
+            let dockerInstalledCommand = "command -v docker"
+            let dockerInstalled = try await ShellProbe.run(command: dockerInstalledCommand)
+            diagnostics.append(contentsOf: PreflightDiagnostics.lines(command: dockerInstalledCommand, result: dockerInstalled))
+            if dockerInstalled.exitCode != 0 {
                 return PreflightCheckResult(
                     id: checkID,
                     title: title,
-                    status: .failed("apple/container CLI is not installed."),
-                    remediationCommand: "Open Target Settings and click Install Latest apple/container.",
+                    status: .failed("docker CLI is not installed."),
+                    remediationCommand: "Install Docker Desktop or OrbStack (https://orbstack.dev).",
                     diagnostics: diagnostics
                 )
             }
 
-            // Fast path when builder is already healthy.
-            let builderStatusCommand = "container builder status"
-            let builderStatus = try await ShellProbe.run(command: builderStatusCommand)
-            diagnostics.append(contentsOf: PreflightDiagnostics.lines(command: builderStatusCommand, result: builderStatus))
-            if builderStatus.exitCode == 0 {
+            let buildxCommand = "docker buildx version"
+            let buildx = try await ShellProbe.run(command: buildxCommand)
+            diagnostics.append(contentsOf: PreflightDiagnostics.lines(command: buildxCommand, result: buildx))
+            if buildx.exitCode != 0 {
+                let detail = summarized([buildx.stdout, buildx.stderr].filter { !$0.isEmpty }.joined(separator: "\n"))
                 return PreflightCheckResult(
                     id: checkID,
                     title: title,
-                    status: .passed(detail: "apple-container"),
+                    status: .failed("docker buildx is not available: \(detail)"),
+                    remediationCommand: "Install Docker 23+ or enable the buildx plugin.",
                     diagnostics: diagnostics
                 )
             }
 
-            // Try to start builder so preflight reflects deploy-time behavior.
-            let builderStartCommand = "container builder start"
-            let builderStart = try await ShellProbe.run(
-                command: builderStartCommand,
-                timeout: .seconds(30)
+            // `docker info` requires the daemon to be reachable. If the user has docker CLI
+            // but Docker Desktop / OrbStack is not running, this is where we catch it.
+            let dockerInfoCommand = "docker info"
+            let dockerInfo = try await ShellProbe.run(
+                command: dockerInfoCommand,
+                timeout: .seconds(15)
             )
-            diagnostics.append(contentsOf: PreflightDiagnostics.lines(command: builderStartCommand, result: builderStart))
-            if builderStart.exitCode == 0 {
+            diagnostics.append(contentsOf: PreflightDiagnostics.lines(command: dockerInfoCommand, result: dockerInfo))
+            if dockerInfo.exitCode != 0 {
+                let detail = summarized([dockerInfo.stdout, dockerInfo.stderr].filter { !$0.isEmpty }.joined(separator: "\n"))
                 return PreflightCheckResult(
                     id: checkID,
                     title: title,
-                    status: .passed(detail: "apple-container"),
+                    status: .failed("docker daemon is not reachable: \(detail)"),
+                    remediationCommand: "Start Docker Desktop or OrbStack and retry.",
                     diagnostics: diagnostics
                 )
             }
 
-            let output = [builderStart.stdout, builderStart.stderr]
-                .filter { !$0.isEmpty }
-                .joined(separator: "\n")
-            if output.localizedCaseInsensitiveContains("default kernel not configured") {
-                let kernelSetupCommand = "container system kernel set --recommended"
-                let kernelSetup = try await ShellProbe.run(
-                    command: kernelSetupCommand,
-                    timeout: .seconds(600)
-                )
-                diagnostics.append(contentsOf: PreflightDiagnostics.lines(command: kernelSetupCommand, result: kernelSetup))
-                if kernelSetup.exitCode != 0 {
-                    let kernelOutput = [kernelSetup.stdout, kernelSetup.stderr]
-                        .filter { !$0.isEmpty }
-                        .joined(separator: "\n")
-                    return PreflightCheckResult(
-                        id: checkID,
-                        title: title,
-                        status: .failed("apple/container kernel auto-setup failed: \(summarized(kernelOutput))"),
-                        remediationCommand: "container system kernel set --recommended && container builder start",
-                        diagnostics: diagnostics
-                    )
-                }
-
-                let retryStartCommand = "container builder start"
-                let retryStart = try await ShellProbe.run(
-                    command: retryStartCommand,
-                    timeout: .seconds(60)
-                )
-                diagnostics.append(contentsOf: PreflightDiagnostics.lines(command: retryStartCommand, result: retryStart))
-                let retryStatusCommand = "container builder status"
-                let retryStatus = try await ShellProbe.run(command: retryStatusCommand)
-                diagnostics.append(contentsOf: PreflightDiagnostics.lines(command: retryStatusCommand, result: retryStatus))
-                if retryStart.exitCode == 0 || retryStatus.exitCode == 0 {
-                    return PreflightCheckResult(
-                        id: checkID,
-                        title: title,
-                        status: .passed(detail: "apple-container (kernel auto-configured)"),
-                        diagnostics: diagnostics
-                    )
-                }
-
-                let retryOutput = [retryStart.stdout, retryStart.stderr]
-                    .filter { !$0.isEmpty }
-                    .joined(separator: "\n")
+            // Materialize the active buildx builder so the deploy step doesn't pay
+            // cold-start latency on first build.
+            let bootstrapCommand = "docker buildx inspect --bootstrap"
+            let bootstrap = try await ShellProbe.run(
+                command: bootstrapCommand,
+                timeout: .seconds(60)
+            )
+            diagnostics.append(contentsOf: PreflightDiagnostics.lines(command: bootstrapCommand, result: bootstrap))
+            if bootstrap.exitCode != 0 {
+                let detail = summarized([bootstrap.stdout, bootstrap.stderr].filter { !$0.isEmpty }.joined(separator: "\n"))
                 return PreflightCheckResult(
                     id: checkID,
                     title: title,
-                    status: .failed("apple/container builder failed after kernel setup: \(summarized(retryOutput))"),
-                    remediationCommand: "container builder start",
+                    status: .failed("docker buildx failed to bootstrap a builder: \(detail)"),
+                    remediationCommand: "docker buildx create --use --name aib-builder",
                     diagnostics: diagnostics
                 )
             }
 
-            let detail = summarized(output)
             return PreflightCheckResult(
                 id: checkID,
                 title: title,
-                status: .failed("apple/container builder failed to start: \(detail)"),
-                remediationCommand: "container system start && container builder start",
+                status: .passed(detail: "docker-buildx"),
                 diagnostics: diagnostics
             )
         } catch {

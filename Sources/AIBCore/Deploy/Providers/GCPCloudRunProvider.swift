@@ -140,22 +140,32 @@ public struct GCPCloudRunProvider: DeploymentProvider, Sendable {
     public func registryAuthCommands(targetConfig: AIBDeployTargetConfig) -> [DeployCommand] {
         let host = targetConfig.providerConfig["artifactRegistryHost"]
             ?? "\(targetConfig.region)-docker.pkg.dev"
+        let hostForShell = shellQuote(host)
         let script = """
         set -euo pipefail
-        if ! command -v container >/dev/null 2>&1; then
-          echo "apple/container CLI is not installed. Install it from https://github.com/apple/container/releases"
+        if ! command -v docker >/dev/null 2>&1; then
+          echo "docker CLI is not installed. Install Docker Desktop or OrbStack."
           exit 127
         fi
         if ! command -v gcloud >/dev/null 2>&1; then
           echo "gcloud CLI is not installed."
           exit 127
         fi
+        if ! docker buildx version >/dev/null 2>&1; then
+          echo "docker buildx is not available. Install Docker 23+ or enable the buildx plugin."
+          exit 127
+        fi
         access_token="$(gcloud auth print-access-token)"
         if [ -z "$access_token" ]; then
-          echo "Failed to get gcloud access token."
+          echo "Failed to get gcloud access token. Run: gcloud auth login"
           exit 1
         fi
-        echo "Registry auth validated for \(host) (env-var mode)"
+        if [ -f "$HOME/.docker/config.json" ] \\
+          && ! grep -Eq "\\"\(host)\\"[[:space:]]*:[[:space:]]*\\"gcloud\\"" "$HOME/.docker/config.json"; then
+          echo "Note: \(host) may not be registered with the gcloud credential helper."
+          echo "If push fails with 'no basic auth credentials', run: gcloud auth configure-docker \(hostForShell)"
+        fi
+        echo "Registry auth validated for \(host) (docker credHelpers + gcloud)"
         """
         return [
             DeployCommand(
@@ -167,13 +177,36 @@ public struct GCPCloudRunProvider: DeploymentProvider, Sendable {
     }
 
     public func buildBackendPreparationCommands(targetConfig: AIBDeployTargetConfig) -> [DeployCommand] {
+        // Config key kept under the legacy "appleContainer" name for backward compatibility,
+        // but the disk-space threshold now triggers docker buildx / image prune instead of
+        // the apple/container prune that used to live here.
         let minFreeGiB = max(1, Int(targetConfig.providerConfig["appleContainerMinFreeGiB"] ?? "") ?? 10)
         let minFreeKiB = minFreeGiB * 1024 * 1024
         let script = """
         set -euo pipefail
-        if ! command -v container >/dev/null 2>&1; then
-          echo "apple/container CLI is not installed. Install it from https://github.com/apple/container/releases"
+        if ! command -v docker >/dev/null 2>&1; then
+          echo "docker CLI is not installed. Install Docker Desktop or OrbStack."
           exit 127
+        fi
+        if ! docker buildx version >/dev/null 2>&1; then
+          echo "docker buildx is not available. Install Docker 23+ or enable the buildx plugin."
+          exit 127
+        fi
+        if ! docker info >/dev/null 2>&1; then
+          echo "docker daemon is not reachable. Start Docker Desktop or OrbStack and retry."
+          exit 1
+        fi
+
+        # Materialize the active buildx builder so the build step doesn't pay the cold-start
+        # latency. Idempotent — bootstrap is a no-op for an already-running builder.
+        set +e
+        bootstrap_output="$(docker buildx inspect --bootstrap 2>&1)"
+        bootstrap_status=$?
+        set -e
+        if [ "$bootstrap_status" -ne 0 ]; then
+          echo "$bootstrap_output"
+          echo "docker buildx failed to bootstrap a builder."
+          exit 1
         fi
 
         disk_target="/System/Volumes/Data"
@@ -194,80 +227,33 @@ public struct GCPCloudRunProvider: DeploymentProvider, Sendable {
         free_gib="$((free_kb / 1024 / 1024))"
         echo "Free disk before build prep: ${free_gib}GiB (threshold: ${threshold_gib}GiB)"
 
-        # Ensure builder VM has working DNS for package installs during image build.
-        # The default gateway DNS (192.168.x.1) may not resolve external hosts.
-        ensure_builder_dns() {
-          if container builder status >/dev/null 2>&1; then
-            set +e
-            dns_test="$(container exec buildkit nslookup registry.npmjs.org 2>&1)"
-            set -e
-            if echo "$dns_test" | grep -qi "timed out\\|no servers\\|SERVFAIL"; then
-              echo "Builder VM DNS is not resolving external hosts. Configuring Google Public DNS..."
-              container exec buildkit sh -c 'echo "nameserver 8.8.8.8" > /etc/resolv.conf'
-            fi
-          fi
-        }
-
         if [ "$free_kb" -gt "$threshold_kb" ]; then
-          echo "Disk space is sufficient. Skipping apple/container cleanup."
-          ensure_builder_dns
+          echo "Disk space is sufficient. Skipping docker cleanup."
           exit 0
         fi
 
-        echo "Low disk space detected. Pruning stale apple/container images..."
+        echo "Low disk space detected. Pruning buildx cache and unused docker images..."
         set +e
-        prune_output="$(printf 'y\\n' | container image prune --all 2>&1)"
-        prune_status=$?
+        buildx_prune_output="$(docker buildx prune -af 2>&1)"
+        buildx_prune_status=$?
         set -e
-        if [ -n "$prune_output" ]; then
-          echo "$prune_output"
+        if [ -n "$buildx_prune_output" ]; then
+          echo "$buildx_prune_output"
         fi
-        if [ "$prune_status" -ne 0 ]; then
-          echo "apple/container image prune failed while recovering disk space."
+        if [ "$buildx_prune_status" -ne 0 ]; then
+          echo "docker buildx prune failed while recovering disk space."
           exit 1
         fi
 
-        if container builder status >/dev/null 2>&1; then
-          echo "Resetting apple/container builder cache..."
-          set +e
-          container builder stop >/dev/null 2>&1
-          stop_status=$?
-          container builder rm >/dev/null 2>&1
-          remove_status=$?
-          set -e
-          if [ "$stop_status" -ne 0 ] || [ "$remove_status" -ne 0 ]; then
-            echo "Warning: builder cache reset reported a non-zero status (stop=$stop_status, rm=$remove_status)."
-          fi
-        fi
-
         set +e
-        builder_start_output="$(container builder start 2>&1)"
-        builder_start_status=$?
+        image_prune_output="$(docker image prune -af 2>&1)"
+        image_prune_status=$?
         set -e
-
-        if [ "$builder_start_status" -ne 0 ] && echo "$builder_start_output" | grep -qi "default kernel not configured"; then
-          echo "Default kernel not configured for this architecture. Installing recommended kernel..."
-          set +e
-          kernel_setup_output="$(container system kernel set --recommended 2>&1)"
-          kernel_setup_status=$?
-          set -e
-          if [ "$kernel_setup_status" -ne 0 ]; then
-            echo "$kernel_setup_output"
-            echo "Run: container system kernel set --recommended"
-            exit 1
-          fi
-          set +e
-          builder_start_output="$(container builder start 2>&1)"
-          builder_start_status=$?
-          set -e
+        if [ -n "$image_prune_output" ]; then
+          echo "$image_prune_output"
         fi
-
-        if [ "$builder_start_status" -ne 0 ]; then
-          echo "apple/container builder is not ready after cleanup."
-          if [ -n "$builder_start_output" ]; then
-            echo "$builder_start_output"
-          fi
-          echo "Run: container system start && container builder start"
+        if [ "$image_prune_status" -ne 0 ]; then
+          echo "docker image prune failed while recovering disk space."
           exit 1
         fi
 
@@ -285,12 +271,10 @@ public struct GCPCloudRunProvider: DeploymentProvider, Sendable {
           echo "Disk space is still below ${threshold_gib}GiB after cleanup. Free more disk and retry."
           exit 1
         fi
-
-        ensure_builder_dns
         """
         return [
             DeployCommand(
-                label: "Preparing apple/container build environment",
+                label: "Preparing docker buildx environment",
                 arguments: ["bash", "-lc", script],
                 stepID: AIBDeployStep.dockerBuild.rawValue
             ),
@@ -357,72 +341,32 @@ public struct GCPCloudRunProvider: DeploymentProvider, Sendable {
         let imageHostForShell = shellQuote(imageHost)
         let script = """
         set -euo pipefail
-        if ! command -v container >/dev/null 2>&1; then
-          echo "apple/container CLI is not installed. Install it from https://github.com/apple/container/releases"
+        if ! command -v docker >/dev/null 2>&1; then
+          echo "docker CLI is not installed. Install Docker Desktop or OrbStack."
           exit 127
         fi
         if ! command -v gcloud >/dev/null 2>&1; then
           echo "gcloud CLI is not installed."
           exit 127
         fi
-        export REGISTRY_HOST=\(imageHostForShell)
-        export REGISTRY_USERNAME="oauth2accesstoken"
-        export REGISTRY_TOKEN="$(gcloud auth print-access-token)"
-        if [ -z "$REGISTRY_TOKEN" ]; then
-          echo "Failed to get gcloud access token."
+        if ! docker buildx version >/dev/null 2>&1; then
+          echo "docker buildx is not available. Install Docker 23+ or enable the buildx plugin."
+          exit 127
+        fi
+        # docker-credential-gcloud resolves registry credentials by invoking
+        # `gcloud auth print-access-token` per request. Validate that path is healthy
+        # before kicking off a long build so failures surface early.
+        if ! gcloud auth print-access-token >/dev/null 2>&1; then
+          echo "Failed to obtain gcloud access token. Run: gcloud auth login"
           exit 1
         fi
-        registry_login() {
-          echo "$REGISTRY_TOKEN" | container registry login --username "$REGISTRY_USERNAME" --password-stdin "$REGISTRY_HOST"
-        }
-        refresh_registry_auth() {
-          REGISTRY_TOKEN="$(gcloud auth print-access-token)"
-          export REGISTRY_TOKEN
-          if [ -z "$REGISTRY_TOKEN" ]; then
-            echo "Failed to get gcloud access token."
-            return 1
-          fi
-          registry_login
-        }
-        registry_login
-        if ! container builder status >/dev/null 2>&1; then
-          set +e
-          builder_start_output="$(container builder start 2>&1)"
-          builder_start_status=$?
-          set -e
-
-          if [ "$builder_start_status" -ne 0 ] && echo "$builder_start_output" | grep -qi "default kernel not configured"; then
-            echo "Default kernel not configured for this architecture. Installing recommended kernel..."
-            set +e
-            kernel_setup_output="$(container system kernel set --recommended 2>&1)"
-            kernel_setup_status=$?
-            set -e
-            if [ "$kernel_setup_status" -ne 0 ]; then
-              echo "$kernel_setup_output"
-              echo "Run: container system kernel set --recommended"
-              exit 1
-            fi
-            set +e
-            builder_start_output="$(container builder start 2>&1)"
-            builder_start_status=$?
-            set -e
-          fi
-
-          if [ "$builder_start_status" -ne 0 ]; then
-            echo "apple/container builder is not ready."
-            if [ -n "$builder_start_output" ]; then
-              echo "$builder_start_output"
-            fi
-            echo "Run: container system start && container builder start"
-            exit 1
-          fi
-
-          if ! container builder status >/dev/null 2>&1; then
-            echo "apple/container builder did not reach running state."
-            exit 1
-          fi
+        if [ -f "$HOME/.docker/config.json" ] \\
+          && ! grep -Eq "\\"\(imageHost)\\"[[:space:]]*:[[:space:]]*\\"gcloud\\"" "$HOME/.docker/config.json"; then
+          echo "Registry \(imageHost) is not registered with the gcloud credential helper."
+          echo "Run: gcloud auth configure-docker \(imageHostForShell)"
+          exit 1
         fi
-        echo "Build backend: apple-container"
+        echo "Build backend: docker-buildx (push target \(imageHost))"
         build_start="$(date +%s)"
         cd \(contextForShell)
         stage_context="."
@@ -433,12 +377,16 @@ public struct GCPCloudRunProvider: DeploymentProvider, Sendable {
             stage_dir=""
           fi
         }
+        # docker buildx applies .dockerignore on the client before streaming the
+        # context, so the rsync stage below is primarily a hedge for very large
+        # contexts where the streaming overhead is meaningful. Kept behind the
+        # legacy `appleContainerStageContext` flag for backward compatibility.
         if [ "\(stagedContextEnabled ? "1" : "0")" = "1" ] && [ -f .dockerignore ]; then
           if grep -Eq '^[[:space:]]*!' .dockerignore; then
             echo ".dockerignore contains negation patterns; skipping staged build context optimization."
           elif command -v rsync >/dev/null 2>&1; then
             stage_sync_start="$(date +%s)"
-            stage_dir="$(mktemp -d -t aib-container-context.XXXXXX)"
+            stage_dir="$(mktemp -d -t aib-buildx-context.XXXXXX)"
             set +e
             rsync -a --delete --exclude-from=.dockerignore ./ "$stage_dir"/
             stage_sync_status=$?
@@ -455,13 +403,18 @@ public struct GCPCloudRunProvider: DeploymentProvider, Sendable {
             echo "rsync not found; skipping staged build context optimization."
           fi
         fi
-        build_log="$(mktemp -t aib-container-build.XXXXXX)"
+        build_log="$(mktemp -t aib-buildx-build.XXXXXX)"
         build_attempt=1
         build_max_attempts=2
         staged_context_fallback_attempted=0
         while true; do
           set +e
-          container build --platform linux/amd64 --file \(dockerfileForShell) --tag \(imageForShell) "$stage_context" 2>&1 | tee "$build_log"
+          docker buildx build \\
+            --platform linux/amd64 \\
+            --file \(dockerfileForShell) \\
+            --tag \(imageForShell) \\
+            --push \\
+            "$stage_context" 2>&1 | tee "$build_log"
           build_status=${PIPESTATUS[0]}
           set -e
           if [ "$build_status" -eq 0 ]; then
@@ -476,11 +429,11 @@ public struct GCPCloudRunProvider: DeploymentProvider, Sendable {
             continue
           fi
 
-          if grep -Eqi "ECONNRESET|npm error network aborted|connection reset by peer|TLS handshake timeout|i/o timeout|temporary failure" "$build_log" \
+          if grep -Eqi "ECONNRESET|npm error network aborted|connection reset by peer|TLS handshake timeout|i/o timeout|temporary failure|timeout" "$build_log" \
             && [ "$build_attempt" -lt "$build_max_attempts" ]; then
             retry_delay=$((build_attempt * 5))
             next_attempt=$((build_attempt + 1))
-            echo "Transient network failure detected during image build. Retrying in ${retry_delay}s (attempt ${next_attempt}/${build_max_attempts})..."
+            echo "Transient network failure detected during image build/push. Retrying in ${retry_delay}s (attempt ${next_attempt}/${build_max_attempts})..."
             sleep "$retry_delay"
             build_attempt="$next_attempt"
             continue
@@ -492,46 +445,7 @@ public struct GCPCloudRunProvider: DeploymentProvider, Sendable {
         done
         rm -f "$build_log"
         build_end="$(date +%s)"
-        echo "apple/container build duration: $((build_end - build_start))s"
-        push_start="$(date +%s)"
-        push_log="$(mktemp -t aib-container-push.XXXXXX)"
-        push_attempt=1
-        push_max_attempts=2
-        push_auth_refresh_attempted=0
-        while true; do
-          set +e
-          container image push --platform linux/amd64 \(imageForShell) 2>&1 | tee "$push_log"
-          push_status=${PIPESTATUS[0]}
-          set -e
-          if [ "$push_status" -eq 0 ]; then
-            break
-          fi
-
-          if grep -Eqi "unauthorized|authentication required|denied|no basic auth credentials|insufficient scope" "$push_log" \
-            && [ "$push_auth_refresh_attempted" -eq 0 ]; then
-            echo "Registry authentication appears stale. Refreshing login and retrying push..."
-            refresh_registry_auth
-            push_auth_refresh_attempted=1
-            continue
-          fi
-
-          if grep -Eqi "connection reset by peer|TLS handshake timeout|i/o timeout|temporary failure|timeout" "$push_log" \
-            && [ "$push_attempt" -lt "$push_max_attempts" ]; then
-            retry_delay=$((push_attempt * 5))
-            next_attempt=$((push_attempt + 1))
-            echo "Transient network failure detected during image push. Retrying in ${retry_delay}s (attempt ${next_attempt}/${push_max_attempts})..."
-            sleep "$retry_delay"
-            push_attempt="$next_attempt"
-            continue
-          fi
-
-          rm -f "$push_log"
-          cleanup_staged_context
-          exit "$push_status"
-        done
-        rm -f "$push_log"
-        push_end="$(date +%s)"
-        echo "apple/container push duration: $((push_end - push_start))s"
+        echo "docker buildx build+push duration: $((build_end - build_start))s"
         cleanup_staged_context
         """
 
