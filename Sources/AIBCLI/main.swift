@@ -160,6 +160,8 @@ struct AIBDevMain {
         guard let subcommand = arguments.first else {
             throw ConfigError("Missing deploy subcommand")
         }
+        let rawOptions = Array(arguments.dropFirst())
+        let (environmentName, options) = try extractEnvFlag(arguments: rawOptions)
         let cwd = FileManager.default.currentDirectoryPath
 
         // Detect provider from .aib/targets/ or use default
@@ -167,6 +169,9 @@ struct AIBDevMain {
 
         switch subcommand {
         case "preflight":
+            guard options.isEmpty else {
+                throw ConfigError("deploy preflight does not accept selection options", metadata: ["options": options.joined(separator: " ")])
+            }
             print("Running preflight checks for \(provider.displayName)...")
             let report = await AIBDeployService.preflightCheck(provider: provider)
             for result in report.results {
@@ -198,6 +203,7 @@ struct AIBDevMain {
             }
 
         case "plan", "diff":
+            let selection = try parseDeploySelection(arguments: options)
             let report = await AIBDeployService.preflightCheck(provider: provider)
             guard report.canProceed else {
                 logger.error("Preflight checks failed. Run 'aib deploy preflight' for details.")
@@ -206,7 +212,8 @@ struct AIBDevMain {
 
             var targetConfig = try AIBDeployService.loadTargetConfig(
                 workspaceRoot: cwd,
-                providerID: provider.providerID
+                providerID: provider.providerID,
+                environmentName: environmentName
             )
             // Enrich config with auto-detected values from preflight
             let detectedValues = provider.extractDetectedConfig(from: report)
@@ -218,13 +225,21 @@ struct AIBDevMain {
             let plan = try await AIBDeployService.generatePlan(
                 workspaceRoot: cwd,
                 targetConfig: targetConfig,
-                provider: provider
+                provider: provider,
+                selection: selection,
+                environmentName: environmentName
             )
             try AIBDeployService.writeArtifacts(plan: plan, workspaceRoot: cwd)
 
             print("Deploy Plan: \(plan.workspaceName)")
             print("  Provider: \(provider.displayName)")
+            if let environmentName {
+                print("  Environment: \(environmentName)")
+            }
             print("  Region: \(targetConfig.region)")
+            if let selection, !selection.isEmpty {
+                print("  Selection: \(selection.displayDescription)")
+            }
             print("  Services: \(plan.services.count)")
             for service in plan.services {
                 let sourceLabel = service.artifacts.dockerfile.source == .custom ? "(custom Dockerfile)" : "(generated)"
@@ -240,6 +255,7 @@ struct AIBDevMain {
             Foundation.exit(Int32(ExitCode.ok))
 
         case "apply":
+            let selection = try parseDeploySelection(arguments: options)
             let report = await AIBDeployService.preflightCheck(provider: provider)
             guard report.canProceed else {
                 logger.error("Preflight checks failed. Run 'aib deploy preflight' for details.")
@@ -248,7 +264,8 @@ struct AIBDevMain {
 
             var targetConfig = try AIBDeployService.loadTargetConfig(
                 workspaceRoot: cwd,
-                providerID: provider.providerID
+                providerID: provider.providerID,
+                environmentName: environmentName
             )
             // Enrich config with auto-detected values from preflight
             let detectedApplyValues = provider.extractDetectedConfig(from: report)
@@ -260,10 +277,18 @@ struct AIBDevMain {
             let plan = try await AIBDeployService.generatePlan(
                 workspaceRoot: cwd,
                 targetConfig: targetConfig,
-                provider: provider
+                provider: provider,
+                selection: selection,
+                environmentName: environmentName
             )
             try AIBDeployService.writeArtifacts(plan: plan, workspaceRoot: cwd)
 
+            if let environmentName {
+                print("Deploy environment: \(environmentName)")
+            }
+            if let selection, !selection.isEmpty {
+                print("Deploy selection: \(selection.displayDescription)")
+            }
             print("Deploying \(plan.services.count) services via \(provider.displayName)...")
             let overallProgress = Progress(totalUnitCount: Int64(plan.services.count))
             let result = try await AIBDeployExecutor.execute(
@@ -298,6 +323,98 @@ struct AIBDevMain {
         default:
             throw ConfigError("Unknown deploy subcommand. Use: preflight, plan, apply", metadata: ["subcommand": subcommand])
         }
+    }
+
+    /// Extract `--env <name>` (or `--env=<name>`) from a deploy argument list.
+    /// Returns the environment name plus the remaining options so downstream
+    /// parsers don't need to know about the flag.
+    private static func extractEnvFlag(arguments: [String]) throws -> (environmentName: String?, remaining: [String]) {
+        var environmentName: String?
+        var remaining: [String] = []
+        var index = 0
+        while index < arguments.count {
+            let argument = arguments[index]
+            if argument == "--env" {
+                index += 1
+                guard index < arguments.count else {
+                    throw ConfigError("Missing value for --env")
+                }
+                let value = arguments[index]
+                guard !value.isEmpty else {
+                    throw ConfigError("Missing value for --env")
+                }
+                guard environmentName == nil else {
+                    throw ConfigError("--env can only be specified once")
+                }
+                environmentName = value
+            } else if argument.hasPrefix("--env=") {
+                let value = String(argument.dropFirst("--env=".count))
+                guard !value.isEmpty else {
+                    throw ConfigError("Missing value for --env")
+                }
+                guard environmentName == nil else {
+                    throw ConfigError("--env can only be specified once")
+                }
+                environmentName = value
+            } else {
+                remaining.append(argument)
+            }
+            index += 1
+        }
+        return (environmentName, remaining)
+    }
+
+    private static func parseDeploySelection(arguments: [String]) throws -> AIBDeploySelection? {
+        var serviceIDs = Set<String>()
+        var kinds = Set<AIBServiceKind>()
+        var index = 0
+
+        while index < arguments.count {
+            let argument = arguments[index]
+
+            if argument == "--service" {
+                index += 1
+                guard index < arguments.count else {
+                    throw ConfigError("Missing value for --service")
+                }
+                serviceIDs.insert(arguments[index])
+            } else if argument.hasPrefix("--service=") {
+                let value = String(argument.dropFirst("--service=".count))
+                guard !value.isEmpty else {
+                    throw ConfigError("Missing value for --service")
+                }
+                serviceIDs.insert(value)
+            } else if argument == "--kind" {
+                index += 1
+                guard index < arguments.count else {
+                    throw ConfigError("Missing value for --kind")
+                }
+                kinds.insert(try parseDeployKind(arguments[index]))
+            } else if argument.hasPrefix("--kind=") {
+                let value = String(argument.dropFirst("--kind=".count))
+                kinds.insert(try parseDeployKind(value))
+            } else {
+                throw ConfigError(
+                    "Unknown deploy option. Use --kind <agent|mcp|unknown> or --service <service-id>",
+                    metadata: ["option": argument]
+                )
+            }
+
+            index += 1
+        }
+
+        let selection = AIBDeploySelection(serviceIDs: serviceIDs, kinds: kinds)
+        return selection.isEmpty ? nil : selection
+    }
+
+    private static func parseDeployKind(_ raw: String) throws -> AIBServiceKind {
+        guard let kind = AIBServiceKind(rawValue: raw) else {
+            throw ConfigError(
+                "Unknown deploy kind. Use one of: agent, mcp, unknown",
+                metadata: ["kind": raw]
+            )
+        }
+        return kind
     }
 
     private static func handleSkill(arguments: [String], logger: Logger) async throws {
@@ -570,7 +687,7 @@ struct AIBDevMain {
               aib workspace <list|scan|sync>
               aib skill <list|add|remove|assign|unassign>
               aib emulator <start|validate|status|stop>
-              aib deploy <plan|diff|apply>
+              aib deploy <plan|diff|apply> [--env <name>] [--kind <agent|mcp|unknown>] [--service <service-id>]
 
             Legacy compatibility:
               aib-dev <run|validate-config|print-effective-config>

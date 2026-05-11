@@ -3,10 +3,12 @@ import Foundation
 
 public final class CodexAppServerAgentRunner: AgentRunner {
     private let model: String?
+    private let reasoningEffort: String?
     private let state = CodexAppServerRunnerState()
 
-    public init(model: String? = nil) {
+    public init(model: String? = nil, reasoningEffort: String? = nil) {
         self.model = model
+        self.reasoningEffort = reasoningEffort
     }
 
     public static let displayName = "Codex App Server"
@@ -83,11 +85,27 @@ public final class CodexAppServerAgentRunner: AgentRunner {
                         permissionMode: "never"
                     )))
 
-                    var input: [[String: Any]] = [["type": "text", "text": message]]
-                    input.append(contentsOf: try CodexSkillInputResolver.skillInputs(
+                    let skillInputs = try CodexSkillInputResolver.skillInputs(
                         pluginRootPath: context.pluginRootPath,
-                        prompt: message
-                    ))
+                        prompt: message,
+                        requestedSkillID: context.requestedSkillID
+                    )
+                    if let requiredSkill = context.requestedSkillID ?? CodexSkillInputResolver.requiredSkillID(prompt: message),
+                       !skillInputs.contains(where: {
+                           guard let name = $0["name"] as? String else { return false }
+                           return CodexSkillInputResolver.matchesRequiredSkill(name, requiredSkill: requiredSkill)
+                       })
+                    {
+                        throw CodexAppServerRunnerError.requiredSkillUnavailable(requiredSkill)
+                    }
+
+                    if !skillInputs.isEmpty {
+                        let skillNames = skillInputs.compactMap { $0["name"] as? String }.joined(separator: ",")
+                        FileHandle.standardError.write(Data("[codex/app-server:skills] attached=\(skillNames)\n".utf8))
+                    }
+
+                    var input: [[String: Any]] = [["type": "text", "text": message]]
+                    input.append(contentsOf: skillInputs)
 
                     _ = try await runtime.send(
                         method: "turn/start",
@@ -187,14 +205,13 @@ public final class CodexAppServerAgentRunner: AgentRunner {
     }
 
     private func resolveReasoningEffort() -> String {
-        let value = ProcessInfo.processInfo.environment["CODEX_REASONING_EFFORT"]
+        let value = reasoningEffort
+            ?? ProcessInfo.processInfo.environment["CODEX_REASONING_EFFORT"]
             ?? ProcessInfo.processInfo.environment["MODEL_REASONING_EFFORT"]
-        switch value {
-        case "low", "medium", "high", "xhigh":
-            return value ?? "medium"
-        default:
-            return "medium"
+        guard let value, let effort = AIBReasoningEffort(rawValue: value) else {
+            return AIBReasoningEffort.defaultAgent.rawValue
         }
+        return effort.rawValue
     }
 }
 
@@ -220,6 +237,7 @@ private enum CodexAppServerRunnerError: LocalizedError {
     case codexNotFound
     case missingThreadID
     case invalidMCPConfig(String)
+    case requiredSkillUnavailable(String)
 
     var errorDescription: String? {
         switch self {
@@ -229,6 +247,8 @@ private enum CodexAppServerRunnerError: LocalizedError {
             return "Codex app-server did not return a thread id."
         case .invalidMCPConfig(let path):
             return "Invalid MCP config: \(path)"
+        case .requiredSkillUnavailable(let skillID):
+            return "Required skill is unavailable before execution: \(skillID)"
         }
     }
 }
@@ -289,8 +309,9 @@ private struct CodexAppServerRuntimeConfig {
             names.append(normalizedName)
             overrides.append("mcp_servers.\(normalizedName).type=\"http\"")
             overrides.append("mcp_servers.\(normalizedName).url=\(CodexTOML.string(url))")
-            if let headers = server["headers"] as? [String: String], !headers.isEmpty {
-                overrides.append("mcp_servers.\(normalizedName).headers=\(CodexTOML.inlineTable(headers))")
+            let headers = Self.stringHeaders(server["headers"])
+            if !headers.isEmpty {
+                overrides.append("mcp_servers.\(normalizedName).http_headers=\(CodexTOML.inlineTable(headers))")
             }
         }
         overrides.append("tools.web_search=true")
@@ -304,14 +325,38 @@ private struct CodexAppServerRuntimeConfig {
         let result = String(scalars)
         return result.isEmpty ? "mcp-server" : result
     }
+
+    private static func stringHeaders(_ rawHeaders: Any?) -> [String: String] {
+        guard let rawHeaders = rawHeaders as? [String: Any] else {
+            return [:]
+        }
+        return rawHeaders.reduce(into: [String: String]()) { result, entry in
+            if let value = entry.value as? String {
+                result[entry.key] = value
+            }
+        }
+    }
 }
 
 private enum CodexTOML {
     static func string(_ value: String) -> String {
-        String(data: try! JSONSerialization.data(withJSONObject: [value]), encoding: .utf8)!
-            .dropFirst()
-            .dropLast()
-            .description
+        let escaped = value.map { character -> String in
+            switch character {
+            case "\\":
+                return "\\\\"
+            case "\"":
+                return "\\\""
+            case "\n":
+                return "\\n"
+            case "\r":
+                return "\\r"
+            case "\t":
+                return "\\t"
+            default:
+                return String(character)
+            }
+        }.joined()
+        return "\"\(escaped)\""
     }
 
     static func inlineTable(_ value: [String: String]) -> String {
@@ -522,8 +567,80 @@ private actor CodexAppServerTransport {
     }
 }
 
-private enum CodexSkillInputResolver {
-    static func skillInputs(pluginRootPath: String?, prompt: String) throws -> [[String: Any]] {
+enum CodexSkillInputResolver {
+    static func skillInputs(
+        pluginRootPath: String?,
+        prompt: String,
+        requestedSkillID: String? = nil
+    ) throws -> [[String: Any]] {
+        try selectedSkillDescriptors(
+            pluginRootPath: pluginRootPath,
+            prompt: prompt,
+            requestedSkillID: requestedSkillID
+        ).map { skill in
+            [
+                "type": "skill",
+                "name": skill.appServerName,
+                "path": skill.path,
+            ]
+        }
+    }
+
+    static func selectedSkillIDs(
+        pluginRootPath: String?,
+        prompt: String,
+        requestedSkillID: String? = nil
+    ) throws -> [String] {
+        try selectedSkillDescriptors(
+            pluginRootPath: pluginRootPath,
+            prompt: prompt,
+            requestedSkillID: requestedSkillID
+        ).map(\.skillID)
+    }
+
+    static func agentCardSkills(pluginRootPath: String?) throws -> [A2ASkill] {
+        try discoverSkillDescriptors(pluginRootPath: pluginRootPath).map { skill in
+            A2ASkill(
+                id: skill.appServerName,
+                name: skill.name,
+                description: skill.description.isEmpty ? nil : skill.description,
+                tags: skill.tags.isEmpty ? nil : skill.tags
+            )
+        }
+    }
+
+    private static func selectedSkillDescriptors(
+        pluginRootPath: String?,
+        prompt: String,
+        requestedSkillID: String?
+    ) throws -> [CodexSkillDescriptor] {
+        let skills = try discoverSkillDescriptors(pluginRootPath: pluginRootPath)
+        guard !skills.isEmpty else { return [] }
+
+        let loweredPrompt = prompt.lowercased()
+        let requiredSkill = requestedSkillID ?? requiredSkillID(prompt: prompt)
+        if let requiredSkill {
+            return skills.filter { skill in
+                matchesRequiredSkill(skill.skillID, requiredSkill: requiredSkill) ||
+                    matchesRequiredSkill(skill.appServerName, requiredSkill: requiredSkill) ||
+                    matchesRequiredSkill(skill.name, requiredSkill: requiredSkill)
+            }
+        }
+
+        return skills.filter { skill in
+            let aliases = [
+                skill.skillID,
+                skill.appServerName,
+                skill.name,
+            ] + skill.tags
+
+            return aliases
+                .map { $0.lowercased() }
+                .contains(where: { !$0.isEmpty && loweredPrompt.contains($0) })
+        }
+    }
+
+    private static func discoverSkillDescriptors(pluginRootPath: String?) throws -> [CodexSkillDescriptor] {
         guard let pluginRootPath else { return [] }
         let skillsURL = URL(fileURLWithPath: pluginRootPath).appendingPathComponent("skills", isDirectory: true)
         guard FileManager.default.fileExists(atPath: skillsURL.path) else { return [] }
@@ -533,22 +650,122 @@ private enum CodexSkillInputResolver {
             includingPropertiesForKeys: [.isDirectoryKey],
             options: [.skipsHiddenFiles]
         )
-        let loweredPrompt = prompt.lowercased()
+        let pluginName = pluginName(pluginRootPath: pluginRootPath)
         return try entries.compactMap { entry in
             let isDirectory = try entry.resourceValues(forKeys: [.isDirectoryKey]).isDirectory ?? false
             guard isDirectory else { return nil }
+            let skillID = entry.lastPathComponent
             let skillPath = entry.appendingPathComponent("SKILL.md")
             guard FileManager.default.fileExists(atPath: skillPath.path) else { return nil }
             let raw = try String(contentsOf: skillPath, encoding: .utf8)
-            let name = parseName(raw) ?? entry.lastPathComponent
-            guard loweredPrompt.contains(entry.lastPathComponent.lowercased()) || loweredPrompt.contains(name.lowercased()) else {
-                return nil
-            }
-            return ["type": "skill", "name": name, "path": skillPath.path]
+            let name = parseName(raw) ?? skillID
+            let description = parseFrontmatterValue(raw, key: "description") ?? ""
+            let tags = parseTags(raw)
+            return CodexSkillDescriptor(
+                skillID: skillID,
+                appServerName: qualifiedSkillName(pluginName: pluginName, skillID: skillID),
+                name: name,
+                description: description,
+                tags: Array(Set([skillID] + tags)).sorted(),
+                path: skillPath.path
+            )
         }
+        .sorted { $0.appServerName < $1.appServerName }
+    }
+
+    static func matchesRequiredSkill(_ skillName: String, requiredSkill: String) -> Bool {
+        skillName == requiredSkill ||
+            skillName.hasSuffix(":\(requiredSkill)") ||
+            normalizedSkillKey(skillName) == normalizedSkillKey(requiredSkill)
+    }
+
+    static func requiredSkillID(prompt: String) -> String? {
+        let patterns = [
+            #"(?i)\b(?:MUST\s+)?use\s+the\s+`([^`]+)`\s+skill"#,
+            #"(?i)\b(?:required|required\s+specified|mandatory)\s+skill\s*[:=]?\s*`?([A-Za-z0-9:_-]+)`?"#,
+            #"(?i)`([^`]+)`\s+skill"#,
+            #"(?i)\b([A-Za-z0-9]+[-_:][A-Za-z0-9:_-]+)\s+skill\b"#,
+            #"「([^」]+)」skill"#,
+            #"「([^」]+)」スキル"#,
+            #"([A-Za-z0-9]+[-_:][A-Za-z0-9:_-]+)\s*スキル"#,
+        ]
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern) else {
+                continue
+            }
+            let range = NSRange(prompt.startIndex..<prompt.endIndex, in: prompt)
+            guard let match = regex.firstMatch(in: prompt, range: range),
+                  match.numberOfRanges > 1,
+                  let skillRange = Range(match.range(at: 1), in: prompt) else {
+                continue
+            }
+            let value = String(prompt[skillRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+            return value.isEmpty ? nil : value
+        }
+        return nil
+    }
+
+    private struct CodexSkillDescriptor {
+        var skillID: String
+        var appServerName: String
+        var name: String
+        var description: String
+        var tags: [String]
+        var path: String
     }
 
     private static func parseName(_ raw: String) -> String? {
+        parseFrontmatterValue(raw, key: "name")
+    }
+
+    private static func parseTags(_ raw: String) -> [String] {
+        let tags = parseFrontmatterValue(raw, key: "tags") ?? ""
+        return tags
+            .replacingOccurrences(of: "[", with: "")
+            .replacingOccurrences(of: "]", with: "")
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: " \t\n\r\"'")) }
+            .filter { !$0.isEmpty }
+    }
+
+    private static func qualifiedSkillName(pluginName: String?, skillID: String) -> String {
+        guard let pluginName, !pluginName.isEmpty else {
+            return skillID
+        }
+        return "\(pluginName):\(skillID)"
+    }
+
+    private static func normalizedSkillKey(_ value: String) -> String {
+        let localName = value.split(separator: ":").last.map(String.init) ?? value
+        let allowed = CharacterSet.alphanumerics
+        var result = ""
+        var previousWasDash = false
+        for scalar in localName.lowercased().unicodeScalars {
+            if allowed.contains(scalar) {
+                result.unicodeScalars.append(scalar)
+                previousWasDash = false
+            } else if !previousWasDash {
+                result.append("-")
+                previousWasDash = true
+            }
+        }
+        return result.trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+    }
+
+    private static func pluginName(pluginRootPath: String) -> String? {
+        let metadataURL = URL(fileURLWithPath: pluginRootPath)
+            .appendingPathComponent(".codex-plugin", isDirectory: true)
+            .appendingPathComponent("plugin.json")
+        guard let data = try? Data(contentsOf: metadataURL),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let name = object["name"] as? String else {
+            return nil
+        }
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private static func parseFrontmatterValue(_ raw: String, key: String) -> String? {
         guard raw.hasPrefix("---"), let end = raw.range(of: "\n---", range: raw.index(raw.startIndex, offsetBy: 3)..<raw.endIndex) else {
             return nil
         }
@@ -556,8 +773,8 @@ private enum CodexSkillInputResolver {
         return frontmatter
             .split(separator: "\n")
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .first { $0.hasPrefix("name:") }?
-            .replacingOccurrences(of: "name:", with: "")
+            .first { $0.hasPrefix("\(key):") }?
+            .replacingOccurrences(of: "\(key):", with: "")
             .trimmingCharacters(in: CharacterSet(charactersIn: " \t\"'"))
     }
 }

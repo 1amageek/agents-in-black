@@ -20,9 +20,10 @@ public enum LocalAgentHandler {
         pluginRootPath: String?,
         executionDirectory: String?,
         model: String?,
+        reasoningEffort: String?,
         logger: Logger
     ) -> LocalRequestHandler {
-        let runner = CodexAppServerAgentRunner(model: model)
+        let runner = CodexAppServerAgentRunner(model: model, reasoningEffort: reasoningEffort)
         let serviceIDString = serviceID.rawValue
         let log = logger
 
@@ -35,7 +36,7 @@ public enum LocalAgentHandler {
 
             case ("GET", "/.well-known/agent.json"):
                 log.info("[local] \(request.method) \(path) → Codex App Server (Agent Card)", metadata: ["service_id": "\(serviceIDString)"])
-                return handleAgentCard(serviceID: serviceIDString)
+                return handleAgentCard(serviceID: serviceIDString, pluginRootPath: pluginRootPath)
 
             case ("POST", "/agent/chat"):
                 log.info("[local] \(request.method) \(path) → Codex App Server", metadata: ["service_id": "\(serviceIDString)"])
@@ -43,6 +44,7 @@ public enum LocalAgentHandler {
                     return try await handleAsyncChat(
                         request: request,
                         model: model,
+                        reasoningEffort: reasoningEffort,
                         serviceID: serviceIDString,
                         pluginRootPath: pluginRootPath,
                         executionDirectory: executionDirectory,
@@ -85,7 +87,8 @@ public enum LocalAgentHandler {
         )
     }
 
-    private static func handleAgentCard(serviceID: String) -> LocalResponse {
+    private static func handleAgentCard(serviceID: String, pluginRootPath: String?) -> LocalResponse {
+        let pluginSkills = (try? CodexSkillInputResolver.agentCardSkills(pluginRootPath: pluginRootPath)) ?? []
         let card = A2AAgentCard(
             name: serviceID,
             description: "Local Codex App Server agent",
@@ -98,7 +101,7 @@ public enum LocalAgentHandler {
                     name: serviceID,
                     description: "Local Codex App Server-backed agent"
                 ),
-            ]
+            ] + pluginSkills
         )
 
         do {
@@ -136,7 +139,8 @@ public enum LocalAgentHandler {
                 request: request,
                 serviceID: serviceID,
                 pluginRootPath: pluginRootPath,
-                executionDirectory: executionDirectory
+                executionDirectory: executionDirectory,
+                logger: logger
             )
         } catch let error as ChatRequestPreparationError {
             return error.response
@@ -222,6 +226,7 @@ public enum LocalAgentHandler {
     private static func handleAsyncChat(
         request: LocalRequest,
         model: String?,
+        reasoningEffort: String?,
         serviceID: String,
         pluginRootPath: String?,
         executionDirectory: String?,
@@ -233,7 +238,8 @@ public enum LocalAgentHandler {
                 request: request,
                 serviceID: serviceID,
                 pluginRootPath: pluginRootPath,
-                executionDirectory: executionDirectory
+                executionDirectory: executionDirectory,
+                logger: logger
             )
         } catch let error as ChatRequestPreparationError {
             return error.response
@@ -249,7 +255,7 @@ public enum LocalAgentHandler {
 
         let runID = UUID()
         let task = Task.detached(priority: .userInitiated) {
-            let runner = CodexAppServerAgentRunner(model: model)
+            let runner = CodexAppServerAgentRunner(model: model, reasoningEffort: reasoningEffort)
 
             defer {
                 cleanupPreparedChatRun(preparedRun)
@@ -439,7 +445,8 @@ public enum LocalAgentHandler {
         request: LocalRequest,
         serviceID: String,
         pluginRootPath: String?,
-        executionDirectory: String?
+        executionDirectory: String?,
+        logger: Logger
     ) throws -> PreparedChatRun {
         guard let json = try? JSONSerialization.jsonObject(with: request.body) as? [String: Any],
               let prompt = json["prompt"] as? String else {
@@ -453,7 +460,8 @@ public enum LocalAgentHandler {
             )
         }
 
-        let requestContext = json["context"] as? [String: Any]
+        let rawRequestContext = json["context"] as? [String: Any]
+        let requestContext = rawRequestContext.map(normalizedMCPContext)
         let baseMCPConfigPath = pluginRootPath.map { CodexAppServerPluginBundle.mcpConfigPath(pluginRootPath: $0) }
         let effectiveMCPConfigPath: String?
         let tempMCPConfigURL: URL?
@@ -466,13 +474,61 @@ public enum LocalAgentHandler {
             tempMCPConfigURL = nil
         }
 
+        logger.info(
+            "[local] prepared chat MCP context",
+            metadata: [
+                "service_id": "\(serviceID)",
+                "has_context": "\(rawRequestContext != nil)",
+                "context_keys": "\(rawRequestContext?.keys.sorted().joined(separator: ",") ?? "-")",
+                "normalized_context_keys": "\(requestContext?.keys.sorted().joined(separator: ",") ?? "-")",
+                "mcp_context_injected": "\(tempMCPConfigURL != nil)",
+                "mcp_config": "\(effectiveMCPConfigPath ?? "-")",
+            ]
+        )
+
+        let requestedSkillID = stringContextValue(requestContext, keys: ["skill", "skillName", "job"])
+        let requiredSkill = requestedSkillID ?? CodexSkillInputResolver.requiredSkillID(prompt: prompt)
+        let selectedSkillIDs = (try? CodexSkillInputResolver.selectedSkillIDs(
+            pluginRootPath: pluginRootPath,
+            prompt: prompt,
+            requestedSkillID: requestedSkillID
+        )) ?? []
+        logger.info(
+            "[local] prepared chat Codex skills",
+            metadata: [
+                "service_id": "\(serviceID)",
+                "required_skill": "\(requiredSkill ?? "-")",
+                "selected_skill_count": "\(selectedSkillIDs.count)",
+                "selected_skills": "\(selectedSkillIDs.isEmpty ? "-" : selectedSkillIDs.joined(separator: ","))",
+            ]
+        )
+        if let requiredSkill, selectedSkillIDs.isEmpty {
+            let message = "Required Codex skill is unavailable before execution: \(requiredSkill)"
+            logger.error(
+                "[local] prepared chat Codex skills failed",
+                metadata: [
+                    "service_id": "\(serviceID)",
+                    "required_skill": "\(requiredSkill)",
+                ]
+            )
+            let errBody = try JSONSerialization.data(withJSONObject: ["error": message])
+            throw ChatRequestPreparationError(
+                response: LocalResponse(
+                    statusCode: 422,
+                    headers: [("Content-Type", "application/json")],
+                    body: errBody
+                )
+            )
+        }
+
         return PreparedChatRun(
             prompt: prompt,
             context: AgentRunnerContext(
                 serviceID: serviceID,
                 pluginRootPath: pluginRootPath,
                 mcpConfigPath: effectiveMCPConfigPath,
-                executionDirectory: executionDirectory
+                executionDirectory: executionDirectory,
+                requestedSkillID: requestedSkillID
             ),
             tempMCPConfigURL: tempMCPConfigURL,
             duplicateRunKey: duplicateRunKey(
@@ -501,13 +557,13 @@ public enum LocalAgentHandler {
         requestContext: [String: Any]?,
         prompt: String
     ) -> String? {
-        if let proposalID = requestContext?["proposalId"] as? String,
+        if let proposalID = stringContextValue(requestContext, keys: ["proposal_id", "proposalId"]),
            !proposalID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         {
             return "\(serviceID):proposal:\(proposalID)"
         }
 
-        if let organizationID = requestContext?["organizationId"] as? String,
+        if let organizationID = stringContextValue(requestContext, keys: ["organization_id", "organizationId", "orgId"]),
            !organizationID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         {
             return "\(serviceID):organization:\(organizationID):prompt:\(prompt.hashValue)"
@@ -517,6 +573,41 @@ public enum LocalAgentHandler {
     }
 
     // MARK: - Context Injection
+
+    private static func normalizedMCPContext(_ context: [String: Any]) -> [String: Any] {
+        var normalized = context
+
+        assignStringContextValue(&normalized, targetKey: "user_id", sourceKeys: ["user_id", "userId"])
+        assignStringContextValue(&normalized, targetKey: "organization_id", sourceKeys: ["organization_id", "organizationId", "orgId"])
+        assignStringContextValue(&normalized, targetKey: "proposal_id", sourceKeys: ["proposal_id", "proposalId"])
+        assignStringContextValue(&normalized, targetKey: "target_id", sourceKeys: ["target_id", "targetId"])
+        assignStringContextValue(&normalized, targetKey: "research_run_id", sourceKeys: ["research_run_id", "researchRunId"])
+
+        return normalized
+    }
+
+    private static func assignStringContextValue(
+        _ context: inout [String: Any],
+        targetKey: String,
+        sourceKeys: [String]
+    ) {
+        guard let value = stringContextValue(context, keys: sourceKeys) else {
+            return
+        }
+        context[targetKey] = value
+    }
+
+    private static func stringContextValue(_ context: [String: Any]?, keys: [String]) -> String? {
+        guard let context else {
+            return nil
+        }
+        for key in keys {
+            if let value = context[key] as? String {
+                return value
+            }
+        }
+        return nil
+    }
 
     /// Read the base .mcp.json, inject X-Context header into all HTTP servers,
     /// write to a temp file, and return the temp path.
@@ -536,7 +627,7 @@ public enum LocalAgentHandler {
             for (name, serverAny) in servers {
                 guard var server = serverAny as? [String: Any],
                       (server["type"] as? String) == "http" else { continue }
-                var headers = (server["headers"] as? [String: String]) ?? [:]
+                var headers = stringHeaders(server["headers"])
                 headers["X-Context"] = contextString
                 server["headers"] = headers
                 servers[name] = server
@@ -553,6 +644,17 @@ public enum LocalAgentHandler {
 
         // Log is handled by the caller
         return (tempFile.path, tempFile)
+    }
+
+    private static func stringHeaders(_ rawHeaders: Any?) -> [String: String] {
+        guard let rawHeaders = rawHeaders as? [String: Any] else {
+            return [:]
+        }
+        return rawHeaders.reduce(into: [String: String]()) { result, entry in
+            if let value = entry.value as? String {
+                result[entry.key] = value
+            }
+        }
     }
 
     /// Format a JSON input string for readable log output.

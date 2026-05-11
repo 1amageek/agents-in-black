@@ -34,6 +34,8 @@ public struct AgentRunnerContext: Sendable {
     /// Absolute path to the staged skill overlay directory for this agent.
     /// Contains `.claude/`, `.agents/`, `skills/` subdirectories.
     public var skillOverlayPath: String?
+    /// Optional explicit skill requested by the caller, usually from request context.
+    public var requestedSkillID: String?
     /// Conversation ID for multi-turn. Interpretation varies by runner.
     public var conversationID: String?
 
@@ -43,6 +45,7 @@ public struct AgentRunnerContext: Sendable {
         mcpConfigPath: String? = nil,
         executionDirectory: String? = nil,
         skillOverlayPath: String? = nil,
+        requestedSkillID: String? = nil,
         conversationID: String? = nil
     ) {
         self.serviceID = serviceID
@@ -50,6 +53,7 @@ public struct AgentRunnerContext: Sendable {
         self.mcpConfigPath = mcpConfigPath
         self.executionDirectory = executionDirectory
         self.skillOverlayPath = skillOverlayPath
+        self.requestedSkillID = requestedSkillID
         self.conversationID = conversationID
     }
 }
