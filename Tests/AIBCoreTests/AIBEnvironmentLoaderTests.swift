@@ -70,72 +70,6 @@ struct AIBEnvironmentLoaderTests {
         #expect(absent.isEmpty)
     }
 
-    @Test("Infers environment name from target GCP project")
-    func infersEnvironmentNameFromTargetProject() throws {
-        let workspaceRoot = try makeTempWorkspace()
-        defer { try? FileManager.default.removeItem(atPath: workspaceRoot) }
-
-        try writeEnvironment(workspaceRoot: workspaceRoot, name: "staging", yaml: """
-        version: 1
-        name: staging
-        target:
-          gcpProject: salescore-ei-stg
-        services:
-          proposal-mcp/main:
-            env:
-              GCLOUD_PROJECT: salescore-ei-stg
-        """)
-
-        let targetConfig = AIBDeployTargetConfig(
-            providerID: "gcp-cloudrun",
-            region: "asia-northeast1",
-            providerConfig: ["gcpProject": "salescore-ei-stg"]
-        )
-
-        let inferred = try AIBDeployService.inferEnvironmentName(
-            workspaceRoot: workspaceRoot,
-            targetConfig: targetConfig
-        )
-
-        #expect(inferred == "staging")
-    }
-
-    @Test("Lists every shared environment file, including empty overlays")
-    func listsEnvironmentOptionsIncludingEmptyOverlays() throws {
-        let workspaceRoot = try makeTempWorkspace()
-        defer { try? FileManager.default.removeItem(atPath: workspaceRoot) }
-
-        try writeTarget(workspaceRoot: workspaceRoot, providerID: "gcp-cloudrun", yaml: """
-        version: 1
-        target: gcp-cloudrun
-        defaults:
-          auth: public
-          region: asia-northeast1
-        gcpProject: base-project
-        """)
-        try writeEnvironment(workspaceRoot: workspaceRoot, name: "prod", yaml: """
-        version: 1
-        name: prod
-        """)
-        try writeEnvironment(workspaceRoot: workspaceRoot, name: "staging", yaml: """
-        version: 1
-        name: staging
-        target:
-          gcpProject: salescore-ei-stg
-        """)
-
-        let options = try AIBDeployService.listEnvironmentOptions(
-            workspaceRoot: workspaceRoot,
-            providerID: "gcp-cloudrun"
-        )
-
-        #expect(options.map(\.name) == ["prod", "staging"])
-        #expect(options[0].targetProject == "base-project")
-        #expect(options[0].region == "asia-northeast1")
-        #expect(options[1].targetProject == "salescore-ei-stg")
-        #expect(options[1].region == "asia-northeast1")
-    }
-
     @Test("Missing secret name surfaces as a structural error")
     func secretWithoutNameThrows() throws {
         let workspaceRoot = try makeTempWorkspace()
@@ -173,10 +107,4 @@ struct AIBEnvironmentLoaderTests {
         try yaml.write(to: file, atomically: true, encoding: .utf8)
     }
 
-    private func writeTarget(workspaceRoot: String, providerID: String, yaml: String) throws {
-        let dir = URL(fileURLWithPath: workspaceRoot).appendingPathComponent(".aib/targets")
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let file = dir.appendingPathComponent("\(providerID).yaml")
-        try yaml.write(to: file, atomically: true, encoding: .utf8)
-    }
 }

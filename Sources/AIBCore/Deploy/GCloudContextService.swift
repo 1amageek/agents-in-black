@@ -46,6 +46,12 @@ public struct GCloudServiceAccount: Sendable, Hashable, Identifiable {
         self.email = email
         self.displayName = displayName
     }
+
+    public var isFirebaseServiceAccount: Bool {
+        let emailValue = email.lowercased()
+        let displayNameValue = (displayName ?? "").lowercased()
+        return emailValue.contains("firebase") || displayNameValue.contains("firebase")
+    }
 }
 
 public struct GCloudContextSnapshot: Sendable, Equatable {
@@ -182,6 +188,11 @@ public struct GCloudContextService: Sendable {
 
         let data = Data(result.stdout.utf8)
         return try Self.parseServiceAccounts(from: data)
+    }
+
+    public func fetchFirebaseServiceAccounts(projectID: String) async throws -> [GCloudServiceAccount] {
+        try await fetchServiceAccounts(projectID: projectID)
+            .filter(\.isFirebaseServiceAccount)
     }
 
     func fetchConfigValue(for key: String) async throws -> String? {

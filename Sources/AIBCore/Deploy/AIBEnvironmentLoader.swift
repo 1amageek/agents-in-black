@@ -2,7 +2,7 @@ import AIBConfig
 import Foundation
 import YAML
 
-/// Per-service overrides that an environment overlay can apply.
+/// Per-service overrides that an explicitly selected deploy overlay can apply.
 /// `env` and `deployEnv` merge over `ServiceConfig.env` / `.deployEnv` respectively;
 /// `secrets` merge into `ServiceConfig.secrets`. Existing keys are replaced.
 public struct AIBEnvironmentServiceOverride: Sendable, Equatable {
@@ -25,14 +25,14 @@ public struct AIBEnvironmentServiceOverride: Sendable, Equatable {
     }
 }
 
-/// Parsed overlay for a single deploy environment (e.g. `dev`, `staging`, `prod`).
+/// Parsed deploy overlay selected explicitly by name.
 ///
 /// The overlay is applied on top of `.aib/targets/{providerID}.yaml` and the
-/// universal `env` / `secrets` declared in `workspace.yaml`. It is the single
-/// place where per-environment values (GCP project, bucket name, Secret Manager
-/// references) are switched — service definitions stay environment-agnostic.
+/// universal `env` / `secrets` declared in `workspace.yaml`. Account, project,
+/// region, and service-account selection belong to the target configuration;
+/// overlays are optional per-service env / Secret Manager overrides.
 public struct AIBEnvironmentConfig: Sendable, Equatable {
-    /// Environment name, taken from the YAML file's basename (e.g. `staging`).
+    /// Overlay name, taken from the YAML file's basename.
     public let name: String
 
     /// Top-level overrides keyed by `.aib/targets/{providerID}.yaml` field name
@@ -63,7 +63,7 @@ public struct AIBEnvironmentConfig: Sendable, Equatable {
 public enum AIBEnvironmentLoader {
 
     /// Load the overlay for `name`. Returns `nil` when `name` is nil or the file
-    /// does not exist — environment selection is optional.
+    /// does not exist — overlay selection is optional.
     /// Throws when the file exists but cannot be parsed or has structural errors.
     public static func load(
         workspaceRoot: String,
@@ -73,7 +73,7 @@ public enum AIBEnvironmentLoader {
         let path = environmentFilePath(workspaceRoot: workspaceRoot, name: name)
         guard FileManager.default.fileExists(atPath: path) else {
             throw AIBEnvironmentLoaderError(
-                message: "Environment '\(name)' not found at \(path)"
+                message: "Deploy overlay '\(name)' not found at \(path)"
             )
         }
         let content = try String(contentsOfFile: path, encoding: .utf8)

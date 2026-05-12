@@ -153,7 +153,7 @@ public enum AIBDeployService {
             }
         }
 
-        // Apply environment overlay last so overrides win over both the target
+        // Apply an explicit deploy overlay last so overrides win over both the target
         // file and `overrides`. `region` is mirrored back to the top-level field
         // because the deploy plan consults it directly (providerConfig is only
         // used by provider-specific commands).
@@ -179,115 +179,6 @@ public enum AIBDeployService {
             kindDefaults: kindDefaults,
             providerConfig: providerConfig
         )
-    }
-
-    /// Infer an environment overlay from the target provider configuration.
-    ///
-    /// The CLI can pass `--env` explicitly, but the app deploy flow primarily
-    /// exposes provider settings such as the selected GCP project. This helper
-    /// maps that selected project back to `.aib/environments/<name>.yaml` so
-    /// service-scoped overrides (for example `GCLOUD_PROJECT` and buckets) are
-    /// applied consistently from the UI as well.
-    public static func inferEnvironmentName(
-        workspaceRoot: String,
-        targetConfig: AIBDeployTargetConfig
-    ) throws -> String? {
-        let environmentRoot = URL(fileURLWithPath: workspaceRoot)
-            .appendingPathComponent(".aib/environments", isDirectory: true)
-
-        var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(
-            atPath: environmentRoot.path,
-            isDirectory: &isDirectory
-        ), isDirectory.boolValue else {
-            return nil
-        }
-
-        let targetProject = normalizedEnvironmentValue(targetConfig.providerConfig["gcpProject"])
-        guard let targetProject else { return nil }
-
-        let environmentFiles = try FileManager.default.contentsOfDirectory(
-            at: environmentRoot,
-            includingPropertiesForKeys: nil
-        )
-            .filter { ["yaml", "yml"].contains($0.pathExtension.lowercased()) }
-            .sorted { $0.lastPathComponent < $1.lastPathComponent }
-
-        for file in environmentFiles {
-            let name = file.deletingPathExtension().lastPathComponent
-            guard let environment = try AIBEnvironmentLoader.load(
-                workspaceRoot: workspaceRoot,
-                name: name
-            ) else {
-                continue
-            }
-            if normalizedEnvironmentValue(environment.targetOverrides["gcpProject"]) == targetProject {
-                return name
-            }
-        }
-
-        return nil
-    }
-
-    /// List all deploy environment files shared in `.aib/environments`.
-    ///
-    /// Empty overlay files are valid named environments. They are still returned
-    /// so the app can expose every shared environment in its Switch menu.
-    public static func listEnvironmentOptions(
-        workspaceRoot: String,
-        providerID: String
-    ) throws -> [AIBDeployEnvironmentOption] {
-        let environmentRoot = URL(fileURLWithPath: workspaceRoot)
-            .appendingPathComponent(".aib/environments", isDirectory: true)
-
-        var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(
-            atPath: environmentRoot.path,
-            isDirectory: &isDirectory
-        ), isDirectory.boolValue else {
-            return []
-        }
-
-        let environmentFiles = try FileManager.default.contentsOfDirectory(
-            at: environmentRoot,
-            includingPropertiesForKeys: nil
-        )
-            .filter { ["yaml", "yml"].contains($0.pathExtension.lowercased()) }
-            .sorted { $0.lastPathComponent < $1.lastPathComponent }
-
-        var options: [AIBDeployEnvironmentOption] = []
-        for file in environmentFiles {
-            let name = file.deletingPathExtension().lastPathComponent
-            guard let environment = try AIBEnvironmentLoader.load(
-                workspaceRoot: workspaceRoot,
-                name: name
-            ) else {
-                continue
-            }
-
-            let targetConfig = try loadTargetConfig(
-                workspaceRoot: workspaceRoot,
-                providerID: providerID,
-                environmentName: name
-            )
-
-            options.append(AIBDeployEnvironmentOption(
-                name: environment.name,
-                targetProject: environment.targetOverrides["gcpProject"]
-                    ?? targetConfig.providerConfig["gcpProject"],
-                region: environment.targetOverrides["region"] ?? targetConfig.region,
-                serviceAccount: environment.targetOverrides["serviceAccount"]
-                    ?? targetConfig.providerConfig["serviceAccount"]
-            ))
-        }
-
-        return options
-    }
-
-    private static func normalizedEnvironmentValue(_ value: String?) -> String? {
-        guard let value else { return nil }
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
     }
 
     /// Parse a YAML mapping into AIBDeployResourceConfig, using kind defaults as baseline.
@@ -513,7 +404,7 @@ public enum AIBDeployService {
         let workspace = try WorkspaceYAMLCodec.loadWorkspace(at: workspacePath)
         var resolved = try WorkspaceSyncer.resolveConfig(workspaceRoot: workspaceRoot, workspace: workspace)
 
-        // Apply per-service environment overlay before any plan logic reads from
+        // Apply the explicit deploy overlay before any plan logic reads from
         // the service. This way `EnvScopeRule.violations`, `SecretRefRule`, and
         // `service.resolvedEnv(for: .deploy)` all see the environment-merged view.
         if let environment = try AIBEnvironmentLoader.load(

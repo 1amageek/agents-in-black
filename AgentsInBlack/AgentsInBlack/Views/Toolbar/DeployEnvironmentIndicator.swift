@@ -97,71 +97,13 @@ struct EditorStatusIndicator: View {
     }
 }
 
-/// Compact deploy environment switcher for the header toolbar.
-struct DeployEnvironmentToolbarMenu: View {
-    @Bindable var model: AgentsInBlackAppModel
-
-    var body: some View {
-        Menu {
-            environmentSection
-        } label: {
-            HStack(spacing: 4) {
-                Image(systemName: "globe.asia.australia.fill")
-                    .font(.system(size: 13))
-                Text(model.displayDeployEnvironmentName)
-                    .font(.caption.weight(.semibold))
-                    .lineLimit(1)
-                if model.isSwitchingDeployEnvironment || model.isRefreshingGCloudContext {
-                    ProgressView()
-                        .controlSize(.mini)
-                }
-            }
-            .fixedSize()
-        }
-        .menuStyle(.borderlessButton)
-        .disabled(model.workspace == nil || model.detectedProvider?.providerID != "gcp-cloudrun")
-        .help(helpText)
-    }
-
-    @ViewBuilder
-    private var environmentSection: some View {
-        Section("Deploy Environment") {
-            if model.deployEnvironmentOptions.isEmpty {
-                Text("No environments")
-                    .foregroundStyle(.secondary)
-            } else {
-                ForEach(model.deployEnvironmentOptions) { option in
-                    Button {
-                        Task { await model.switchDeployEnvironment(to: option.name) }
-                    } label: {
-                        if option.name == model.selectedDeployEnvironmentName {
-                            Label(option.displayTitle, systemImage: "checkmark")
-                        } else {
-                            Text(option.displayTitle)
-                        }
-                    }
-                    .disabled(model.isSwitchingDeployGCloudContext)
-                }
-            }
-        }
-    }
-
-    private var helpText: String {
-        let environment = model.displayDeployEnvironmentName
-        let project = model.displayDeployGCloudProject ?? "No project"
-        return "Deploy environment: \(environment), \(project)"
-    }
-}
-
-/// Compact Google account and Cloud Run service account switcher for the header toolbar.
-struct DeployAccountToolbarMenu: View {
+/// Compact Google account switcher for the header toolbar.
+struct DeployGoogleAccountToolbarMenu: View {
     @Bindable var model: AgentsInBlackAppModel
 
     var body: some View {
         Menu {
             googleAccountSection
-            Divider()
-            serviceAccountSection
         } label: {
             HStack(spacing: 4) {
                 Image(systemName: "person.crop.circle.fill")
@@ -171,7 +113,7 @@ struct DeployAccountToolbarMenu: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .frame(maxWidth: 150, alignment: .leading)
-                if model.isSigningInGCloudAccount || model.isSwitchingGCloudAccount || model.isSwitchingGCloudServiceAccount {
+                if model.isSigningInGCloudAccount || model.isSwitchingGCloudAccount {
                     ProgressView()
                         .controlSize(.mini)
                 }
@@ -217,30 +159,60 @@ struct DeployAccountToolbarMenu: View {
         }
     }
 
-    @ViewBuilder
-    private var serviceAccountSection: some View {
-        Section("Cloud Run Service Account") {
-            Button {
-                Task { await model.switchGCloudServiceAccount(to: nil) }
-            } label: {
-                if model.displayDeployGCloudServiceAccount == nil {
-                    Label("Use Environment Default", systemImage: "checkmark")
-                } else {
-                    Text("Use Environment Default")
+    private var accountLabel: String {
+        guard let account = model.activeGCloudAccount, !account.isEmpty else {
+            return "No Account"
+        }
+        return account
+    }
+
+    private var helpText: String {
+        let account = model.activeGCloudAccount ?? "No Google account"
+        return "Google account: \(account)"
+    }
+}
+
+/// Compact deploy profile switcher for the header toolbar.
+struct DeployProfileToolbarMenu: View {
+    @Bindable var model: AgentsInBlackAppModel
+
+    var body: some View {
+        Menu {
+            deployProfileSection
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "server.rack")
+                    .font(.system(size: 13))
+                Text(profileLabel)
+                    .font(.caption.weight(.semibold))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .frame(maxWidth: 150, alignment: .leading)
+                if model.isSwitchingDeployProfile {
+                    ProgressView()
+                        .controlSize(.mini)
                 }
             }
-            .disabled(model.isSwitchingDeployGCloudContext)
+            .fixedSize()
+        }
+        .menuStyle(.borderlessButton)
+        .disabled(model.workspace == nil || model.detectedProvider?.providerID != "gcp-cloudrun")
+        .help(helpText)
+    }
 
-            if model.gcloudServiceAccounts.isEmpty {
-                Text("No service accounts")
+    @ViewBuilder
+    private var deployProfileSection: some View {
+        Section("Deploy Profile") {
+            if model.deployProfiles.isEmpty {
+                Text("No deploy profiles")
                     .foregroundStyle(.secondary)
             } else {
-                ForEach(model.gcloudServiceAccounts) { serviceAccount in
+                ForEach(model.deployProfiles) { profile in
                     Button {
-                        Task { await model.switchGCloudServiceAccount(to: serviceAccount.email) }
+                        Task { await model.switchDeployProfile(to: profile.name) }
                     } label: {
-                        let title = serviceAccountTitle(serviceAccount)
-                        if serviceAccount.email == model.displayDeployGCloudServiceAccount {
+                        let title = profileTitle(profile)
+                        if profile.name == model.activeDeployProfile?.name {
                             Label(title, systemImage: "checkmark")
                         } else {
                             Text(title)
@@ -252,24 +224,25 @@ struct DeployAccountToolbarMenu: View {
         }
     }
 
-    private var accountLabel: String {
-        guard let account = model.activeGCloudAccount, !account.isEmpty else {
-            return "No Account"
+    private var profileLabel: String {
+        guard let profile = model.activeDeployProfile else {
+            return "No Profile"
         }
-        return account
+        return "\(profile.name) / \(profile.gcpProject)"
     }
 
     private var helpText: String {
-        let account = model.activeGCloudAccount ?? "No Google account"
-        let serviceAccount = model.displayDeployGCloudServiceAccount ?? "Environment default service account"
-        return "Deploy account: \(account), \(serviceAccount)"
+        guard let profile = model.activeDeployProfile else {
+            return "Deploy profile: none"
+        }
+        return "Deploy profile: \(profile.name), project: \(profile.gcpProject), region: \(profile.region)"
     }
 
-    private func serviceAccountTitle(_ serviceAccount: GCloudServiceAccount) -> String {
-        guard let displayName = serviceAccount.displayName, !displayName.isEmpty else {
-            return serviceAccount.email
+    private func profileTitle(_ profile: AIBDeployProfile) -> String {
+        if let firebaseProject = profile.firebaseProject, firebaseProject != profile.gcpProject {
+            return "\(profile.name) (\(profile.gcpProject), Firebase: \(firebaseProject))"
         }
-        return "\(displayName) (\(serviceAccount.email))"
+        return "\(profile.name) (\(profile.gcpProject))"
     }
 }
 

@@ -232,7 +232,7 @@ struct AIBDevMain {
             print("Deploy Plan: \(plan.workspaceName)")
             print("  Provider: \(provider.displayName)")
             if let effectiveEnvironmentName {
-                print("  Environment: \(effectiveEnvironmentName)")
+                print("  Overlay: \(effectiveEnvironmentName)")
             }
             print("  Region: \(targetConfig.region)")
             if let selection, !selection.isEmpty {
@@ -280,7 +280,7 @@ struct AIBDevMain {
             try AIBDeployService.writeArtifacts(plan: plan, workspaceRoot: cwd)
 
             if let effectiveEnvironmentName {
-                print("Deploy environment: \(effectiveEnvironmentName)")
+                print("Deploy overlay: \(effectiveEnvironmentName)")
             }
             if let selection, !selection.isEmpty {
                 print("Deploy selection: \(selection.displayDescription)")
@@ -338,26 +338,7 @@ struct AIBDevMain {
             targetConfig.providerConfig[key] = value
         }
 
-        guard environmentName == nil else {
-            return (targetConfig, environmentName)
-        }
-
-        guard let inferredEnvironmentName = try AIBDeployService.inferEnvironmentName(
-            workspaceRoot: workspaceRoot,
-            targetConfig: targetConfig
-        ) else {
-            return (targetConfig, nil)
-        }
-
-        var environmentTargetConfig = try AIBDeployService.loadTargetConfig(
-            workspaceRoot: workspaceRoot,
-            providerID: provider.providerID,
-            environmentName: inferredEnvironmentName
-        )
-        for (key, value) in detectedValues where environmentTargetConfig.providerConfig[key] == nil {
-            environmentTargetConfig.providerConfig[key] = value
-        }
-        return (environmentTargetConfig, inferredEnvironmentName)
+        return (targetConfig, environmentName)
     }
 
     /// Extract `--env <name>` (or `--env=<name>`) from a deploy argument list.

@@ -118,3 +118,39 @@ func gcloudSignInUsesInjectedLoginCommand() async throws {
 
     try await service.signIn()
 }
+
+@Test(.timeLimit(.minutes(1)))
+func gcloudFetchesOnlyFirebaseServiceAccounts() async throws {
+    let runner = MockGCloudCommandRunner(results: [
+        "gcloud iam service-accounts list --project=salescore-ei-stg --format='json(email,displayName)' --quiet 2>/dev/null": .init(
+            exitCode: 0,
+            stdout: """
+            [
+              {
+                "email": "firebase-adminsdk-fbsvc@salescore-ei-stg.iam.gserviceaccount.com",
+                "displayName": "Firebase Admin SDK Service Account"
+              },
+              {
+                "email": "123456789-compute@developer.gserviceaccount.com",
+                "displayName": "Compute Engine default service account"
+              },
+              {
+                "email": "custom-runtime@salescore-ei-stg.iam.gserviceaccount.com",
+                "displayName": "Custom runtime service account"
+              }
+            ]
+            """,
+            stderr: ""
+        ),
+    ])
+
+    let service = GCloudContextService(runCommand: { command in
+        try await runner.run(command)
+    })
+
+    let accounts = try await service.fetchFirebaseServiceAccounts(projectID: "salescore-ei-stg")
+
+    #expect(accounts.map(\.email) == [
+        "firebase-adminsdk-fbsvc@salescore-ei-stg.iam.gserviceaccount.com",
+    ])
+}

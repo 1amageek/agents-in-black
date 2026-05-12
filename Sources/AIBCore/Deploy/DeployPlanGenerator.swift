@@ -17,7 +17,7 @@ public protocol DeployPlanGenerator: Sendable {
     ) throws -> AIBDeployTargetConfig
 
     /// Generate a deployment plan from workspace topology, applying the named
-    /// environment overlay (if any) to per-service env / secrets.
+    /// explicit deploy overlay (if any) to per-service env / secrets.
     func generatePlan(
         workspaceRoot: String,
         targetConfig: AIBDeployTargetConfig,

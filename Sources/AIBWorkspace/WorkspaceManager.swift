@@ -40,6 +40,7 @@ public enum AIBWorkspaceManager {
         try WorkspaceYAMLCodec.saveWorkspace(workspace, to: workspaceConfigPath)
         try ensureEnvironmentTemplates(workspaceRoot: workspaceRoot)
         try ensureTargetTemplates(workspaceRoot: workspaceRoot)
+        try ensureDeployProfileTemplates(workspaceRoot: workspaceRoot)
         try ensureGitignoreEntries(workspaceRoot: workspaceRoot)
 
         let syncResult = try WorkspaceSyncer.sync(workspaceRoot: workspaceRoot, workspace: workspace)
@@ -993,17 +994,8 @@ public enum AIBWorkspaceManager {
     }
 
     private static func ensureEnvironmentTemplates(workspaceRoot: String) throws {
-        let files: [(String, String)] = [
-            (".aib/environments/local.yaml", "version: 1\nname: local\n"),
-            (".aib/environments/staging.yaml", "version: 1\nname: staging\n"),
-            (".aib/environments/prod.yaml", "version: 1\nname: prod\n"),
-        ]
-        for (relativePath, content) in files {
-            let path = URL(fileURLWithPath: relativePath, relativeTo: URL(fileURLWithPath: workspaceRoot)).standardizedFileURL.path
-            if !FileManager.default.fileExists(atPath: path) {
-                try content.write(toFile: path, atomically: true, encoding: .utf8)
-            }
-        }
+        let path = URL(fileURLWithPath: ".aib/environments", relativeTo: URL(fileURLWithPath: workspaceRoot)).standardizedFileURL
+        try FileManager.default.createDirectory(at: path, withIntermediateDirectories: true)
     }
 
     private static func ensureTargetTemplates(workspaceRoot: String) throws {
@@ -1056,6 +1048,37 @@ public enum AIBWorkspaceManager {
                 try content.write(toFile: path, atomically: true, encoding: .utf8)
             }
         }
+    }
+
+    private static func ensureDeployProfileTemplates(workspaceRoot: String) throws {
+        let path = URL(
+            fileURLWithPath: ".aib/deploy-profiles.yaml",
+            relativeTo: URL(fileURLWithPath: workspaceRoot)
+        )
+        .standardizedFileURL
+        guard !FileManager.default.fileExists(atPath: path.path) else { return }
+
+        let content = """
+        version: 1
+        active: stg
+        profiles:
+          dev:
+            provider: gcp-cloudrun
+            gcpProject: vi-dev-b8a52
+            firebaseProject: vi-dev-b8a52
+            region: asia-northeast1
+          stg:
+            provider: gcp-cloudrun
+            gcpProject: salescore-ei-stg
+            firebaseProject: salescore-ei-stg
+            region: asia-northeast1
+          prod:
+            provider: gcp-cloudrun
+            gcpProject: enablement-intelligence
+            firebaseProject: enablement-intelligence
+            region: asia-northeast1
+        """
+        try content.write(to: path, atomically: true, encoding: .utf8)
     }
 
     private static func ensureGitignoreEntries(workspaceRoot: String) throws {

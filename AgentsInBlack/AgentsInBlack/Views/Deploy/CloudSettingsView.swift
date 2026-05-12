@@ -26,6 +26,9 @@ struct CloudSettingsView: View {
     @State private var gcloudAccounts: [GCloudAccount] = []
     @State private var gcloudProjects: [GCloudProject] = []
     @State private var gcloudRegions: [GCloudRegion] = []
+    @State private var gcloudServiceAccounts: [GCloudServiceAccount] = []
+    @State private var deployProfiles: [AIBDeployProfile] = []
+    @State private var activeDeployProfileName: String?
     @State private var activeGCloudAccount: String?
     @State private var activeGCloudProject: String?
     @State private var isRefreshingGCloudContext: Bool = false
@@ -34,9 +37,6 @@ struct CloudSettingsView: View {
     @State private var isSwitchingGCloudProject: Bool = false
     @State private var isSwitchingGCloudRegion: Bool = false
     @State private var gcloudContextErrorMessage: String?
-    @State private var deployEnvironmentOptions: [AIBDeployEnvironmentOption] = []
-    @State private var selectedDeployEnvironmentName: String = ""
-    @State private var isSwitchingDeployEnvironment: Bool = false
 
     // MARK: - Config State
 
@@ -78,6 +78,7 @@ struct CloudSettingsView: View {
     @State private var hasLoadedInitial: Bool = false
 
     private let configStore: DeployTargetConfigStore = DefaultDeployTargetConfigStore()
+    private let deployProfileStore: DeployProfileStore = DefaultDeployProfileStore()
     private let gcloudContextService = GCloudContextService()
     private let targetSourceAuthKeychainStore = TargetSourceAuthKeychainStore()
     private let localSourceAuthValidationService = LocalSourceAuthValidationService()
@@ -91,7 +92,7 @@ struct CloudSettingsView: View {
                 VStack(alignment: .leading, spacing: 24) {
                     providerSection
                     if providerID != "local" {
-                        deployEnvironmentSelectionSection
+                        deployProfileSection
                         environmentSection
                     }
                     configSection
@@ -116,6 +117,51 @@ struct CloudSettingsView: View {
                 await runEnvironmentChecks()
                 await refreshGCloudContext()
             }
+        }
+    }
+
+    private var activeDeployProfile: AIBDeployProfile? {
+        if let activeDeployProfileName,
+           let profile = deployProfiles.first(where: { $0.name == activeDeployProfileName }) {
+            return profile
+        }
+        return deployProfiles.first
+    }
+
+    private var deployProfileSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Deploy Profile")
+                .font(.subheadline.weight(.medium))
+
+            configContextRow(
+                title: "Profile",
+                value: activeDeployProfile.map { "\($0.name) / \($0.gcpProject)" } ?? "No profile selected"
+            ) {
+                Menu("Switch") {
+                    if deployProfiles.isEmpty {
+                        Text("No deploy profiles")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(deployProfiles) { profile in
+                            Button {
+                                Task { await switchDeployProfile(to: profile.name) }
+                            } label: {
+                                let title = deployProfileTitle(profile)
+                                if profile.name == activeDeployProfile?.name {
+                                    Label(title, systemImage: "checkmark")
+                                } else {
+                                    Text(title)
+                                }
+                            }
+                        }
+                    }
+                }
+                .disabled(isRefreshingGCloudContext)
+            }
+
+            Text("Deploy profiles are shared in .aib/deploy-profiles.yaml and apply target project and region before deploy.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
     }
 
@@ -155,87 +201,6 @@ struct CloudSettingsView: View {
     }
 
     // MARK: - Environment
-
-    private var deployEnvironmentSelectionSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("Deploy Environment")
-                    .font(.subheadline.weight(.medium))
-
-                Spacer()
-
-                if isSwitchingDeployEnvironment {
-                    ProgressView()
-                        .controlSize(.small)
-                }
-            }
-
-            if deployEnvironmentOptions.isEmpty {
-                Text("No deploy environments are defined in .aib/environments.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            } else {
-                VStack(spacing: 0) {
-                    configContextRow(
-                        title: "Environment",
-                        value: selectedDeployEnvironmentLabel
-                    ) {
-                        Menu("Switch") {
-                            Button {
-                                selectedDeployEnvironmentName = ""
-                            } label: {
-                                if selectedDeployEnvironmentName.isEmpty {
-                                    Label("Custom", systemImage: "checkmark")
-                                } else {
-                                    Text("Custom")
-                                }
-                            }
-
-                            Divider()
-
-                            ForEach(deployEnvironmentOptions) { option in
-                                Button {
-                                    Task { await switchDeployEnvironment(to: option) }
-                                } label: {
-                                    if option.name == selectedDeployEnvironmentName {
-                                        Label(option.menuTitle, systemImage: "checkmark")
-                                    } else {
-                                        Text(option.menuTitle)
-                                    }
-                                }
-                            }
-                        }
-                        .disabled(isSwitchingDeployEnvironment)
-                    }
-
-                    if let option = selectedDeployEnvironmentOption {
-                        Divider().padding(.leading, 12)
-                        configContextRow(title: "Target Project", value: option.targetProject ?? "Not specified") {
-                            EmptyView()
-                        }
-
-                        Divider().padding(.leading, 12)
-                        configContextRow(title: "Target Region", value: option.region ?? "Default") {
-                            EmptyView()
-                        }
-                    }
-                }
-                .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
-
-                Text("Selecting an environment applies its target overlay before deploy, including service env and Secret Manager references.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-        }
-    }
-
-    private var selectedDeployEnvironmentOption: AIBDeployEnvironmentOption? {
-        deployEnvironmentOptions.first { $0.name == selectedDeployEnvironmentName }
-    }
-
-    private var selectedDeployEnvironmentLabel: String {
-        selectedDeployEnvironmentOption?.displayTitle ?? "Custom"
-    }
 
     /// Ordered check IDs for display.
     private var environmentCheckIDs: [PreflightCheckID] {
@@ -595,6 +560,53 @@ struct CloudSettingsView: View {
                                 || gcloudRegions.isEmpty
                             )
                         }
+
+                        Divider().padding(.leading, 12)
+
+                        configContextRow(
+                            title: "Firebase Service Account",
+                            value: gcpServiceAccount.isEmpty ? "Use target default" : gcpServiceAccount
+                        ) {
+                            Menu("Switch") {
+                                Button {
+                                    gcpServiceAccount = ""
+                                } label: {
+                                    if gcpServiceAccount.isEmpty {
+                                        Label("Use Target Default", systemImage: "checkmark")
+                                    } else {
+                                        Text("Use Target Default")
+                                    }
+                                }
+
+                                if !gcloudServiceAccounts.isEmpty {
+                                    Divider()
+                                }
+
+                                if gcloudServiceAccounts.isEmpty {
+                                    Text("No Firebase service accounts")
+                                        .foregroundStyle(.secondary)
+                                } else {
+                                    ForEach(gcloudServiceAccounts) { serviceAccount in
+                                        Button {
+                                            gcpServiceAccount = serviceAccount.email
+                                        } label: {
+                                            let title = serviceAccountTitle(serviceAccount)
+                                            if serviceAccount.email == gcpServiceAccount {
+                                                Label(title, systemImage: "checkmark")
+                                            } else {
+                                                Text(title)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            .disabled(
+                                isRefreshingGCloudContext
+                                || isSigningInGCloudAccount
+                                || isSwitchingGCloudAccount
+                                || isSwitchingGCloudProject
+                            )
+                        }
                     }
                     .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
 
@@ -863,6 +875,20 @@ struct CloudSettingsView: View {
         .padding(.vertical, 8)
     }
 
+    private func serviceAccountTitle(_ serviceAccount: GCloudServiceAccount) -> String {
+        guard let displayName = serviceAccount.displayName, !displayName.isEmpty else {
+            return serviceAccount.email
+        }
+        return "\(displayName) (\(serviceAccount.email))"
+    }
+
+    private func deployProfileTitle(_ profile: AIBDeployProfile) -> String {
+        if let firebaseProject = profile.firebaseProject, firebaseProject != profile.gcpProject {
+            return "\(profile.name) (\(profile.gcpProject), Firebase: \(firebaseProject))"
+        }
+        return "\(profile.name) (\(profile.gcpProject))"
+    }
+
     // MARK: - Resource Defaults
 
     private func resourceConfigBinding(for kind: AIBServiceKind) -> AIBDeployResourceConfig {
@@ -973,6 +999,10 @@ struct CloudSettingsView: View {
         hasLoadedInitial = true
 
         do {
+            let profilesConfig = try deployProfileStore.load(workspaceRoot: workspaceRootPath)
+            deployProfiles = profilesConfig.profiles
+            activeDeployProfileName = profilesConfig.activeProfileName ?? profilesConfig.activeProfile?.name
+
             let config = try configStore.load(workspaceRoot: workspaceRootPath, providerID: providerID)
             loadedSourceCredentials = config.sourceCredentials
             region = config.region
@@ -982,6 +1012,11 @@ struct CloudSettingsView: View {
             gcpProject = config.providerConfig["gcpProject"] ?? ""
             gcpServiceAccount = config.providerConfig["serviceAccount"] ?? ""
             artifactRegistryHost = config.providerConfig["artifactRegistryHost"] ?? ""
+            if let activeProfile = profilesConfig.activeProfile, providerID == activeProfile.providerID {
+                gcpProject = activeProfile.gcpProject
+                region = activeProfile.region
+                gcpServiceAccount = activeProfile.runtimeServiceAccount ?? gcpServiceAccount
+            }
             if let credential = config.sourceCredentials.first(where: {
                 $0.type == .ssh || $0.type == .githubToken
             }) {
@@ -1003,74 +1038,12 @@ struct CloudSettingsView: View {
                 useHostPNPMStore = convenience.useHostPNPMStore
                 useRepoLocalPNPMStore = convenience.useRepoLocalPNPMStore
             }
-            loadDeployEnvironmentOptions(currentConfig: config)
         } catch {
             loadedSourceCredentials = []
+            deployProfiles = []
+            activeDeployProfileName = nil
             resetFormDefaults(for: providerID)
-            loadDeployEnvironmentOptions(currentConfig: nil)
         }
-    }
-
-    private func loadDeployEnvironmentOptions(currentConfig: AIBDeployTargetConfig?) {
-        guard providerID != "local" else {
-            deployEnvironmentOptions = []
-            selectedDeployEnvironmentName = ""
-            return
-        }
-
-        do {
-            let options = try AIBDeployService.listEnvironmentOptions(
-                workspaceRoot: workspaceRootPath,
-                providerID: providerID
-            )
-            deployEnvironmentOptions = options
-
-            if let currentConfig {
-                selectedDeployEnvironmentName = inferredDeployEnvironmentName(for: currentConfig) ?? ""
-            } else {
-                updateSelectedDeployEnvironmentFromCurrentFields()
-            }
-        } catch {
-            deployEnvironmentOptions = []
-            selectedDeployEnvironmentName = ""
-        }
-    }
-
-    private func inferredDeployEnvironmentName(for targetConfig: AIBDeployTargetConfig) -> String? {
-        do {
-            guard let name = try AIBDeployService.inferEnvironmentName(
-                workspaceRoot: workspaceRootPath,
-                targetConfig: targetConfig
-            ), deployEnvironmentOptions.contains(where: { $0.name == name }) else {
-                return nil
-            }
-            return name
-        } catch {
-            return nil
-        }
-    }
-
-    private func updateSelectedDeployEnvironmentFromCurrentFields() {
-        var providerConfig: [String: String] = [:]
-        if !gcpProject.isEmpty {
-            providerConfig["gcpProject"] = gcpProject
-        }
-        if !artifactRegistryHost.isEmpty {
-            providerConfig["artifactRegistryHost"] = artifactRegistryHost
-        }
-        if !gcpServiceAccount.isEmpty {
-            providerConfig["serviceAccount"] = gcpServiceAccount
-        }
-
-        let targetConfig = AIBDeployTargetConfig(
-            providerID: providerID,
-            region: region,
-            defaultAuth: authMode,
-            buildMode: buildMode,
-            kindDefaults: kindDefaults,
-            providerConfig: providerConfig
-        )
-        selectedDeployEnvironmentName = inferredDeployEnvironmentName(for: targetConfig) ?? ""
     }
 
     private func runEnvironmentChecks() async {
@@ -1186,6 +1159,9 @@ struct CloudSettingsView: View {
         }
         if !artifactRegistryHost.isEmpty {
             providerConfig["artifactRegistryHost"] = artifactRegistryHost
+        }
+        if !gcpServiceAccount.isEmpty {
+            providerConfig["serviceAccount"] = gcpServiceAccount
         }
 
         do {
@@ -1336,12 +1312,12 @@ struct CloudSettingsView: View {
             if gcpProject.isEmpty, let active = context.activeProject {
                 gcpProject = active
             }
-            updateSelectedDeployEnvironmentFromCurrentFields()
         } catch {
             gcloudContextErrorMessage = error.localizedDescription
         }
 
         await refreshGCloudRegions()
+        await refreshGCloudServiceAccounts()
     }
 
     private func refreshGCloudRegions() async {
@@ -1356,6 +1332,22 @@ struct CloudSettingsView: View {
             gcloudRegions = try await gcloudContextService.fetchRegions(projectID: projectID)
         } catch {
             gcloudRegions = []
+            gcloudContextErrorMessage = error.localizedDescription
+        }
+    }
+
+    private func refreshGCloudServiceAccounts() async {
+        guard providerID == "gcp-cloudrun" else { return }
+        let projectID = trimmed(gcpProject)
+        guard !projectID.isEmpty else {
+            gcloudServiceAccounts = []
+            return
+        }
+
+        do {
+            gcloudServiceAccounts = try await gcloudContextService.fetchFirebaseServiceAccounts(projectID: projectID)
+        } catch {
+            gcloudServiceAccounts = []
             gcloudContextErrorMessage = error.localizedDescription
         }
     }
@@ -1389,6 +1381,28 @@ struct CloudSettingsView: View {
         }
     }
 
+    private func switchDeployProfile(to profileName: String) async {
+        guard activeDeployProfileName != profileName else { return }
+        guard let profile = deployProfiles.first(where: { $0.name == profileName }) else { return }
+
+        do {
+            try deployProfileStore.setActiveProfile(
+                workspaceRoot: workspaceRootPath,
+                name: profileName
+            )
+            activeDeployProfileName = profileName
+            if providerID == profile.providerID {
+                gcpProject = profile.gcpProject
+                region = profile.region
+                gcpServiceAccount = profile.runtimeServiceAccount ?? ""
+            }
+            await refreshGCloudRegions()
+            await refreshGCloudServiceAccounts()
+        } catch {
+            gcloudContextErrorMessage = "Failed to switch deploy profile: \(error.localizedDescription)"
+        }
+    }
+
     private func switchProject(to projectID: String) async {
         guard gcpProject != projectID else { return }
         isSwitchingGCloudProject = true
@@ -1398,46 +1412,9 @@ struct CloudSettingsView: View {
         do {
             try await gcloudContextService.switchProject(to: projectID)
             gcpProject = projectID
-            updateSelectedDeployEnvironmentFromCurrentFields()
             await refreshGCloudContext()
         } catch {
             gcloudContextErrorMessage = "Failed to switch project: \(error.localizedDescription)"
-        }
-    }
-
-    @MainActor
-    private func switchDeployEnvironment(to option: AIBDeployEnvironmentOption) async {
-        guard selectedDeployEnvironmentName != option.name else { return }
-        isSwitchingDeployEnvironment = true
-        errorMessage = nil
-        gcloudContextErrorMessage = nil
-        defer { isSwitchingDeployEnvironment = false }
-
-        do {
-            let targetConfig = try AIBDeployService.loadTargetConfig(
-                workspaceRoot: workspaceRootPath,
-                providerID: providerID,
-                environmentName: option.name
-            )
-
-            selectedDeployEnvironmentName = option.name
-            region = targetConfig.region
-            if let project = targetConfig.providerConfig["gcpProject"], !project.isEmpty {
-                gcpProject = project
-                if activeGCloudProject != project {
-                    do {
-                        try await gcloudContextService.switchProject(to: project)
-                    } catch {
-                        gcloudContextErrorMessage = "Target project set to \(project), but gcloud context switch failed: \(error.localizedDescription)"
-                    }
-                }
-            }
-            artifactRegistryHost = targetConfig.providerConfig["artifactRegistryHost"] ?? artifactRegistryHost
-            gcpServiceAccount = targetConfig.providerConfig["serviceAccount"] ?? ""
-
-            await refreshGCloudContext()
-        } catch {
-            errorMessage = error.localizedDescription
         }
     }
 
@@ -1449,10 +1426,8 @@ struct CloudSettingsView: View {
 
         let previous = region
         region = newRegion
-        updateSelectedDeployEnvironmentFromCurrentFields()
         if !persistConfig(dismissOnSuccess: false) {
             region = previous
-            updateSelectedDeployEnvironmentFromCurrentFields()
         }
     }
 
