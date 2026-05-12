@@ -252,6 +252,44 @@ struct DockerfilePatchTests {
         #expect(instructions == ["ENV HOME=/home/node"])
     }
 
+    @Test("Node agent Codex runtime check runs before the runtime user")
+    func nodeAgentCodexRuntimeCheckRunsBeforeRuntimeUser() throws {
+        let dockerfile = """
+        FROM node:22-slim AS runtime
+        ARG CODEX_CLI_VERSION=0.130.0
+        RUN npm install -g @openai/codex@${CODEX_CLI_VERSION}
+        WORKDIR /app
+        COPY package.json ./
+        USER node
+        CMD ["node", "dist/index.js"]
+        """
+
+        let context = try makeBuildContext(dockerfile: dockerfile)
+        defer { try? FileManager.default.removeItem(at: context.directory) }
+
+        let patchedPath = try DefaultDeployExecutor.patchedDockerfilePath(
+            dockerfilePath: context.dockerfilePath,
+            buildContext: context.directory.path,
+            topStageInstructions: [],
+            runtimeStageInstructions: [],
+            preUserInstructions: [DefaultDeployExecutor.nodeAgentCodexRuntimeCheckInstruction],
+            preEntrypointInstructions: try DefaultDeployExecutor.nodeAgentNonRootRuntimeInstructions(
+                dockerfilePath: context.dockerfilePath
+            ),
+            appendedInstructions: []
+        )
+        let lines = try String(contentsOfFile: patchedPath, encoding: .utf8)
+            .components(separatedBy: "\n")
+
+        let checkIndex = try #require(lines.firstIndex(of: DefaultDeployExecutor.nodeAgentCodexRuntimeCheckInstruction))
+        let userIndex = try #require(lines.firstIndex(of: "USER node"))
+        let homeIndex = try #require(lines.firstIndex(of: "ENV HOME=/home/node"))
+        #expect(checkIndex == userIndex - 1)
+        #expect(homeIndex > userIndex)
+        #expect(DefaultDeployExecutor.nodeAgentCodexRuntimeCheckInstruction.contains("Codex app-server smoke timed out"))
+        #expect(DefaultDeployExecutor.nodeAgentCodexRuntimeCheckInstruction.contains(#""app-server", "--listen", "stdio://""#))
+    }
+
     @Test("Idempotent: re-patching a file containing the same instructions is a no-op")
     func patchIsIdempotent() throws {
         let dockerfile = """

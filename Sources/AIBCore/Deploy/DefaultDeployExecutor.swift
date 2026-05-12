@@ -216,6 +216,7 @@ public struct DefaultDeployExecutor: DeployExecuting {
             }
 
             if service.serviceKind == .agent && service.runtime == "node" {
+                preUserDockerfileInstructions.append(Self.nodeAgentCodexRuntimeCheckInstruction)
                 preEntrypointDockerfileInstructions.append(
                     contentsOf: try Self.nodeAgentNonRootRuntimeInstructions(dockerfilePath: dockerfilePath)
                 )
@@ -896,6 +897,14 @@ public struct DefaultDeployExecutor: DeployExecuting {
 
         return ["RUN chown -R node:node /app", "ENV HOME=/home/node", "USER node"]
     }
+
+    static let nodeAgentCodexRuntimeCheckInstruction =
+        #"RUN set -eu; if ! command -v codex >/dev/null 2>&1; then npm install -g "@openai/codex@${CODEX_CLI_VERSION:-latest}" --include=optional; fi; codex_global_root="$(npm root -g)/@openai/codex"; codex_version="$(node -p "require(process.argv[1] + '/package.json').version" "$codex_global_root")"; if ! codex --version >/tmp/aib-codex-version.txt 2>/tmp/aib-codex-check.log; then cat /tmp/aib-codex-check.log >&2; npm install -g "@openai/codex-linux-x64@${codex_version}"; codex --version >/tmp/aib-codex-version.txt; fi; rm -f /tmp/aib-codex-check.log /tmp/aib-codex-version.txt; node -e '"#
+        + nodeAgentCodexAppServerSmokeScript
+        + #"'"#
+
+    static let nodeAgentCodexAppServerSmokeScript =
+        #"const { spawn } = require("node:child_process"); const proc = spawn("codex", ["app-server", "--listen", "stdio://"], { stdio: ["pipe", "pipe", "pipe"] }); let out = ""; let err = ""; const timer = setTimeout(() => { proc.kill("SIGTERM"); console.error(err || out || "Codex app-server smoke timed out"); process.exit(1); }, 5000); proc.stderr.on("data", (chunk) => { err += chunk; }); proc.stdout.on("data", (chunk) => { out += chunk; for (const line of out.split(/\n/)) { const trimmed = line.trim(); if (!trimmed) continue; try { const message = JSON.parse(trimmed); if (message.id === 1) { clearTimeout(timer); proc.kill("SIGTERM"); if (message.error) { console.error(JSON.stringify(message.error)); process.exit(1); } process.exit(0); } } catch {} } }); proc.on("error", (error) => { clearTimeout(timer); console.error(error); process.exit(1); }); proc.stdin.write(JSON.stringify({ method: "initialize", id: 1, params: { clientInfo: { name: "aib_build_smoke", title: "AIB Build Smoke", version: "0.1.0" }, capabilities: { experimentalApi: true } } }) + "\n");"#
 
     private static func isFromLine(_ line: String) -> Bool {
         line.trimmingCharacters(in: .whitespaces).uppercased().hasPrefix("FROM ")
