@@ -142,6 +142,86 @@ private struct MockCloudRunDeploymentProvider: DeploymentProvider {
 }
 
 @Test(.timeLimit(.minutes(1)))
+func cloudRunPlanUsesTargetFirebaseProjectForRuntimeProjectEnv() async throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("aib-project-env-test-\(UUID().uuidString)", isDirectory: true)
+    let repo = root.appendingPathComponent("proposal-mcp", isDirectory: true)
+    try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
+    defer {
+        do {
+            try FileManager.default.removeItem(at: root)
+        } catch {
+            // Best-effort cleanup for temp test directory.
+        }
+    }
+
+    try #"{"name":"proposal-mcp","version":"1.0.0","type":"module"}"#.write(
+        to: repo.appendingPathComponent("package.json"),
+        atomically: true,
+        encoding: .utf8
+    )
+    try "console.log('ok')\n".write(
+        to: repo.appendingPathComponent("index.js"),
+        atomically: true,
+        encoding: .utf8
+    )
+
+    let workspace = AIBWorkspaceConfig(
+        workspaceName: "test",
+        repos: [
+            WorkspaceRepo(
+                name: "proposal-mcp",
+                path: "proposal-mcp",
+                runtime: .node,
+                framework: .hono,
+                packageManager: .npm,
+                status: .discoverable,
+                detectionConfidence: .high,
+                services: [
+                    WorkspaceRepoServiceConfig(
+                        id: "main",
+                        kind: "mcp",
+                        mountPath: "/proposal-mcp",
+                        run: ["node", "index.js"],
+                        watchMode: "internal",
+                        env: [
+                            "GCLOUD_PROJECT": "vi-dev-b8a52",
+                            "GCP_PROJECT": "vi-dev-b8a52",
+                            "FIREBASE_PROJECT_ID": "vi-dev-b8a52",
+                            "STORAGE_BUCKET": "vi-dev-b8a52.firebasestorage.app",
+                        ]
+                    ),
+                ]
+            ),
+        ]
+    )
+    try AIBWorkspaceManager.saveWorkspace(workspace, workspaceRoot: root.path)
+
+    let provider = MockCloudRunDeploymentProvider()
+    let targetConfig = AIBDeployTargetConfig(
+        providerID: provider.providerID,
+        region: "asia-northeast1",
+        providerConfig: [
+            "gcpProject": "salescore-ei-stg",
+            "firebaseProject": "salescore-ei-stg",
+        ]
+    )
+
+    let plan = try await AIBDeployService.generatePlan(
+        workspaceRoot: root.path,
+        targetConfig: targetConfig,
+        provider: provider
+    )
+
+    let service = try #require(plan.services.first)
+    #expect(service.envVars["GCLOUD_PROJECT"] == "salescore-ei-stg")
+    #expect(service.envVars["GCP_PROJECT"] == "salescore-ei-stg")
+    #expect(service.envVars["FIREBASE_PROJECT_ID"] == "salescore-ei-stg")
+    #expect(service.envVars["FIREBASE_STORAGE_BUCKET"] == "salescore-ei-stg.firebasestorage.app")
+    #expect(service.envVars["STORAGE_BUCKET"] == "salescore-ei-stg.firebasestorage.app")
+}
+
+@Test(.timeLimit(.minutes(1)))
 func workspaceInitDiscoversRepos() throws {
     let root = FileManager.default.temporaryDirectory
         .appendingPathComponent("aib-workspace-test-\(UUID().uuidString)", isDirectory: true)

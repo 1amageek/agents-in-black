@@ -696,6 +696,7 @@ public enum AIBDeployService {
             // Build env vars — merge workspace.yaml deploy-scoped env first, then add generated vars.
             // resolvedEnv(for: .deploy) returns env ⊕ deployEnv; localEnv (e.g. *_EMULATOR_HOST) is excluded.
             var envVars: [String: String] = service.resolvedEnv(for: .deploy)
+            applyDeployProjectEnvironment(to: &envVars, targetConfig: targetConfig)
             if !resolvedConnections.mcpServers.isEmpty {
                 let urls = resolvedConnections.mcpServers.map(\.resolvedURL).joined(separator: ",")
                 envVars["MCP_SERVER_URLS"] = urls
@@ -866,6 +867,39 @@ public enum AIBDeployService {
             authBindings: uniqueBindings,
             warnings: warnings
         )
+    }
+
+    private static func applyDeployProjectEnvironment(
+        to envVars: inout [String: String],
+        targetConfig: AIBDeployTargetConfig
+    ) {
+        guard targetConfig.providerID == "gcp-cloudrun" else { return }
+        let gcpProject = normalizedProviderValue(targetConfig.providerConfig["gcpProject"])
+        let firebaseProject = normalizedProviderValue(targetConfig.providerConfig["firebaseProject"]) ?? gcpProject
+        guard let firebaseProject else { return }
+
+        envVars["GCLOUD_PROJECT"] = firebaseProject
+        envVars["GCP_PROJECT"] = firebaseProject
+        envVars["FIREBASE_PROJECT_ID"] = firebaseProject
+
+        let firebaseStorageBucket = normalizedProviderValue(targetConfig.providerConfig["firebaseStorageBucket"])
+            ?? normalizedProviderValue(targetConfig.providerConfig["storageBucket"])
+            ?? "\(firebaseProject).firebasestorage.app"
+        envVars["FIREBASE_STORAGE_BUCKET"] = firebaseStorageBucket
+        if shouldRewriteStorageBucket(envVars["STORAGE_BUCKET"]) {
+            envVars["STORAGE_BUCKET"] = firebaseStorageBucket
+        }
+    }
+
+    private static func normalizedProviderValue(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private static func shouldRewriteStorageBucket(_ value: String?) -> Bool {
+        guard let value = normalizedProviderValue(value) else { return false }
+        return value.hasSuffix(".firebasestorage.app") || value.hasSuffix(".appspot.com")
     }
 
     // MARK: - Dockerfile Resolution
