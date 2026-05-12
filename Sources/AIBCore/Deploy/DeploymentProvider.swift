@@ -47,6 +47,12 @@ public protocol DeploymentProvider: Sendable {
     /// Generate provider-specific deploy config content (e.g., clouddeploy.yaml).
     func generateDeployConfig(service: AIBDeployServicePlan) -> String
 
+    /// Run plan-specific readiness checks before the user approves deployment.
+    /// Generic preflight checks validate tools and broad provider context; readiness
+    /// checks validate the concrete target project, region, repositories, and IAM
+    /// surfaces that this plan will use.
+    func deploymentReadinessChecks(plan: AIBDeployPlan) async -> [PreflightCheckResult]
+
     /// Build the container registry image tag for a service.
     func registryImageTag(
         service: AIBDeployServicePlan,
@@ -218,6 +224,7 @@ extension DeploymentProvider {
     public func registryAuthCommands(targetConfig: AIBDeployTargetConfig) -> [DeployCommand] { [] }
     public func buildBackendPreparationCommands(targetConfig: AIBDeployTargetConfig) -> [DeployCommand] { [] }
     public func ensureRegistryRepoCommands(service: AIBDeployServicePlan, targetConfig: AIBDeployTargetConfig) -> [DeployCommand] { [] }
+    public func deploymentReadinessChecks(plan: AIBDeployPlan) async -> [PreflightCheckResult] { [] }
 
     public func existingEnvVarNames(
         serviceName: String,

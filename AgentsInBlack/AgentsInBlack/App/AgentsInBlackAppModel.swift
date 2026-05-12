@@ -1978,11 +1978,8 @@ final class AgentsInBlackAppModel {
     }
 
     var activeDeployProfile: AIBDeployProfile? {
-        if let activeDeployProfileName,
-           let profile = deployProfiles.first(where: { $0.name == activeDeployProfileName }) {
-            return profile
-        }
-        return deployProfiles.first
+        guard let activeDeployProfileName else { return nil }
+        return deployProfiles.first(where: { $0.name == activeDeployProfileName })
     }
 
     /// Run prerequisite tool-installation checks for the build backend and cloud provider.
@@ -2300,15 +2297,22 @@ final class AgentsInBlackAppModel {
 
         isSwitchingGCloudProject = true
         gcloudContextErrorMessage = nil
+        gcloudContextTask?.cancel()
+        gcloudContextTask = nil
         defer { isSwitchingGCloudProject = false }
 
         do {
             try await gcloudContextService.switchProject(to: projectID)
+            try deployProfileStore.setActiveProfile(
+                workspaceRoot: workspace.rootURL.path,
+                name: nil
+            )
             try persistConfiguredGCloudProject(
                 projectID,
                 workspaceRoot: workspace.rootURL.path,
                 providerID: "gcp-cloudrun"
             )
+            activeDeployProfileName = nil
             configuredGCloudProject = projectID
             await applyRefreshedGCloudContext(
                 workspaceRoot: workspace.rootURL.path,
@@ -2354,25 +2358,30 @@ final class AgentsInBlackAppModel {
         guard let workspace else { return }
         guard canSwitchDeployGCloudContext else { return }
         guard activeDeployProfileName != profileName else { return }
+        guard let profile = deployProfiles.first(where: { $0.name == profileName }) else {
+            gcloudContextErrorMessage = "Failed to switch deploy profile: profile '\(profileName)' was not found."
+            return
+        }
 
         isSwitchingDeployProfile = true
         gcloudContextErrorMessage = nil
+        gcloudContextTask?.cancel()
+        gcloudContextTask = nil
         defer { isSwitchingDeployProfile = false }
 
         do {
+            try await gcloudContextService.switchProject(to: profile.gcpProject)
             try deployProfileStore.setActiveProfile(
                 workspaceRoot: workspace.rootURL.path,
                 name: profileName
             )
             activeDeployProfileName = profileName
-            if let profile = deployProfiles.first(where: { $0.name == profileName }) {
-                configuredGCloudProject = profile.gcpProject
-                configuredGCloudServiceAccount = profile.runtimeServiceAccount
-                gcloudContextErrorMessage = contextWarningMessage(
-                    for: profile.gcpProject,
-                    availableProjects: gcloudProjects
-                )
-            }
+            configuredGCloudProject = profile.gcpProject
+            configuredGCloudServiceAccount = profile.runtimeServiceAccount
+            gcloudContextErrorMessage = contextWarningMessage(
+                for: profile.gcpProject,
+                availableProjects: gcloudProjects
+            )
             await applyRefreshedGCloudContext(
                 workspaceRoot: workspace.rootURL.path,
                 providerID: "gcp-cloudrun"
@@ -2413,7 +2422,7 @@ final class AgentsInBlackAppModel {
             let context = try await gcloudContextService.fetchContext()
             guard !Task.isCancelled else { return }
             let profilesConfig = try deployProfileStore.load(workspaceRoot: workspaceRoot)
-            let profile = profilesConfig.activeProfile
+            let profile = activeProfile(in: profilesConfig)
             let configuredProject = loadConfiguredGCloudProject(
                 workspaceRoot: workspaceRoot,
                 providerID: providerID
@@ -2426,7 +2435,7 @@ final class AgentsInBlackAppModel {
             gcloudAccounts = context.accounts
             gcloudProjects = context.projects
             deployProfiles = profilesConfig.profiles
-            activeDeployProfileName = profilesConfig.activeProfileName ?? profile?.name
+            activeDeployProfileName = profile?.name
             activeGCloudAccount = context.activeAccount
             activeGCloudProject = context.activeProject
             configuredGCloudProject = selectedProject
@@ -2455,7 +2464,7 @@ final class AgentsInBlackAppModel {
             gcloudServiceAccounts = []
             let fallbackProfiles = loadDeployProfiles(workspaceRoot: workspaceRoot)
             deployProfiles = fallbackProfiles.profiles
-            activeDeployProfileName = fallbackProfiles.activeProfileName ?? fallbackProfiles.activeProfile?.name
+            activeDeployProfileName = activeProfile(in: fallbackProfiles)?.name
             activeGCloudAccount = nil
             activeGCloudProject = nil
             configuredGCloudProject = loadConfiguredGCloudProject(
@@ -2561,6 +2570,11 @@ final class AgentsInBlackAppModel {
         } catch {
             return AIBDeployProfilesConfig()
         }
+    }
+
+    private func activeProfile(in config: AIBDeployProfilesConfig) -> AIBDeployProfile? {
+        guard let activeProfileName = config.activeProfileName else { return nil }
+        return config.profiles.first { $0.name == activeProfileName }
     }
 
     private func applyDeployProfile(to targetConfig: inout AIBDeployTargetConfig) {

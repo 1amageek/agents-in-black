@@ -125,6 +125,46 @@ public struct GCPCloudRunProvider: DeploymentProvider, Sendable {
         return lines.joined(separator: "\n") + "\n"
     }
 
+    public func deploymentReadinessChecks(plan: AIBDeployPlan) async -> [PreflightCheckResult] {
+        let targetConfig = plan.targetConfig
+        let project = requiredGCPProject(from: targetConfig)
+        let region = targetConfig.region
+        let host = targetConfig.providerConfig["artifactRegistryHost"] ?? "\(region)-docker.pkg.dev"
+
+        var results: [PreflightCheckResult] = []
+        results.append(await runReadinessCommand(
+            id: .gcpProjectAccessible,
+            title: "GCP Project Access",
+            command: "gcloud projects describe \(shellQuote(project)) --format='value(projectId)' --quiet",
+            success: { $0.exitCode == 0 && $0.stdout.trimmingCharacters(in: .whitespacesAndNewlines) == project },
+            failure: "Cannot access GCP project '\(project)' with the active gcloud account.",
+            remediation: "Ask a project admin to grant project access, then run: gcloud config set project \(project)"
+        ))
+        results.append(await runAPIReadinessCheck(
+            id: .artifactRegistryAPIEnabled,
+            title: "Artifact Registry API",
+            serviceName: "artifactregistry.googleapis.com",
+            project: project
+        ))
+        results.append(await runAPIReadinessCheck(
+            id: .cloudRunAPIEnabled,
+            title: "Cloud Run API",
+            serviceName: "run.googleapis.com",
+            project: project
+        ))
+        results.append(await dockerCredentialHelperCheck(host: host))
+        results.append(await artifactRegistryRepositoryAccessCheck(plan: plan, project: project, region: region))
+        results.append(await runReadinessCommand(
+            id: .cloudRunDeployAccess,
+            title: "Cloud Run Access",
+            command: "gcloud run services list --region \(shellQuote(region)) --project \(shellQuote(project)) --limit=1 --format='value(metadata.name)' --quiet",
+            success: { $0.exitCode == 0 },
+            failure: "Cannot list Cloud Run services in project '\(project)' / region '\(region)'.",
+            remediation: "Ask a project admin for Cloud Run deploy access, commonly roles/run.admin plus roles/iam.serviceAccountUser for the runtime service account."
+        ))
+        return results
+    }
+
     // MARK: - Container Registry
 
     public func registryImageTag(
@@ -1204,6 +1244,159 @@ public struct GCPCloudRunProvider: DeploymentProvider, Sendable {
         guard let value = targetConfig.providerConfig["serviceAccount"] else { return nil }
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func runAPIReadinessCheck(
+        id: PreflightCheckID,
+        title: String,
+        serviceName: String,
+        project: String
+    ) async -> PreflightCheckResult {
+        await runReadinessCommand(
+            id: id,
+            title: title,
+            command: "gcloud services list --enabled --project \(shellQuote(project)) --filter='name:\(serviceName)' --format='value(name)' --quiet",
+            success: { $0.exitCode == 0 && $0.stdout.contains(serviceName) },
+            failure: "\(title) is not enabled for project '\(project)'.",
+            remediation: "gcloud services enable \(serviceName) --project \(project)"
+        )
+    }
+
+    private func dockerCredentialHelperCheck(host: String) async -> PreflightCheckResult {
+        let command = """
+        host=\(shellQuote(host))
+        if [ ! -f "$HOME/.docker/config.json" ]; then
+          echo "$HOME/.docker/config.json does not exist."
+          exit 1
+        fi
+        if grep -Eq "\\"${host}\\"[[:space:]]*:[[:space:]]*\\"gcloud\\"" "$HOME/.docker/config.json"; then
+          echo "Docker credential helper configured for ${host}."
+          exit 0
+        fi
+        echo "Docker credential helper for ${host} is missing."
+        exit 1
+        """
+        return await runReadinessCommand(
+            id: .artifactRegistryDockerAuthConfigured,
+            title: "Artifact Registry Docker Auth",
+            command: command,
+            success: { $0.exitCode == 0 },
+            failure: "Docker is not configured to authenticate to Artifact Registry host '\(host)'.",
+            remediation: "gcloud auth configure-docker \(host)"
+        )
+    }
+
+    private func artifactRegistryRepositoryAccessCheck(
+        plan: AIBDeployPlan,
+        project: String,
+        region: String
+    ) async -> PreflightCheckResult {
+        let repoNames = Array(Set(plan.services.map(\.deployedServiceName))).sorted()
+        guard !repoNames.isEmpty else {
+            return PreflightCheckResult(
+                id: .artifactRegistryRepositoriesAccessible,
+                title: "Artifact Registry Repositories",
+                status: .passed(detail: "No services")
+            )
+        }
+
+        var diagnostics: [String] = []
+        var inaccessible: [String] = []
+        var missing: [String] = []
+        for repoName in repoNames {
+            let command = "gcloud artifacts repositories describe \(shellQuote(repoName)) --location \(shellQuote(region)) --project \(shellQuote(project)) --format='value(name)' --quiet"
+            do {
+                let result = try await ShellProbe.run(command: command)
+                diagnostics.append(contentsOf: PreflightDiagnostics.lines(command: command, result: result))
+                if result.exitCode == 0 {
+                    continue
+                }
+                let combined = "\(result.stdout)\n\(result.stderr)".lowercased()
+                if combined.contains("not found") || combined.contains("not_found") {
+                    missing.append(repoName)
+                } else {
+                    inaccessible.append(repoName)
+                }
+            } catch {
+                diagnostics.append(contentsOf: PreflightDiagnostics.lines(command: command, error: error))
+                inaccessible.append(repoName)
+            }
+        }
+
+        if inaccessible.isEmpty {
+            let detail = missing.isEmpty
+                ? "\(repoNames.count) repository(s)"
+                : "\(repoNames.count - missing.count) existing; \(missing.count) will be created during deploy"
+            let status: PreflightCheckResult.Status = missing.isEmpty
+                ? .passed(detail: detail)
+                : .warning("Artifact Registry repositories will be created during deploy: \(missing.joined(separator: ", "))")
+            return PreflightCheckResult(
+                id: .artifactRegistryRepositoriesAccessible,
+                title: "Artifact Registry Repositories",
+                status: status,
+                remediationCommand: missing.isEmpty ? nil : "Grant Artifact Registry repository create access if deploy later fails: roles/artifactregistry.admin",
+                diagnostics: diagnostics
+            )
+        }
+
+        return PreflightCheckResult(
+            id: .artifactRegistryRepositoriesAccessible,
+            title: "Artifact Registry Repositories",
+            status: .failed("Cannot access Artifact Registry repositories: \(inaccessible.joined(separator: ", "))"),
+            remediationCommand: "Ask a project admin for Artifact Registry read/write access, commonly roles/artifactregistry.writer. Repository creation also requires create/admin access.",
+            diagnostics: diagnostics
+        )
+    }
+
+    private func runReadinessCommand(
+        id: PreflightCheckID,
+        title: String,
+        command: String,
+        success: (ShellProbe.Result) -> Bool,
+        failure: String,
+        remediation: String
+    ) async -> PreflightCheckResult {
+        do {
+            let result = try await ShellProbe.run(command: command)
+            let diagnostics = PreflightDiagnostics.lines(command: command, result: result)
+            if success(result) {
+                let detail = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+                return PreflightCheckResult(
+                    id: id,
+                    title: title,
+                    status: .passed(detail: detail.isEmpty ? nil : detail),
+                    diagnostics: diagnostics
+                )
+            }
+            return PreflightCheckResult(
+                id: id,
+                title: title,
+                status: .failed(failure + " " + summarizedCommandOutput(result)),
+                remediationCommand: remediation,
+                diagnostics: diagnostics
+            )
+        } catch {
+            return PreflightCheckResult(
+                id: id,
+                title: title,
+                status: .failed("\(failure) \(error.localizedDescription)"),
+                remediationCommand: remediation,
+                diagnostics: PreflightDiagnostics.lines(command: command, error: error)
+            )
+        }
+    }
+
+    private func summarizedCommandOutput(_ result: ShellProbe.Result) -> String {
+        let output = [result.stderr, result.stdout]
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
+        guard !output.isEmpty else { return "" }
+        let maxLength = 400
+        if output.count <= maxLength {
+            return output
+        }
+        return String(output.prefix(maxLength)) + "..."
     }
 
     private func shellQuote(_ value: String) -> String {

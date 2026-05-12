@@ -64,9 +64,7 @@ struct DeployCompletedView: View {
                                 .font(.caption)
                         }
                         if let error = serviceResult.errorMessage {
-                            Text(error)
-                                .font(.caption)
-                                .foregroundStyle(.red)
+                            errorDetails(error)
                         }
                     }
                     Spacer()
@@ -90,6 +88,45 @@ struct DeployCompletedView: View {
 
     private func isAgentService(_ serviceResultID: String) -> Bool {
         result.plan.services.first(where: { $0.id == serviceResultID })?.serviceKind == .agent
+    }
+
+    @ViewBuilder
+    private func errorDetails(_ error: String) -> some View {
+        let parts = splitErrorMessage(error)
+        VStack(alignment: .leading, spacing: 6) {
+            Text(parts.summary)
+                .font(.caption)
+                .foregroundStyle(.red)
+                .textSelection(.enabled)
+            if let details = parts.details {
+                DisclosureGroup {
+                    ScrollView(.horizontal) {
+                        Text(details)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.red)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .padding(8)
+                    .background(.red.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
+                } label: {
+                    Text("Show error details")
+                        .font(.caption)
+                }
+                .controlSize(.small)
+            }
+        }
+    }
+
+    private func splitErrorMessage(_ error: String) -> (summary: String, details: String?) {
+        let lines = error.components(separatedBy: .newlines)
+        guard let firstLine = lines.first, lines.count > 1 else {
+            return (error, nil)
+        }
+        let details = lines.dropFirst()
+            .joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return (firstLine, details.isEmpty ? nil : details)
     }
 
     private var authBindingsSection: some View {

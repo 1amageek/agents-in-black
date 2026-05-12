@@ -225,17 +225,17 @@ struct DeployProfileToolbarMenu: View {
     }
 
     private var profileLabel: String {
-        guard let profile = model.activeDeployProfile else {
-            return "No Project"
+        if let profile = model.activeDeployProfile {
+            return profile.gcpProject
         }
-        return profile.gcpProject
+        return model.displayDeployGCloudProject ?? "No Project"
     }
 
     private var helpText: String {
-        guard let profile = model.activeDeployProfile else {
-            return "Deploy project: none"
+        if let profile = model.activeDeployProfile {
+            return "Deploy project: \(profile.gcpProject), region: \(profile.region)"
         }
-        return "Deploy project: \(profile.gcpProject), region: \(profile.region)"
+        return "Deploy project: \(model.displayDeployGCloudProject ?? "none")"
     }
 
     private func profileTitle(_ profile: AIBDeployProfile) -> String {

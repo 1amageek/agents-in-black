@@ -331,7 +331,7 @@ public struct DefaultDeployExecutor: DeployExecuting {
                     try Task.checkCancellation()
                     // Exit code != 0 is OK if repo already exists (ALREADY_EXISTS)
                     if result.exitCode != 0, !result.stderr.contains("ALREADY_EXISTS") {
-                        let errorMsg = "\(command.label) failed (exit \(result.exitCode))"
+                        let errorMsg = Self.commandFailureMessage(command: command, result: result)
                         logHandler(AIBDeployLogEntry(
                             level: .error,
                             serviceID: service.id,
@@ -422,7 +422,7 @@ public struct DefaultDeployExecutor: DeployExecuting {
                     )
                     try Task.checkCancellation()
                     if result.exitCode != 0 {
-                        let errorMsg = "\(command.label) failed (exit \(result.exitCode))"
+                        let errorMsg = Self.commandFailureMessage(command: command, result: result)
                         logHandler(AIBDeployLogEntry(
                             level: .error,
                             serviceID: service.id,
@@ -515,7 +515,7 @@ public struct DefaultDeployExecutor: DeployExecuting {
                     try Task.checkCancellation()
 
                     if result.exitCode != 0 {
-                        let errorMsg = "\(command.label) failed (exit \(result.exitCode))"
+                        let errorMsg = Self.commandFailureMessage(command: command, result: result)
                         logHandler(AIBDeployLogEntry(
                             level: .error,
                             serviceID: service.id,
@@ -682,6 +682,45 @@ public struct DefaultDeployExecutor: DeployExecuting {
             message: "Command completed in \(elapsedText) (exit \(result.exitCode))"
         ))
         return result
+    }
+
+    static func commandFailureMessage(command: DeployCommand, result: ProcessRunResult) -> String {
+        let summary = "\(command.label) failed (exit \(result.exitCode))"
+        let output = recentCommandOutput(from: result)
+        guard !output.isEmpty else { return summary }
+        return summary + "\n\nRecent command output:\n" + output
+    }
+
+    private static func recentCommandOutput(from result: ProcessRunResult) -> String {
+        let stderr = normalizedOutputLines(result.stderr)
+        let stdout = normalizedOutputLines(result.stdout)
+        let lines: [String]
+        if !stderr.isEmpty && !stdout.isEmpty {
+            lines = ["stderr:"] + stderr + ["", "stdout:"] + stdout
+        } else if !stderr.isEmpty {
+            lines = stderr
+        } else {
+            lines = stdout
+        }
+        return truncatedOutputTail(lines)
+    }
+
+    private static func normalizedOutputLines(_ output: String) -> [String] {
+        output
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
+
+    private static func truncatedOutputTail(_ lines: [String]) -> String {
+        let maxLines = 40
+        let maxCharacters = 8_000
+        var selected = Array(lines.suffix(maxLines)).joined(separator: "\n")
+        if selected.count > maxCharacters {
+            let start = selected.index(selected.endIndex, offsetBy: -maxCharacters)
+            selected = "...\n" + selected[start...]
+        }
+        return selected
     }
 
     private static func stageProjectedArtifacts(

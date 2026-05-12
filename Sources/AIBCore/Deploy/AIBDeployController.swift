@@ -106,10 +106,9 @@ public final class AIBDeployController {
             self.cachedPreflightReport = report
 
             guard report.canProceed else {
-                let failedNames = report.failedChecks.map(\.title).joined(separator: ", ")
                 self.transitionTo(.failed(AIBDeployError(
                     phase: "preflight",
-                    message: "Preflight failed: \(failedNames)"
+                    message: Self.preflightFailureMessage(report)
                 )))
                 return
             }
@@ -134,6 +133,26 @@ public final class AIBDeployController {
                     selection: selection,
                     environmentName: environmentName
                 )
+
+                let readinessResults = await provider.deploymentReadinessChecks(plan: plan)
+                if !readinessResults.isEmpty {
+                    let combinedReport = PreflightReport(results: report.results + readinessResults)
+                    self.cachedPreflightReport = combinedReport
+                    guard combinedReport.canProceed else {
+                        self.transitionTo(.failed(AIBDeployError(
+                            phase: "preflight",
+                            message: Self.preflightFailureMessage(combinedReport)
+                        )))
+                        return
+                    }
+                    for result in readinessResults where result.isWarning {
+                        self.emit(.log(AIBDeployLogEntry(
+                            timestamp: Date(),
+                            level: .warning,
+                            message: "[preflight] \(result.title): \(Self.statusMessage(for: result))"
+                        )))
+                    }
+                }
 
                 // Phase 3: Review — block until user approves or cancels
                 self.transitionTo(.reviewing(plan))
@@ -517,6 +536,27 @@ public final class AIBDeployController {
     private func transitionTo(_ newPhase: AIBDeployPhase) {
         phase = newPhase
         emit(.phaseChanged(newPhase))
+    }
+
+    private static func preflightFailureMessage(_ report: PreflightReport) -> String {
+        let sections = report.failedChecks.map { result -> String in
+            let remediation = result.remediationCommand.map { "\nRemediation: \($0)" } ?? ""
+            return "\(result.title): \(statusMessage(for: result))\(remediation)"
+        }
+        return "Preflight failed:\n" + sections.joined(separator: "\n\n")
+    }
+
+    private static func statusMessage(for result: PreflightCheckResult) -> String {
+        switch result.status {
+        case .failed(let message), .warning(let message), .skipped(let message):
+            return message
+        case .passed(let detail):
+            return detail ?? "Passed"
+        case .pending:
+            return "Pending"
+        case .running:
+            return "Running"
+        }
     }
 
     private func emit(_ event: AIBDeployEvent) {

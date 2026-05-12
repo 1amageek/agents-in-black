@@ -25,4 +25,9 @@ extension PreflightCheckID {
     public static let gcloudProjectConfigured = PreflightCheckID(rawValue: "gcloudProjectConfigured")
     public static let cloudBuildAPIEnabled = PreflightCheckID(rawValue: "cloudBuildAPIEnabled")
     public static let cloudRunAPIEnabled = PreflightCheckID(rawValue: "cloudRunAPIEnabled")
+    public static let gcpProjectAccessible = PreflightCheckID(rawValue: "gcpProjectAccessible")
+    public static let artifactRegistryAPIEnabled = PreflightCheckID(rawValue: "artifactRegistryAPIEnabled")
+    public static let artifactRegistryDockerAuthConfigured = PreflightCheckID(rawValue: "artifactRegistryDockerAuthConfigured")
+    public static let artifactRegistryRepositoriesAccessible = PreflightCheckID(rawValue: "artifactRegistryRepositoriesAccessible")
+    public static let cloudRunDeployAccess = PreflightCheckID(rawValue: "cloudRunDeployAccess")
 }
