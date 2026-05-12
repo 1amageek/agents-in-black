@@ -172,7 +172,7 @@ struct DeployGoogleAccountToolbarMenu: View {
     }
 }
 
-/// Compact deploy profile switcher for the header toolbar.
+/// Compact deploy account switcher for the header toolbar.
 struct DeployProfileToolbarMenu: View {
     @Bindable var model: AgentsInBlackAppModel
 
@@ -202,9 +202,9 @@ struct DeployProfileToolbarMenu: View {
 
     @ViewBuilder
     private var deployProfileSection: some View {
-        Section("Deploy Profile") {
+        Section("Deploy Account") {
             if model.deployProfiles.isEmpty {
-                Text("No deploy profiles")
+                Text("No deploy accounts")
                     .foregroundStyle(.secondary)
             } else {
                 ForEach(model.deployProfiles) { profile in
@@ -228,14 +228,14 @@ struct DeployProfileToolbarMenu: View {
         guard let profile = model.activeDeployProfile else {
             return "No Profile"
         }
-        return "\(profile.name) / \(profile.gcpProject)"
+        return profile.name
     }
 
     private var helpText: String {
         guard let profile = model.activeDeployProfile else {
-            return "Deploy profile: none"
+            return "Deploy account: none"
         }
-        return "Deploy profile: \(profile.name), project: \(profile.gcpProject), region: \(profile.region)"
+        return "Deploy account: \(profile.name), project: \(profile.gcpProject), region: \(profile.region)"
     }
 
     private func profileTitle(_ profile: AIBDeployProfile) -> String {

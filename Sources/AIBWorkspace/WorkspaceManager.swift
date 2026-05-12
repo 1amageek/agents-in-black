@@ -1060,22 +1060,22 @@ public enum AIBWorkspaceManager {
 
         let content = """
         version: 1
-        active: stg
+        active: salescore-ei-stg
         profiles:
-          dev:
-            provider: gcp-cloudrun
-            gcpProject: vi-dev-b8a52
-            firebaseProject: vi-dev-b8a52
-            region: asia-northeast1
-          stg:
+          salescore-ei-stg:
             provider: gcp-cloudrun
             gcpProject: salescore-ei-stg
             firebaseProject: salescore-ei-stg
             region: asia-northeast1
-          prod:
+          enablement-intelligence:
             provider: gcp-cloudrun
             gcpProject: enablement-intelligence
             firebaseProject: enablement-intelligence
+            region: asia-northeast1
+          vi-dev-b8a52:
+            provider: gcp-cloudrun
+            gcpProject: vi-dev-b8a52
+            firebaseProject: vi-dev-b8a52
             region: asia-northeast1
         """
         try content.write(to: path, atomically: true, encoding: .utf8)

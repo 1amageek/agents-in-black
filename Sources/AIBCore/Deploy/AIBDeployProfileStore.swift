@@ -66,26 +66,31 @@ public protocol DeployProfileStore: Sendable {
 
 public struct DefaultDeployProfileStore: DeployProfileStore, Sendable {
     public static let relativePath = ".aib/deploy-profiles.yaml"
+    private static let defaultProfileOrder = [
+        "salescore-ei-stg": 0,
+        "enablement-intelligence": 1,
+        "vi-dev-b8a52": 2,
+    ]
 
     public static let defaultConfig = AIBDeployProfilesConfig(
-        activeProfileName: "stg",
+        activeProfileName: "salescore-ei-stg",
         profiles: [
             AIBDeployProfile(
-                name: "dev",
-                gcpProject: "vi-dev-b8a52",
-                firebaseProject: "vi-dev-b8a52",
-                region: "asia-northeast1"
-            ),
-            AIBDeployProfile(
-                name: "stg",
+                name: "salescore-ei-stg",
                 gcpProject: "salescore-ei-stg",
                 firebaseProject: "salescore-ei-stg",
                 region: "asia-northeast1"
             ),
             AIBDeployProfile(
-                name: "prod",
+                name: "enablement-intelligence",
                 gcpProject: "enablement-intelligence",
                 firebaseProject: "enablement-intelligence",
+                region: "asia-northeast1"
+            ),
+            AIBDeployProfile(
+                name: "vi-dev-b8a52",
+                gcpProject: "vi-dev-b8a52",
+                firebaseProject: "vi-dev-b8a52",
                 region: "asia-northeast1"
             ),
         ]
@@ -179,9 +184,8 @@ public struct DefaultDeployProfileStore: DeployProfileStore, Sendable {
     }
 
     private static func sortProfiles(_ lhs: AIBDeployProfile, _ rhs: AIBDeployProfile) -> Bool {
-        let order = ["dev": 0, "stg": 1, "prod": 2]
-        let lhsOrder = order[lhs.name] ?? Int.max
-        let rhsOrder = order[rhs.name] ?? Int.max
+        let lhsOrder = defaultProfileOrder[lhs.name] ?? Int.max
+        let rhsOrder = defaultProfileOrder[rhs.name] ?? Int.max
         if lhsOrder != rhsOrder {
             return lhsOrder < rhsOrder
         }
