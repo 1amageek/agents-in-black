@@ -130,16 +130,16 @@ struct CloudSettingsView: View {
 
     private var deployProfileSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Deploy Account")
+            Text("Deploy Project")
                 .font(.subheadline.weight(.medium))
 
             configContextRow(
-                title: "Account",
-                value: activeDeployProfile?.name ?? "No account selected"
+                title: "Project",
+                value: activeDeployProfile?.gcpProject ?? "No project selected"
             ) {
                 Menu("Switch") {
                     if deployProfiles.isEmpty {
-                        Text("No deploy accounts")
+                        Text("No deploy projects")
                             .foregroundStyle(.secondary)
                     } else {
                         ForEach(deployProfiles) { profile in
@@ -159,7 +159,7 @@ struct CloudSettingsView: View {
                 .disabled(isRefreshingGCloudContext)
             }
 
-            Text("Deploy accounts are shared in .aib/deploy-profiles.yaml and apply target project and region before deploy.")
+            Text("Deploy projects are shared in .aib/deploy-profiles.yaml and apply target project and region before deploy.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
