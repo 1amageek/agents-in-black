@@ -97,17 +97,13 @@ struct EditorStatusIndicator: View {
     }
 }
 
-/// Compact deploy context switcher for the header toolbar.
-struct DeployContextToolbarMenu: View {
+/// Compact deploy environment switcher for the header toolbar.
+struct DeployEnvironmentToolbarMenu: View {
     @Bindable var model: AgentsInBlackAppModel
 
     var body: some View {
         Menu {
             environmentSection
-            Divider()
-            googleAccountSection
-            Divider()
-            serviceAccountSection
         } label: {
             HStack(spacing: 4) {
                 Image(systemName: "globe.asia.australia.fill")
@@ -115,7 +111,7 @@ struct DeployContextToolbarMenu: View {
                 Text(model.displayDeployEnvironmentName)
                     .font(.caption.weight(.semibold))
                     .lineLimit(1)
-                if model.isSwitchingDeployGCloudContext || model.isRefreshingGCloudContext {
+                if model.isSwitchingDeployEnvironment || model.isRefreshingGCloudContext {
                     ProgressView()
                         .controlSize(.mini)
                 }
@@ -148,6 +144,43 @@ struct DeployContextToolbarMenu: View {
                 }
             }
         }
+    }
+
+    private var helpText: String {
+        let environment = model.displayDeployEnvironmentName
+        let project = model.displayDeployGCloudProject ?? "No project"
+        return "Deploy environment: \(environment), \(project)"
+    }
+}
+
+/// Compact Google account and Cloud Run service account switcher for the header toolbar.
+struct DeployAccountToolbarMenu: View {
+    @Bindable var model: AgentsInBlackAppModel
+
+    var body: some View {
+        Menu {
+            googleAccountSection
+            Divider()
+            serviceAccountSection
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "person.crop.circle.fill")
+                    .font(.system(size: 13))
+                Text(accountLabel)
+                    .font(.caption.weight(.semibold))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .frame(maxWidth: 150, alignment: .leading)
+                if model.isSigningInGCloudAccount || model.isSwitchingGCloudAccount || model.isSwitchingGCloudServiceAccount {
+                    ProgressView()
+                        .controlSize(.mini)
+                }
+            }
+            .fixedSize()
+        }
+        .menuStyle(.borderlessButton)
+        .disabled(model.workspace == nil || model.detectedProvider?.providerID != "gcp-cloudrun")
+        .help(helpText)
     }
 
     @ViewBuilder
@@ -219,12 +252,17 @@ struct DeployContextToolbarMenu: View {
         }
     }
 
+    private var accountLabel: String {
+        guard let account = model.activeGCloudAccount, !account.isEmpty else {
+            return "No Account"
+        }
+        return account
+    }
+
     private var helpText: String {
-        let environment = model.displayDeployEnvironmentName
         let account = model.activeGCloudAccount ?? "No Google account"
-        let project = model.displayDeployGCloudProject ?? "No project"
         let serviceAccount = model.displayDeployGCloudServiceAccount ?? "Environment default service account"
-        return "Deploy context: \(environment), \(project), \(account), \(serviceAccount)"
+        return "Deploy account: \(account), \(serviceAccount)"
     }
 
     private func serviceAccountTitle(_ serviceAccount: GCloudServiceAccount) -> String {
