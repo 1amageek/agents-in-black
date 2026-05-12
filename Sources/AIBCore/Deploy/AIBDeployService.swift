@@ -229,6 +229,61 @@ public enum AIBDeployService {
         return nil
     }
 
+    /// List all deploy environment files shared in `.aib/environments`.
+    ///
+    /// Empty overlay files are valid named environments. They are still returned
+    /// so the app can expose every shared environment in its Switch menu.
+    public static func listEnvironmentOptions(
+        workspaceRoot: String,
+        providerID: String
+    ) throws -> [AIBDeployEnvironmentOption] {
+        let environmentRoot = URL(fileURLWithPath: workspaceRoot)
+            .appendingPathComponent(".aib/environments", isDirectory: true)
+
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(
+            atPath: environmentRoot.path,
+            isDirectory: &isDirectory
+        ), isDirectory.boolValue else {
+            return []
+        }
+
+        let environmentFiles = try FileManager.default.contentsOfDirectory(
+            at: environmentRoot,
+            includingPropertiesForKeys: nil
+        )
+            .filter { ["yaml", "yml"].contains($0.pathExtension.lowercased()) }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+
+        var options: [AIBDeployEnvironmentOption] = []
+        for file in environmentFiles {
+            let name = file.deletingPathExtension().lastPathComponent
+            guard let environment = try AIBEnvironmentLoader.load(
+                workspaceRoot: workspaceRoot,
+                name: name
+            ) else {
+                continue
+            }
+
+            let targetConfig = try loadTargetConfig(
+                workspaceRoot: workspaceRoot,
+                providerID: providerID,
+                environmentName: name
+            )
+
+            options.append(AIBDeployEnvironmentOption(
+                name: environment.name,
+                targetProject: environment.targetOverrides["gcpProject"]
+                    ?? targetConfig.providerConfig["gcpProject"],
+                region: environment.targetOverrides["region"] ?? targetConfig.region,
+                serviceAccount: environment.targetOverrides["serviceAccount"]
+                    ?? targetConfig.providerConfig["serviceAccount"]
+            ))
+        }
+
+        return options
+    }
+
     private static func normalizedEnvironmentValue(_ value: String?) -> String? {
         guard let value else { return nil }
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)

@@ -3,25 +3,6 @@ import AIBRuntimeCore
 import AIBWorkspace
 import SwiftUI
 
-private struct DeployEnvironmentOption: Identifiable, Hashable {
-    let name: String
-    let targetProject: String?
-    let region: String?
-
-    var id: String { name }
-
-    var displayTitle: String {
-        if let targetProject, !targetProject.isEmpty {
-            return "\(name) (\(targetProject))"
-        }
-        return name
-    }
-
-    var menuTitle: String {
-        displayTitle
-    }
-}
-
 /// Target configuration panel.
 /// Accessible from the menu bar (Target > Target Settings...).
 /// Validates gcloud environment using the same preflight checkers as the deploy pipeline,
@@ -53,7 +34,7 @@ struct CloudSettingsView: View {
     @State private var isSwitchingGCloudProject: Bool = false
     @State private var isSwitchingGCloudRegion: Bool = false
     @State private var gcloudContextErrorMessage: String?
-    @State private var deployEnvironmentOptions: [DeployEnvironmentOption] = []
+    @State private var deployEnvironmentOptions: [AIBDeployEnvironmentOption] = []
     @State private var selectedDeployEnvironmentName: String = ""
     @State private var isSwitchingDeployEnvironment: Bool = false
 
@@ -248,7 +229,7 @@ struct CloudSettingsView: View {
         }
     }
 
-    private var selectedDeployEnvironmentOption: DeployEnvironmentOption? {
+    private var selectedDeployEnvironmentOption: AIBDeployEnvironmentOption? {
         deployEnvironmentOptions.first { $0.name == selectedDeployEnvironmentName }
     }
 
@@ -1037,51 +1018,11 @@ struct CloudSettingsView: View {
             return
         }
 
-        let environmentsRoot = URL(fileURLWithPath: workspaceRootPath)
-            .appendingPathComponent(".aib/environments", isDirectory: true)
-
-        var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: environmentsRoot.path, isDirectory: &isDirectory),
-              isDirectory.boolValue
-        else {
-            deployEnvironmentOptions = []
-            selectedDeployEnvironmentName = ""
-            return
-        }
-
         do {
-            let files = try FileManager.default.contentsOfDirectory(
-                at: environmentsRoot,
-                includingPropertiesForKeys: nil
+            let options = try AIBDeployService.listEnvironmentOptions(
+                workspaceRoot: workspaceRootPath,
+                providerID: providerID
             )
-                .filter { ["yaml", "yml"].contains($0.pathExtension.lowercased()) }
-                .sorted { $0.lastPathComponent < $1.lastPathComponent }
-
-            var options: [DeployEnvironmentOption] = []
-            for file in files {
-                let name = file.deletingPathExtension().lastPathComponent
-                guard let environment = try AIBEnvironmentLoader.load(
-                    workspaceRoot: workspaceRootPath,
-                    name: name
-                ), !environment.targetOverrides.isEmpty || !environment.serviceOverrides.isEmpty
-                else {
-                    continue
-                }
-
-                let targetConfig = try AIBDeployService.loadTargetConfig(
-                    workspaceRoot: workspaceRootPath,
-                    providerID: providerID,
-                    environmentName: name
-                )
-                let targetProject = environment.targetOverrides["gcpProject"]
-                    ?? targetConfig.providerConfig["gcpProject"]
-                let targetRegion = environment.targetOverrides["region"] ?? targetConfig.region
-                options.append(DeployEnvironmentOption(
-                    name: name,
-                    targetProject: targetProject,
-                    region: targetRegion
-                ))
-            }
             deployEnvironmentOptions = options
 
             if let currentConfig {
@@ -1465,7 +1406,7 @@ struct CloudSettingsView: View {
     }
 
     @MainActor
-    private func switchDeployEnvironment(to option: DeployEnvironmentOption) async {
+    private func switchDeployEnvironment(to option: AIBDeployEnvironmentOption) async {
         guard selectedDeployEnvironmentName != option.name else { return }
         isSwitchingDeployEnvironment = true
         errorMessage = nil

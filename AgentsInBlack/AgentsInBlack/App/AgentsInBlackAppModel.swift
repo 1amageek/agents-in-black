@@ -18,17 +18,14 @@ struct ServiceRemovalTarget {
     let displayName: String
 }
 
-struct AIBDeployEnvironmentMenuOption: Identifiable, Hashable {
-    let name: String
-    let targetProject: String?
-    let region: String?
-    let serviceAccount: String?
-
-    var id: String { name }
-
+extension AIBDeployEnvironmentOption {
     var displayTitle: String {
         guard let targetProject, !targetProject.isEmpty else { return name }
         return "\(name) (\(targetProject))"
+    }
+
+    var menuTitle: String {
+        displayTitle
     }
 }
 
@@ -133,7 +130,7 @@ final class AgentsInBlackAppModel {
     var gcloudAccounts: [GCloudAccount] = []
     var gcloudProjects: [GCloudProject] = []
     var gcloudServiceAccounts: [GCloudServiceAccount] = []
-    var deployEnvironmentOptions: [AIBDeployEnvironmentMenuOption] = []
+    var deployEnvironmentOptions: [AIBDeployEnvironmentOption] = []
     var selectedDeployEnvironmentName: String = ""
     var activeGCloudAccount: String?
     var activeGCloudProject: String?
@@ -2598,51 +2595,11 @@ final class AgentsInBlackAppModel {
             return
         }
 
-        let environmentsRoot = URL(fileURLWithPath: workspaceRoot)
-            .appendingPathComponent(".aib/environments", isDirectory: true)
-        var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: environmentsRoot.path, isDirectory: &isDirectory),
-              isDirectory.boolValue
-        else {
-            deployEnvironmentOptions = []
-            selectedDeployEnvironmentName = ""
-            return
-        }
-
         do {
-            let files = try FileManager.default.contentsOfDirectory(
-                at: environmentsRoot,
-                includingPropertiesForKeys: nil
+            let options = try AIBDeployService.listEnvironmentOptions(
+                workspaceRoot: workspaceRoot,
+                providerID: providerID
             )
-                .filter { ["yaml", "yml"].contains($0.pathExtension.lowercased()) }
-                .sorted { $0.lastPathComponent < $1.lastPathComponent }
-
-            var options: [AIBDeployEnvironmentMenuOption] = []
-            for file in files {
-                let name = file.deletingPathExtension().lastPathComponent
-                guard let environment = try AIBEnvironmentLoader.load(
-                    workspaceRoot: workspaceRoot,
-                    name: name
-                ), !environment.targetOverrides.isEmpty || !environment.serviceOverrides.isEmpty
-                else {
-                    continue
-                }
-
-                let targetConfig = try AIBDeployService.loadTargetConfig(
-                    workspaceRoot: workspaceRoot,
-                    providerID: providerID,
-                    environmentName: name
-                )
-                options.append(AIBDeployEnvironmentMenuOption(
-                    name: name,
-                    targetProject: environment.targetOverrides["gcpProject"]
-                        ?? targetConfig.providerConfig["gcpProject"],
-                    region: environment.targetOverrides["region"] ?? targetConfig.region,
-                    serviceAccount: environment.targetOverrides["serviceAccount"]
-                        ?? targetConfig.providerConfig["serviceAccount"]
-                ))
-            }
-
             deployEnvironmentOptions = options
             if !selectedDeployEnvironmentName.isEmpty,
                options.contains(where: { $0.name == selectedDeployEnvironmentName })
