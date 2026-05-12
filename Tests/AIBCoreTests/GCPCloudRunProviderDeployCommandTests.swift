@@ -84,6 +84,24 @@ struct GCPCloudRunProviderDeployCommandTests {
         #expect(secretsValue.contains("/var/secrets/aib/codex/auth.json=codex-auth-json:latest"))
     }
 
+    @Test("Configured runtime service account is passed to Cloud Run deploy")
+    func configuredRuntimeServiceAccountIsPassedToDeploy() {
+        let provider = GCPCloudRunProvider()
+        let plan = makePlan(envVars: [:])
+        let target = makeTarget(
+            providerConfig: [
+                "gcpProject": "salescore-ei-stg",
+                "serviceAccount": "agent@salescore-ei-stg.iam.gserviceaccount.com",
+            ]
+        )
+
+        let commands = provider.deployCommands(service: plan, imageTag: "img:latest", targetConfig: target)
+        let args = try! #require(commands.first).arguments
+        let serviceAccountIndex = try! #require(args.firstIndex(of: "--service-account"))
+
+        #expect(args[serviceAccountIndex + 1] == "agent@salescore-ei-stg.iam.gserviceaccount.com")
+    }
+
     // MARK: - Helpers
 
     private func makePlan(
@@ -107,11 +125,13 @@ struct GCPCloudRunProviderDeployCommandTests {
         )
     }
 
-    private func makeTarget() -> AIBDeployTargetConfig {
+    private func makeTarget(
+        providerConfig: [String: String] = ["gcpProject": "vi-dev"]
+    ) -> AIBDeployTargetConfig {
         AIBDeployTargetConfig(
             providerID: "gcp-cloudrun",
             region: "asia-northeast1",
-            providerConfig: ["gcpProject": "vi-dev"]
+            providerConfig: providerConfig
         )
     }
 }

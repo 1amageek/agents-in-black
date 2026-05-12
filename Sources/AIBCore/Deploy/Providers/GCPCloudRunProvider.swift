@@ -493,6 +493,10 @@ public struct GCPCloudRunProvider: DeploymentProvider, Sendable {
             args.append("--no-allow-unauthenticated")
         }
 
+        if let serviceAccount = normalizedServiceAccount(from: targetConfig) {
+            args.append(contentsOf: ["--service-account", serviceAccount])
+        }
+
         // Merge regular env vars + user-provided secret values and apply with
         // --set-env-vars so the Cloud Run env is replaced authoritatively.
         // --update-env-vars only merges, which would leave previously-set keys
@@ -1175,6 +1179,9 @@ public struct GCPCloudRunProvider: DeploymentProvider, Sendable {
         sourceServiceName: String,
         targetConfig: AIBDeployTargetConfig
     ) -> String {
+        if let serviceAccount = normalizedServiceAccount(from: targetConfig) {
+            return "serviceAccount:\(serviceAccount)"
+        }
         let gcpProject = requiredGCPProject(from: targetConfig)
         return "serviceAccount:\(sourceServiceName)@\(gcpProject).iam.gserviceaccount.com"
     }
@@ -1191,6 +1198,12 @@ public struct GCPCloudRunProvider: DeploymentProvider, Sendable {
             )
         }
         return project
+    }
+
+    private func normalizedServiceAccount(from targetConfig: AIBDeployTargetConfig) -> String? {
+        guard let value = targetConfig.providerConfig["serviceAccount"] else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     private func shellQuote(_ value: String) -> String {

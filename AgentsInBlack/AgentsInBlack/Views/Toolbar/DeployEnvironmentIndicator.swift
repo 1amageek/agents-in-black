@@ -97,6 +97,144 @@ struct EditorStatusIndicator: View {
     }
 }
 
+/// Compact deploy context switcher for the header toolbar.
+struct DeployContextToolbarMenu: View {
+    @Bindable var model: AgentsInBlackAppModel
+
+    var body: some View {
+        Menu {
+            environmentSection
+            Divider()
+            googleAccountSection
+            Divider()
+            serviceAccountSection
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "globe.asia.australia.fill")
+                    .font(.system(size: 13))
+                Text(model.displayDeployEnvironmentName)
+                    .font(.caption.weight(.semibold))
+                    .lineLimit(1)
+                if model.isSwitchingDeployGCloudContext || model.isRefreshingGCloudContext {
+                    ProgressView()
+                        .controlSize(.mini)
+                }
+            }
+            .fixedSize()
+        }
+        .menuStyle(.borderlessButton)
+        .disabled(model.workspace == nil || model.detectedProvider?.providerID != "gcp-cloudrun")
+        .help(helpText)
+    }
+
+    @ViewBuilder
+    private var environmentSection: some View {
+        Section("Deploy Environment") {
+            if model.deployEnvironmentOptions.isEmpty {
+                Text("No environments")
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(model.deployEnvironmentOptions) { option in
+                    Button {
+                        Task { await model.switchDeployEnvironment(to: option.name) }
+                    } label: {
+                        if option.name == model.selectedDeployEnvironmentName {
+                            Label(option.displayTitle, systemImage: "checkmark")
+                        } else {
+                            Text(option.displayTitle)
+                        }
+                    }
+                    .disabled(model.isSwitchingDeployGCloudContext)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var googleAccountSection: some View {
+        Section("Google Account") {
+            Button {
+                Task { await model.signInGCloudAccount() }
+            } label: {
+                if model.isSigningInGCloudAccount {
+                    Label("Signing In...", systemImage: "hourglass")
+                } else {
+                    Label("Sign In", systemImage: "person.crop.circle.badge.plus")
+                }
+            }
+            .disabled(model.isSwitchingDeployGCloudContext)
+
+            if model.gcloudAccounts.isEmpty {
+                Text("No accounts")
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(model.gcloudAccounts) { account in
+                    Button {
+                        Task { await model.switchGCloudAccount(to: account.account) }
+                    } label: {
+                        if account.account == model.activeGCloudAccount {
+                            Label(account.account, systemImage: "checkmark")
+                        } else {
+                            Text(account.account)
+                        }
+                    }
+                    .disabled(model.isSwitchingDeployGCloudContext)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var serviceAccountSection: some View {
+        Section("Cloud Run Service Account") {
+            Button {
+                Task { await model.switchGCloudServiceAccount(to: nil) }
+            } label: {
+                if model.displayDeployGCloudServiceAccount == nil {
+                    Label("Use Environment Default", systemImage: "checkmark")
+                } else {
+                    Text("Use Environment Default")
+                }
+            }
+            .disabled(model.isSwitchingDeployGCloudContext)
+
+            if model.gcloudServiceAccounts.isEmpty {
+                Text("No service accounts")
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(model.gcloudServiceAccounts) { serviceAccount in
+                    Button {
+                        Task { await model.switchGCloudServiceAccount(to: serviceAccount.email) }
+                    } label: {
+                        let title = serviceAccountTitle(serviceAccount)
+                        if serviceAccount.email == model.displayDeployGCloudServiceAccount {
+                            Label(title, systemImage: "checkmark")
+                        } else {
+                            Text(title)
+                        }
+                    }
+                    .disabled(model.isSwitchingDeployGCloudContext)
+                }
+            }
+        }
+    }
+
+    private var helpText: String {
+        let environment = model.displayDeployEnvironmentName
+        let account = model.activeGCloudAccount ?? "No Google account"
+        let project = model.displayDeployGCloudProject ?? "No project"
+        let serviceAccount = model.displayDeployGCloudServiceAccount ?? "Environment default service account"
+        return "Deploy context: \(environment), \(project), \(account), \(serviceAccount)"
+    }
+
+    private func serviceAccountTitle(_ serviceAccount: GCloudServiceAccount) -> String {
+        guard let displayName = serviceAccount.displayName, !displayName.isEmpty else {
+            return serviceAccount.email
+        }
+        return "\(displayName) (\(serviceAccount.email))"
+    }
+}
+
 /// Target settings status indicator for the toolbar.
 /// Clicking opens Target Settings.
 struct CloudProviderStatusIndicator: View {

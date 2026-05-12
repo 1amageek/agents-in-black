@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "asc-mcp": {
+      "type": "stdio",
+      "command": "/Users/1amageek/.mint/bin/asc-mcp",
+      "args": [
+        "--workers",
+        "provisioning,apps,subscriptions,iap",
+        "--companies",
+        ".asc-companies.json"
+      ]
+    }
+  }
+}

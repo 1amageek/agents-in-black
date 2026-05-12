@@ -37,6 +37,7 @@ struct ToolbarActivityView: View {
 
                     EditorStatusIndicator(model: model)
                     BuildBackendStatusIndicator(model: model)
+                    DeployContextToolbarMenu(model: model)
                     CloudProviderStatusIndicator(
                         result: model.cloudProviderCheckResult,
                         provider: model.detectedProvider,

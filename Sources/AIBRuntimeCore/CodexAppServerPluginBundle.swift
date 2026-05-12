@@ -17,6 +17,8 @@ public enum CodexAppServerPluginBundle {
     public static let mcpConfigFileName = ".mcp.json"
     public static let codexConfigFileName = ".codex.json"
     public static let usageFileName = "USE_WITH_CODEX.md"
+    public static let skillsDirectoryName = "skills"
+    public static let closedSkillDiscoveryMode = "closed-plugin"
 
     public struct Template: Codable, Sendable, Equatable {
         public var serviceID: String
@@ -104,6 +106,13 @@ public enum CodexAppServerPluginBundle {
             .path
     }
 
+    public static func skillsDirectoryPath(pluginRootPath: String) -> String {
+        URL(fileURLWithPath: pluginRootPath)
+            .appendingPathComponent(skillsDirectoryName, isDirectory: true)
+            .standardizedFileURL
+            .path
+    }
+
     public static func manifestPath(pluginRootPath: String) -> String {
         URL(fileURLWithPath: pluginRootPath)
             .appendingPathComponent(manifestRelativePath)
@@ -126,7 +135,8 @@ public enum CodexAppServerPluginBundle {
         Codex artifact root:
         `\(pluginRootPath)`
 
-        AIB reads `.mcp.json` from this directory and passes the MCP servers to Codex App Server.
+        AIB exposes this directory as a local Codex plugin. The plugin manifest points Codex App Server
+        at `./skills/` and `./.mcp.json`, keeping skills and MCP servers in the same plugin boundary.
 
         Manual app-server smoke test:
         ```bash
@@ -163,7 +173,9 @@ public enum CodexAppServerPluginBundle {
         let plugin = PluginManifest(
             name: manifestPluginName(serviceID: template.serviceID),
             version: "0.1.0",
-            description: "AIB-generated Codex App Server plugin for \(template.serviceID)"
+            description: "AIB-generated Codex App Server plugin for \(template.serviceID)",
+            skills: "./\(skillsDirectoryName)/",
+            mcpServers: "./\(mcpConfigFileName)"
         )
         let mcpConfig = MCPProjectConfig(mcpServers: mcpServers)
         let encoder = JSONEncoder()
@@ -185,6 +197,8 @@ private struct PluginManifest: Codable, Sendable, Equatable {
     var name: String
     var version: String
     var description: String?
+    var skills: String?
+    var mcpServers: String?
 }
 
 private struct MCPProjectConfig: Codable, Sendable, Equatable {

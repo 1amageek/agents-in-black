@@ -210,16 +210,14 @@ struct AIBDevMain {
                 Foundation.exit(Int32(ExitCode.deployError))
             }
 
-            var targetConfig = try AIBDeployService.loadTargetConfig(
+            let resolvedTarget = try resolveDeployTargetConfig(
                 workspaceRoot: cwd,
-                providerID: provider.providerID,
-                environmentName: environmentName
+                provider: provider,
+                environmentName: environmentName,
+                preflightReport: report
             )
-            // Enrich config with auto-detected values from preflight
-            let detectedValues = provider.extractDetectedConfig(from: report)
-            for (key, value) in detectedValues where targetConfig.providerConfig[key] == nil {
-                targetConfig.providerConfig[key] = value
-            }
+            let targetConfig = resolvedTarget.targetConfig
+            let effectiveEnvironmentName = resolvedTarget.environmentName
             try provider.validateTargetConfig(targetConfig)
 
             let plan = try await AIBDeployService.generatePlan(
@@ -227,14 +225,14 @@ struct AIBDevMain {
                 targetConfig: targetConfig,
                 provider: provider,
                 selection: selection,
-                environmentName: environmentName
+                environmentName: effectiveEnvironmentName
             )
             try AIBDeployService.writeArtifacts(plan: plan, workspaceRoot: cwd)
 
             print("Deploy Plan: \(plan.workspaceName)")
             print("  Provider: \(provider.displayName)")
-            if let environmentName {
-                print("  Environment: \(environmentName)")
+            if let effectiveEnvironmentName {
+                print("  Environment: \(effectiveEnvironmentName)")
             }
             print("  Region: \(targetConfig.region)")
             if let selection, !selection.isEmpty {
@@ -262,16 +260,14 @@ struct AIBDevMain {
                 Foundation.exit(Int32(ExitCode.deployError))
             }
 
-            var targetConfig = try AIBDeployService.loadTargetConfig(
+            let resolvedTarget = try resolveDeployTargetConfig(
                 workspaceRoot: cwd,
-                providerID: provider.providerID,
-                environmentName: environmentName
+                provider: provider,
+                environmentName: environmentName,
+                preflightReport: report
             )
-            // Enrich config with auto-detected values from preflight
-            let detectedApplyValues = provider.extractDetectedConfig(from: report)
-            for (key, value) in detectedApplyValues where targetConfig.providerConfig[key] == nil {
-                targetConfig.providerConfig[key] = value
-            }
+            let targetConfig = resolvedTarget.targetConfig
+            let effectiveEnvironmentName = resolvedTarget.environmentName
             try provider.validateTargetConfig(targetConfig)
 
             let plan = try await AIBDeployService.generatePlan(
@@ -279,12 +275,12 @@ struct AIBDevMain {
                 targetConfig: targetConfig,
                 provider: provider,
                 selection: selection,
-                environmentName: environmentName
+                environmentName: effectiveEnvironmentName
             )
             try AIBDeployService.writeArtifacts(plan: plan, workspaceRoot: cwd)
 
-            if let environmentName {
-                print("Deploy environment: \(environmentName)")
+            if let effectiveEnvironmentName {
+                print("Deploy environment: \(effectiveEnvironmentName)")
             }
             if let selection, !selection.isEmpty {
                 print("Deploy selection: \(selection.displayDescription)")
@@ -323,6 +319,45 @@ struct AIBDevMain {
         default:
             throw ConfigError("Unknown deploy subcommand. Use: preflight, plan, apply", metadata: ["subcommand": subcommand])
         }
+    }
+
+    private static func resolveDeployTargetConfig(
+        workspaceRoot: String,
+        provider: any DeploymentProvider,
+        environmentName: String?,
+        preflightReport: PreflightReport
+    ) throws -> (targetConfig: AIBDeployTargetConfig, environmentName: String?) {
+        var targetConfig = try AIBDeployService.loadTargetConfig(
+            workspaceRoot: workspaceRoot,
+            providerID: provider.providerID,
+            environmentName: environmentName
+        )
+
+        let detectedValues = provider.extractDetectedConfig(from: preflightReport)
+        for (key, value) in detectedValues where targetConfig.providerConfig[key] == nil {
+            targetConfig.providerConfig[key] = value
+        }
+
+        guard environmentName == nil else {
+            return (targetConfig, environmentName)
+        }
+
+        guard let inferredEnvironmentName = try AIBDeployService.inferEnvironmentName(
+            workspaceRoot: workspaceRoot,
+            targetConfig: targetConfig
+        ) else {
+            return (targetConfig, nil)
+        }
+
+        var environmentTargetConfig = try AIBDeployService.loadTargetConfig(
+            workspaceRoot: workspaceRoot,
+            providerID: provider.providerID,
+            environmentName: inferredEnvironmentName
+        )
+        for (key, value) in detectedValues where environmentTargetConfig.providerConfig[key] == nil {
+            environmentTargetConfig.providerConfig[key] = value
+        }
+        return (environmentTargetConfig, inferredEnvironmentName)
     }
 
     /// Extract `--env <name>` (or `--env=<name>`) from a deploy argument list.

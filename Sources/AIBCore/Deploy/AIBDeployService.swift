@@ -181,6 +181,60 @@ public enum AIBDeployService {
         )
     }
 
+    /// Infer an environment overlay from the target provider configuration.
+    ///
+    /// The CLI can pass `--env` explicitly, but the app deploy flow primarily
+    /// exposes provider settings such as the selected GCP project. This helper
+    /// maps that selected project back to `.aib/environments/<name>.yaml` so
+    /// service-scoped overrides (for example `GCLOUD_PROJECT` and buckets) are
+    /// applied consistently from the UI as well.
+    public static func inferEnvironmentName(
+        workspaceRoot: String,
+        targetConfig: AIBDeployTargetConfig
+    ) throws -> String? {
+        let environmentRoot = URL(fileURLWithPath: workspaceRoot)
+            .appendingPathComponent(".aib/environments", isDirectory: true)
+
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(
+            atPath: environmentRoot.path,
+            isDirectory: &isDirectory
+        ), isDirectory.boolValue else {
+            return nil
+        }
+
+        let targetProject = normalizedEnvironmentValue(targetConfig.providerConfig["gcpProject"])
+        guard let targetProject else { return nil }
+
+        let environmentFiles = try FileManager.default.contentsOfDirectory(
+            at: environmentRoot,
+            includingPropertiesForKeys: nil
+        )
+            .filter { ["yaml", "yml"].contains($0.pathExtension.lowercased()) }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+
+        for file in environmentFiles {
+            let name = file.deletingPathExtension().lastPathComponent
+            guard let environment = try AIBEnvironmentLoader.load(
+                workspaceRoot: workspaceRoot,
+                name: name
+            ) else {
+                continue
+            }
+            if normalizedEnvironmentValue(environment.targetOverrides["gcpProject"]) == targetProject {
+                return name
+            }
+        }
+
+        return nil
+    }
+
+    private static func normalizedEnvironmentValue(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
     /// Parse a YAML mapping into AIBDeployResourceConfig, using kind defaults as baseline.
     private static func parseResourceConfig(
         from mapping: Node.Mapping,
@@ -706,6 +760,10 @@ public enum AIBDeployService {
                 // Surface the staged Codex artifact path so the agent runtime can
                 // pass MCP and skill files to Codex App Server.
                 envVars["AIB_PLUGIN_DIR"] = pluginRuntimePath
+                envVars["AIB_PLUGIN_SKILLS_DIR"] = CodexAppServerPluginBundle.skillsDirectoryPath(
+                    pluginRootPath: pluginRuntimePath
+                )
+                envVars["AIB_SKILL_DISCOVERY_MODE"] = CodexAppServerPluginBundle.closedSkillDiscoveryMode
                 // Agent services run as unattended backend workers. AIB owns that runtime
                 // contract, so deploys must bypass Codex permission prompts instead
                 // of hanging on approvals that cannot be answered in Cloud Run.

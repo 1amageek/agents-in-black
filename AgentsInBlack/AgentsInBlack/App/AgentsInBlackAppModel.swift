@@ -18,6 +18,20 @@ struct ServiceRemovalTarget {
     let displayName: String
 }
 
+struct AIBDeployEnvironmentMenuOption: Identifiable, Hashable {
+    let name: String
+    let targetProject: String?
+    let region: String?
+    let serviceAccount: String?
+
+    var id: String { name }
+
+    var displayTitle: String {
+        guard let targetProject, !targetProject.isEmpty else { return name }
+        return "\(name) (\(targetProject))"
+    }
+}
+
 enum CreateServiceError: LocalizedError {
     case noWorkspace
     case directoryExists(String)
@@ -118,14 +132,20 @@ final class AgentsInBlackAppModel {
     private var environmentCheckTask: Task<Void, Never>?
     var gcloudAccounts: [GCloudAccount] = []
     var gcloudProjects: [GCloudProject] = []
+    var gcloudServiceAccounts: [GCloudServiceAccount] = []
+    var deployEnvironmentOptions: [AIBDeployEnvironmentMenuOption] = []
+    var selectedDeployEnvironmentName: String = ""
     var activeGCloudAccount: String?
     var activeGCloudProject: String?
     var configuredGCloudProject: String?
+    var configuredGCloudServiceAccount: String?
     var gcloudContextErrorMessage: String?
     var isRefreshingGCloudContext: Bool = false
     var isSigningInGCloudAccount: Bool = false
     var isSwitchingGCloudAccount: Bool = false
     var isSwitchingGCloudProject: Bool = false
+    var isSwitchingDeployEnvironment: Bool = false
+    var isSwitchingGCloudServiceAccount: Bool = false
     private var gcloudContextTask: Task<Void, Never>?
 
     // MARK: - Clone Repository
@@ -1955,11 +1975,23 @@ final class AgentsInBlackAppModel {
     }
 
     var isSwitchingDeployGCloudContext: Bool {
-        isSigningInGCloudAccount || isSwitchingGCloudAccount || isSwitchingGCloudProject
+        isSigningInGCloudAccount
+            || isSwitchingGCloudAccount
+            || isSwitchingGCloudProject
+            || isSwitchingDeployEnvironment
+            || isSwitchingGCloudServiceAccount
     }
 
     var displayDeployGCloudProject: String? {
         configuredGCloudProject ?? activeGCloudProject
+    }
+
+    var displayDeployEnvironmentName: String {
+        selectedDeployEnvironmentName.isEmpty ? "Custom" : selectedDeployEnvironmentName
+    }
+
+    var displayDeployGCloudServiceAccount: String? {
+        configuredGCloudServiceAccount
     }
 
     /// Run prerequisite tool-installation checks for the build backend and cloud provider.
@@ -2058,11 +2090,23 @@ final class AgentsInBlackAppModel {
                     workspaceRoot: workspace.rootURL.path,
                     providerID: provider.providerID
                 )
+                let environmentName = try resolvedDeployEnvironmentName(
+                    workspaceRoot: workspace.rootURL.path,
+                    providerID: provider.providerID,
+                    targetConfig: targetConfig
+                )
+                var effectiveTargetConfig = try AIBDeployService.loadTargetConfig(
+                    workspaceRoot: workspace.rootURL.path,
+                    providerID: provider.providerID,
+                    environmentName: environmentName
+                )
+                applyToolbarServiceAccountOverride(to: &effectiveTargetConfig)
                 deployController.startPlan(
                     workspaceRoot: workspace.rootURL.path,
-                    targetConfig: targetConfig,
+                    targetConfig: effectiveTargetConfig,
                     provider: provider,
-                    selection: selection
+                    selection: selection,
+                    environmentName: environmentName
                 )
             } catch {
                 deployPhase = .failed(AIBDeployError(
@@ -2106,20 +2150,32 @@ final class AgentsInBlackAppModel {
                 workspaceRoot: workspace.rootURL.path,
                 providerID: provider.providerID
             )
-            try provider.validateTargetConfig(targetConfig)
-            print("[Deployments] context resolved provider=\(provider.providerID) region=\(targetConfig.region) project=\(targetConfig.providerConfig["gcpProject"] ?? "-")")
+            let environmentName = try resolvedDeployEnvironmentName(
+                workspaceRoot: workspace.rootURL.path,
+                providerID: provider.providerID,
+                targetConfig: targetConfig
+            )
+            var effectiveTargetConfig = try AIBDeployService.loadTargetConfig(
+                workspaceRoot: workspace.rootURL.path,
+                providerID: provider.providerID,
+                environmentName: environmentName
+            )
+            applyToolbarServiceAccountOverride(to: &effectiveTargetConfig)
+            try provider.validateTargetConfig(effectiveTargetConfig)
+            print("[Deployments] context resolved provider=\(provider.providerID) region=\(effectiveTargetConfig.region) project=\(effectiveTargetConfig.providerConfig["gcpProject"] ?? "-") environment=\(environmentName ?? "-")")
             let plan: AIBDeployPlan?
             do {
                 plan = try await AIBDeployService.generatePlan(
                     workspaceRoot: workspace.rootURL.path,
-                    targetConfig: targetConfig,
-                    provider: provider
+                    targetConfig: effectiveTargetConfig,
+                    provider: provider,
+                    environmentName: environmentName
                 )
             } catch {
                 print("[Deployments] generatePlan failed: \(error.localizedDescription) — proceeding without plan (every live service treated as orphan)")
                 plan = nil
             }
-            return (provider, targetConfig, plan)
+            return (provider, effectiveTargetConfig, plan)
         } catch {
             print("[Deployments] currentDeploymentsContext failed: \(error.localizedDescription)")
             return nil
@@ -2290,6 +2346,73 @@ final class AgentsInBlackAppModel {
         }
     }
 
+    func switchDeployEnvironment(to environmentName: String) async {
+        guard let workspace else { return }
+        guard canSwitchDeployGCloudContext else { return }
+        guard selectedDeployEnvironmentName != environmentName else { return }
+
+        isSwitchingDeployEnvironment = true
+        gcloudContextErrorMessage = nil
+        defer { isSwitchingDeployEnvironment = false }
+
+        do {
+            let targetConfig = try AIBDeployService.loadTargetConfig(
+                workspaceRoot: workspace.rootURL.path,
+                providerID: "gcp-cloudrun",
+                environmentName: environmentName
+            )
+            selectedDeployEnvironmentName = environmentName
+
+            if let project = normalizedProviderValue(targetConfig.providerConfig["gcpProject"]) {
+                configuredGCloudProject = project
+                if activeGCloudProject != project {
+                    try await gcloudContextService.switchProject(to: project)
+                }
+            }
+            configuredGCloudServiceAccount = normalizedProviderValue(
+                targetConfig.providerConfig["serviceAccount"]
+            )
+
+            await applyRefreshedGCloudContext(
+                workspaceRoot: workspace.rootURL.path,
+                providerID: "gcp-cloudrun"
+            )
+            restartDeployPipelineForContextChange()
+            refreshEnvironmentStatus()
+        } catch {
+            gcloudContextErrorMessage = "Failed to switch deploy environment: \(error.localizedDescription)"
+        }
+    }
+
+    func switchGCloudServiceAccount(to serviceAccount: String?) async {
+        guard let workspace else { return }
+        guard canSwitchDeployGCloudContext else { return }
+
+        let normalized = normalizedProviderValue(serviceAccount)
+        guard configuredGCloudServiceAccount != normalized else { return }
+
+        isSwitchingGCloudServiceAccount = true
+        gcloudContextErrorMessage = nil
+        defer { isSwitchingGCloudServiceAccount = false }
+
+        do {
+            try persistConfiguredGCloudServiceAccount(
+                normalized,
+                workspaceRoot: workspace.rootURL.path,
+                providerID: "gcp-cloudrun"
+            )
+            configuredGCloudServiceAccount = normalized
+            await applyRefreshedGCloudContext(
+                workspaceRoot: workspace.rootURL.path,
+                providerID: "gcp-cloudrun"
+            )
+            restartDeployPipelineForContextChange()
+            refreshEnvironmentStatus()
+        } catch {
+            gcloudContextErrorMessage = "Failed to switch Google Cloud service account: \(error.localizedDescription)"
+        }
+    }
+
     private func refreshGCloudDeployContext(
         workspaceRoot: String,
         providerID: String
@@ -2322,25 +2445,58 @@ final class AgentsInBlackAppModel {
                 workspaceRoot: workspaceRoot,
                 providerID: providerID
             )
+            let configuredServiceAccount = loadConfiguredGCloudServiceAccount(
+                workspaceRoot: workspaceRoot,
+                providerID: providerID
+            )
+            let selectedProject = configuredProject ?? context.activeProject
             gcloudAccounts = context.accounts
             gcloudProjects = context.projects
             activeGCloudAccount = context.activeAccount
             activeGCloudProject = context.activeProject
-            configuredGCloudProject = configuredProject ?? context.activeProject
+            configuredGCloudProject = selectedProject
+            configuredGCloudServiceAccount = configuredServiceAccount
+            refreshDeployEnvironmentOptions(
+                workspaceRoot: workspaceRoot,
+                providerID: providerID,
+                currentProject: selectedProject
+            )
             gcloudContextErrorMessage = contextWarningMessage(
-                for: configuredProject ?? context.activeProject,
+                for: selectedProject,
                 availableProjects: context.projects
             )
+            if let selectedProject {
+                do {
+                    gcloudServiceAccounts = try await gcloudContextService.fetchServiceAccounts(
+                        projectID: selectedProject
+                    )
+                } catch {
+                    gcloudServiceAccounts = []
+                    gcloudContextErrorMessage = error.localizedDescription
+                }
+            } else {
+                gcloudServiceAccounts = []
+            }
         } catch {
             guard !Task.isCancelled else { return }
             gcloudContextErrorMessage = error.localizedDescription
             gcloudAccounts = []
             gcloudProjects = []
+            gcloudServiceAccounts = []
             activeGCloudAccount = nil
             activeGCloudProject = nil
             configuredGCloudProject = loadConfiguredGCloudProject(
                 workspaceRoot: workspaceRoot,
                 providerID: providerID
+            )
+            configuredGCloudServiceAccount = loadConfiguredGCloudServiceAccount(
+                workspaceRoot: workspaceRoot,
+                providerID: providerID
+            )
+            refreshDeployEnvironmentOptions(
+                workspaceRoot: workspaceRoot,
+                providerID: providerID,
+                currentProject: configuredGCloudProject
             )
         }
         isRefreshingGCloudContext = false
@@ -2351,14 +2507,20 @@ final class AgentsInBlackAppModel {
         gcloudContextTask = nil
         gcloudAccounts = []
         gcloudProjects = []
+        gcloudServiceAccounts = []
+        deployEnvironmentOptions = []
+        selectedDeployEnvironmentName = ""
         activeGCloudAccount = nil
         activeGCloudProject = nil
         configuredGCloudProject = nil
+        configuredGCloudServiceAccount = nil
         gcloudContextErrorMessage = nil
         isRefreshingGCloudContext = false
         isSigningInGCloudAccount = false
         isSwitchingGCloudAccount = false
         isSwitchingGCloudProject = false
+        isSwitchingDeployEnvironment = false
+        isSwitchingGCloudServiceAccount = false
     }
 
     private func loadConfiguredGCloudProject(
@@ -2380,6 +2542,21 @@ final class AgentsInBlackAppModel {
         }
     }
 
+    private func loadConfiguredGCloudServiceAccount(
+        workspaceRoot: String,
+        providerID: String
+    ) -> String? {
+        do {
+            let config = try configStore.load(
+                workspaceRoot: workspaceRoot,
+                providerID: providerID
+            )
+            return normalizedProviderValue(config.providerConfig["serviceAccount"])
+        } catch {
+            return nil
+        }
+    }
+
     private func persistConfiguredGCloudProject(
         _ projectID: String,
         workspaceRoot: String,
@@ -2391,6 +2568,131 @@ final class AgentsInBlackAppModel {
         )
         config.providerConfig["gcpProject"] = projectID
         try configStore.save(workspaceRoot: workspaceRoot, config: config)
+    }
+
+    private func persistConfiguredGCloudServiceAccount(
+        _ serviceAccount: String?,
+        workspaceRoot: String,
+        providerID: String
+    ) throws {
+        var config = try configStore.load(
+            workspaceRoot: workspaceRoot,
+            providerID: providerID
+        )
+        if let serviceAccount {
+            config.providerConfig["serviceAccount"] = serviceAccount
+        } else {
+            config.providerConfig.removeValue(forKey: "serviceAccount")
+        }
+        try configStore.save(workspaceRoot: workspaceRoot, config: config)
+    }
+
+    private func refreshDeployEnvironmentOptions(
+        workspaceRoot: String,
+        providerID: String,
+        currentProject: String?
+    ) {
+        guard providerID == "gcp-cloudrun" else {
+            deployEnvironmentOptions = []
+            selectedDeployEnvironmentName = ""
+            return
+        }
+
+        let environmentsRoot = URL(fileURLWithPath: workspaceRoot)
+            .appendingPathComponent(".aib/environments", isDirectory: true)
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: environmentsRoot.path, isDirectory: &isDirectory),
+              isDirectory.boolValue
+        else {
+            deployEnvironmentOptions = []
+            selectedDeployEnvironmentName = ""
+            return
+        }
+
+        do {
+            let files = try FileManager.default.contentsOfDirectory(
+                at: environmentsRoot,
+                includingPropertiesForKeys: nil
+            )
+                .filter { ["yaml", "yml"].contains($0.pathExtension.lowercased()) }
+                .sorted { $0.lastPathComponent < $1.lastPathComponent }
+
+            var options: [AIBDeployEnvironmentMenuOption] = []
+            for file in files {
+                let name = file.deletingPathExtension().lastPathComponent
+                guard let environment = try AIBEnvironmentLoader.load(
+                    workspaceRoot: workspaceRoot,
+                    name: name
+                ), !environment.targetOverrides.isEmpty || !environment.serviceOverrides.isEmpty
+                else {
+                    continue
+                }
+
+                let targetConfig = try AIBDeployService.loadTargetConfig(
+                    workspaceRoot: workspaceRoot,
+                    providerID: providerID,
+                    environmentName: name
+                )
+                options.append(AIBDeployEnvironmentMenuOption(
+                    name: name,
+                    targetProject: environment.targetOverrides["gcpProject"]
+                        ?? targetConfig.providerConfig["gcpProject"],
+                    region: environment.targetOverrides["region"] ?? targetConfig.region,
+                    serviceAccount: environment.targetOverrides["serviceAccount"]
+                        ?? targetConfig.providerConfig["serviceAccount"]
+                ))
+            }
+
+            deployEnvironmentOptions = options
+            if !selectedDeployEnvironmentName.isEmpty,
+               options.contains(where: { $0.name == selectedDeployEnvironmentName })
+            {
+                return
+            }
+
+            if let currentProject {
+                selectedDeployEnvironmentName = options.first {
+                    $0.targetProject == currentProject
+                }?.name ?? ""
+            } else {
+                selectedDeployEnvironmentName = ""
+            }
+        } catch {
+            deployEnvironmentOptions = []
+            selectedDeployEnvironmentName = ""
+        }
+    }
+
+    private func resolvedDeployEnvironmentName(
+        workspaceRoot: String,
+        providerID: String,
+        targetConfig: AIBDeployTargetConfig
+    ) throws -> String? {
+        if providerID == "gcp-cloudrun",
+           !selectedDeployEnvironmentName.isEmpty,
+           deployEnvironmentOptions.contains(where: { $0.name == selectedDeployEnvironmentName })
+        {
+            return selectedDeployEnvironmentName
+        }
+        return try AIBDeployService.inferEnvironmentName(
+            workspaceRoot: workspaceRoot,
+            targetConfig: targetConfig
+        )
+    }
+
+    private func applyToolbarServiceAccountOverride(to targetConfig: inout AIBDeployTargetConfig) {
+        guard targetConfig.providerID == "gcp-cloudrun",
+              let serviceAccount = configuredGCloudServiceAccount
+        else {
+            return
+        }
+        targetConfig.providerConfig["serviceAccount"] = serviceAccount
+    }
+
+    private func normalizedProviderValue(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     private func contextWarningMessage(

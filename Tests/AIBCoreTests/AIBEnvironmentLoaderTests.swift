@@ -70,6 +70,36 @@ struct AIBEnvironmentLoaderTests {
         #expect(absent.isEmpty)
     }
 
+    @Test("Infers environment name from target GCP project")
+    func infersEnvironmentNameFromTargetProject() throws {
+        let workspaceRoot = try makeTempWorkspace()
+        defer { try? FileManager.default.removeItem(atPath: workspaceRoot) }
+
+        try writeEnvironment(workspaceRoot: workspaceRoot, name: "staging", yaml: """
+        version: 1
+        name: staging
+        target:
+          gcpProject: salescore-ei-stg
+        services:
+          proposal-mcp/main:
+            env:
+              GCLOUD_PROJECT: salescore-ei-stg
+        """)
+
+        let targetConfig = AIBDeployTargetConfig(
+            providerID: "gcp-cloudrun",
+            region: "asia-northeast1",
+            providerConfig: ["gcpProject": "salescore-ei-stg"]
+        )
+
+        let inferred = try AIBDeployService.inferEnvironmentName(
+            workspaceRoot: workspaceRoot,
+            targetConfig: targetConfig
+        )
+
+        #expect(inferred == "staging")
+    }
+
     @Test("Missing secret name surfaces as a structural error")
     func secretWithoutNameThrows() throws {
         let workspaceRoot = try makeTempWorkspace()

@@ -36,6 +36,18 @@ public struct GCloudRegion: Sendable, Hashable, Identifiable {
     }
 }
 
+public struct GCloudServiceAccount: Sendable, Hashable, Identifiable {
+    public let email: String
+    public let displayName: String?
+
+    public var id: String { email }
+
+    public init(email: String, displayName: String?) {
+        self.email = email
+        self.displayName = displayName
+    }
+}
+
 public struct GCloudContextSnapshot: Sendable, Equatable {
     public let activeAccount: String?
     public let accounts: [GCloudAccount]
@@ -156,6 +168,22 @@ public struct GCloudContextService: Sendable {
         return try Self.parseRegions(from: data)
     }
 
+    public func fetchServiceAccounts(projectID: String) async throws -> [GCloudServiceAccount] {
+        let projectArg = Self.shellQuote(projectID)
+        let command = "gcloud iam service-accounts list --project=\(projectArg) --format='json(email,displayName)' --quiet 2>/dev/null"
+        let result = try await runCommand(command)
+        guard result.exitCode == 0 else {
+            throw commandFailure(
+                phase: "gcloud-service-accounts",
+                result: result,
+                fallback: "Failed to list Google Cloud service accounts."
+            )
+        }
+
+        let data = Data(result.stdout.utf8)
+        return try Self.parseServiceAccounts(from: data)
+    }
+
     func fetchConfigValue(for key: String) async throws -> String? {
         let result = try await runCommand("gcloud config get-value \(key) 2>/dev/null")
         guard result.exitCode == 0 else {
@@ -221,6 +249,23 @@ public struct GCloudContextService: Sendable {
             }
     }
 
+    static func parseServiceAccounts(from data: Data) throws -> [GCloudServiceAccount] {
+        let decoder = JSONDecoder()
+        return try decoder.decode([ServiceAccountDTO].self, from: data)
+            .compactMap { serviceAccount in
+                guard !serviceAccount.email.isEmpty else { return nil }
+                return GCloudServiceAccount(
+                    email: serviceAccount.email,
+                    displayName: serviceAccount.displayName
+                )
+            }
+            .sorted { lhs, rhs in
+                let lhsName = lhs.displayName ?? lhs.email
+                let rhsName = rhs.displayName ?? rhs.email
+                return lhsName.localizedStandardCompare(rhsName) == .orderedAscending
+            }
+    }
+
     static func normalizeConfigValue(_ value: String) -> String? {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, trimmed != "(unset)" else { return nil }
@@ -267,6 +312,11 @@ extension GCloudContextService {
 
     struct RegionDTO: Decodable, Sendable {
         let locationId: String
+        let displayName: String?
+    }
+
+    struct ServiceAccountDTO: Decodable, Sendable {
+        let email: String
         let displayName: String?
     }
 }

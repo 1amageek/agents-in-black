@@ -1654,6 +1654,8 @@ func deployPlanProjectsAssignedSkillBundlesIntoRuntimeDirectories() async throws
     #expect(pluginPaths.contains("__aib_deploy/plugin/skills/local-helper/SKILL.md"))
     // The agent gets the plugin path and unattended permission-bypass contract.
     #expect(service.envVars["AIB_PLUGIN_DIR"] == "/app/.aib-plugin")
+    #expect(service.envVars["AIB_PLUGIN_SKILLS_DIR"] == "/app/.aib-plugin/skills")
+    #expect(service.envVars["AIB_SKILL_DISCOVERY_MODE"] == "closed-plugin")
     #expect(service.envVars["AIB_AGENT_PERMISSION_MODE"] == "bypassPermissions")
     #expect(service.envVars["AIB_AGENT_ALLOW_DANGEROUSLY_SKIP_PERMISSIONS"] == "true")
     #expect(service.envVars["AIB_CODEX_AUTH_MODE"] == "chatgpt")
@@ -1719,6 +1721,10 @@ func deployPlanProjectsAssignedSkillBundlesIntoRuntimeDirectories() async throws
         .appendingPathComponent(".codex-plugin")
         .appendingPathComponent("plugin.json")
     #expect(FileManager.default.fileExists(atPath: stagedPluginManifest.path))
+    let stagedPluginManifestData = try Data(contentsOf: stagedPluginManifest)
+    let stagedPluginManifestDecoded = try JSONSerialization.jsonObject(with: stagedPluginManifestData) as? [String: Any]
+    #expect(stagedPluginManifestDecoded?["skills"] as? String == "./skills/")
+    #expect(stagedPluginManifestDecoded?["mcpServers"] as? String == "./.mcp.json")
 
     let stagedUsageDoc = root
         .appendingPathComponent(".aib")

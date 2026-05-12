@@ -90,7 +90,8 @@ public final class AIBDeployController {
         workspaceRoot: String,
         targetConfig: AIBDeployTargetConfig,
         provider: any DeploymentProvider,
-        selection: AIBDeploySelection? = nil
+        selection: AIBDeploySelection? = nil,
+        environmentName: String? = nil
     ) {
         guard case .idle = phase else { return }
         cancellationRequested = false
@@ -123,6 +124,24 @@ public final class AIBDeployController {
             // Phase 2: Planning
             self.transitionTo(.planning)
             do {
+                var effectiveEnvironmentName = environmentName
+                if effectiveEnvironmentName == nil,
+                   let inferredEnvironmentName = try AIBDeployService.inferEnvironmentName(
+                       workspaceRoot: workspaceRoot,
+                       targetConfig: enrichedConfig
+                   )
+                {
+                    effectiveEnvironmentName = inferredEnvironmentName
+                    enrichedConfig = try AIBDeployService.loadTargetConfig(
+                        workspaceRoot: workspaceRoot,
+                        providerID: provider.providerID,
+                        environmentName: inferredEnvironmentName
+                    )
+                    for (key, value) in detectedValues where enrichedConfig.providerConfig[key] == nil {
+                        enrichedConfig.providerConfig[key] = value
+                    }
+                }
+
                 // Validate that all required provider config is present
                 try provider.validateTargetConfig(enrichedConfig)
 
@@ -130,7 +149,8 @@ public final class AIBDeployController {
                     workspaceRoot: workspaceRoot,
                     targetConfig: enrichedConfig,
                     provider: provider,
-                    selection: selection
+                    selection: selection,
+                    environmentName: effectiveEnvironmentName
                 )
 
                 // Phase 3: Review — block until user approves or cancels
