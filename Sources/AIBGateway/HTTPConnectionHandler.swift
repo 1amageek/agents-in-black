@@ -102,6 +102,19 @@ struct HTTPConnectionHandler: Sendable {
             )
 
         case .success(let match):
+            let requestSummary = jsonRPCRequestSummary(body: body)
+            logger.info(
+                "Gateway request started",
+                metadata: requestMetadata(
+                    trace: trace,
+                    match: match,
+                    method: head.method.rawValue,
+                    path: head.uri,
+                    bytesIn: body.readableBytes,
+                    requestSummary: requestSummary
+                )
+            )
+
             let acquired = await control.tryAcquire(
                 serviceID: match.entry.serviceID,
                 maxInflight: match.entry.maxInflight
@@ -145,6 +158,21 @@ struct HTTPConnectionHandler: Sendable {
                         for (name, value) in localResp.headers {
                             respHeaders.add(name: name, value: value)
                         }
+                        logger.info(
+                            "Gateway local handler responded",
+                            metadata: requestMetadata(
+                                trace: trace,
+                                match: match,
+                                method: head.method.rawValue,
+                                path: head.uri,
+                                bytesIn: body.readableBytes,
+                                requestSummary: requestSummary,
+                                extra: [
+                                    "status": "\(localResp.statusCode)",
+                                    "bytes_out": "\(localResp.body.count)",
+                                ]
+                            )
+                        )
                         response = UpstreamResponse(
                             status: HTTPResponseStatus(statusCode: Int(localResp.statusCode)),
                             headers: respHeaders,
@@ -223,6 +251,7 @@ struct HTTPConnectionHandler: Sendable {
         trace: TraceContext
     ) async throws -> UpstreamResponse {
         let url = match.entry.backend.requestURL(path: match.backendPath, query: match.query)
+        let requestSummary = jsonRPCRequestSummary(body: body)
 
         var request = HTTPClientRequest(url: url)
         request.method = .RAW(value: head.method.rawValue)
@@ -242,13 +271,59 @@ struct HTTPConnectionHandler: Sendable {
         }
 
         let timeout = gatewayConfig.timeouts.request.asTimeAmount
+        logger.info(
+            "Gateway proxy upstream request",
+            metadata: requestMetadata(
+                trace: trace,
+                match: match,
+                method: head.method.rawValue,
+                path: head.uri,
+                bytesIn: body.readableBytes,
+                requestSummary: requestSummary,
+                extra: [
+                    "backend_path": "\(match.backendPath)",
+                    "backend_host": "\(match.entry.backend.hostHeaderValue)",
+                ]
+            )
+        )
         let response = try await httpClient.execute(request, timeout: timeout)
         let contentType = response.headers.first(name: "Content-Type")?.lowercased()
+        logger.info(
+            "Gateway proxy upstream response head",
+            metadata: requestMetadata(
+                trace: trace,
+                match: match,
+                method: head.method.rawValue,
+                path: head.uri,
+                bytesIn: body.readableBytes,
+                requestSummary: requestSummary,
+                extra: [
+                    "status": "\(response.status.code)",
+                    "content_type": "\(contentType ?? "-")",
+                    "is_stream": "\(contentType?.contains("text/event-stream") == true)",
+                ]
+            )
+        )
         if contentType?.contains("text/event-stream") == true {
             return UpstreamResponse(status: response.status, headers: response.headers, body: .streamed(response.body))
         }
 
         let responseBody = try await response.body.collect(upTo: 16 * 1024 * 1024)
+        logger.info(
+            "Gateway proxy upstream response buffered",
+            metadata: requestMetadata(
+                trace: trace,
+                match: match,
+                method: head.method.rawValue,
+                path: head.uri,
+                bytesIn: body.readableBytes,
+                requestSummary: requestSummary,
+                extra: [
+                    "status": "\(response.status.code)",
+                    "bytes_out": "\(responseBody.readableBytes)",
+                ]
+            )
+        )
         return UpstreamResponse(status: response.status, headers: response.headers, body: .buffered(responseBody))
     }
 
@@ -298,10 +373,45 @@ struct HTTPConnectionHandler: Sendable {
             try await outbound.write(.body(body))
 
         case .streamed(let body):
+            var chunkCount = 0
+            logger.info(
+                "Gateway streaming response started",
+                metadata: [
+                    "request_id": "\(trace.requestID)",
+                    "trace_id": "\(extractTraceID(trace) ?? "-")",
+                    "service_id": "\(match.entry.serviceID.rawValue)",
+                    "status": "\(upstream.status.code)",
+                    "path": "\(match.originalPath)",
+                ]
+            )
             for try await chunk in body {
+                chunkCount += 1
                 bytesOut += chunk.readableBytes
+                if chunkCount <= 3 || chunkCount.isMultiple(of: 20) {
+                    logger.info(
+                        "Gateway streaming response chunk",
+                        metadata: [
+                            "request_id": "\(trace.requestID)",
+                            "trace_id": "\(extractTraceID(trace) ?? "-")",
+                            "service_id": "\(match.entry.serviceID.rawValue)",
+                            "chunk_index": "\(chunkCount)",
+                            "chunk_bytes": "\(chunk.readableBytes)",
+                            "bytes_out": "\(bytesOut)",
+                        ]
+                    )
+                }
                 try await outbound.write(.body(chunk))
             }
+            logger.info(
+                "Gateway streaming response completed",
+                metadata: [
+                    "request_id": "\(trace.requestID)",
+                    "trace_id": "\(extractTraceID(trace) ?? "-")",
+                    "service_id": "\(match.entry.serviceID.rawValue)",
+                    "chunks": "\(chunkCount)",
+                    "bytes_out": "\(bytesOut)",
+                ]
+            )
         }
 
         try await outbound.write(.end(nil))
@@ -393,6 +503,66 @@ struct HTTPConnectionHandler: Sendable {
     private func elapsedMS(since start: DispatchTime) -> Double {
         let nanos = DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds
         return Double(nanos) / 1_000_000.0
+    }
+
+    private struct JSONRPCRequestSummary {
+        var id: String?
+        var method: String?
+        var toolName: String?
+    }
+
+    private func jsonRPCRequestSummary(body: ByteBuffer) -> JSONRPCRequestSummary {
+        guard body.readableBytes > 0, body.readableBytes <= 128 * 1024 else {
+            return JSONRPCRequestSummary()
+        }
+
+        do {
+            let data = Data(buffer: body)
+            guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                return JSONRPCRequestSummary()
+            }
+            let params = object["params"] as? [String: Any]
+            return JSONRPCRequestSummary(
+                id: object["id"].map { "\($0)" },
+                method: object["method"] as? String,
+                toolName: params?["name"] as? String
+            )
+        } catch {
+            return JSONRPCRequestSummary()
+        }
+    }
+
+    private func requestMetadata(
+        trace: TraceContext,
+        match: RouteMatch,
+        method: String,
+        path: String,
+        bytesIn: Int,
+        requestSummary: JSONRPCRequestSummary,
+        extra: [String: String] = [:]
+    ) -> Logger.Metadata {
+        var metadata: Logger.Metadata = [
+            "request_id": "\(trace.requestID)",
+            "trace_id": "\(extractTraceID(trace) ?? "-")",
+            "service_id": "\(match.entry.serviceID.rawValue)",
+            "service_kind": "\(match.entry.kind.rawValue)",
+            "method": "\(method)",
+            "path": "\(path)",
+            "bytes_in": "\(bytesIn)",
+        ]
+        if let id = requestSummary.id {
+            metadata["jsonrpc_id"] = "\(id)"
+        }
+        if let jsonrpcMethod = requestSummary.method {
+            metadata["jsonrpc_method"] = "\(jsonrpcMethod)"
+        }
+        if let toolName = requestSummary.toolName {
+            metadata["mcp_tool"] = "\(toolName)"
+        }
+        for (key, value) in extra {
+            metadata[key] = "\(value)"
+        }
+        return metadata
     }
 
     private let hopByHopHeaders: Set<String> = [

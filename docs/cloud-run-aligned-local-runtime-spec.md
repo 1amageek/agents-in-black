@@ -113,9 +113,16 @@ Status: Draft (Spec Freeze for v1 implementation)
 - plugin root は `.codex-plugin/plugin.json` と `.mcp.json` を含み、local handler が MCP 設定を app-server に渡す
 - plugin root には `USE_WITH_CODEX.md` を生成し、手動 smoke test の app-server 起動コマンドを明示する
 - plugin bundle は static package、`binding.json` は local / remote で別 render する
-- Cloud Run の Codex サブスク認証は `codex.auth.mode: chatgpt` で宣言し、AIB が Secret Manager の
-  `auth.json` を `/var/secrets/aib/codex/auth.json` に mount する。agent runtime はこれを writable な
-  `CODEX_HOME/auth.json` にコピーしてから `codex app-server` を起動する。
+- Cloud Run で ChatGPT サブスク由来の Codex entitlement を使う場合は `codex.auth.mode: chatgpt` を使う。
+  AIB は `codex.auth.secret` を `/secrets/codex-auth.json` に read-only mount し、`CODEX_HOME=/tmp/codex`
+  を渡す。agent runtime は起動時に mounted `auth.json` を `/tmp/codex/auth.json` にコピーしてから
+  同一コンテナ内で `codex app-server` を起動する。
+- Cloud Run の `/tmp/codex/auth.json` は instance 内では refresh 可能だが、instance 終了後は永続化されない。
+  長期運用では Secret Manager の更新設計、または VM / Cloud Workstations など永続 `CODEX_HOME` を持つ
+  runtime を選ぶ。
+- `codex.auth.mode: appServer` は、別の trusted host 上の app-server に接続する特殊構成でのみ使う。
+- `codex.auth.mode: accessToken` は明示指定時のみ使う互換構成であり、ChatGPT サブスク entitlement の
+  標準 deploy path にはしない。
 
 ## 5. 設定ソース（workspace.yaml）
 

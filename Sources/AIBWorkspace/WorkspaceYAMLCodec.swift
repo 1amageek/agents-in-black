@@ -200,6 +200,7 @@ private struct WorkspaceFileDTO: Codable {
         var mode: String
         var secret: String
         var version: String?
+        var url: String?
     }
 
     struct A2ADTO: Codable {
@@ -344,7 +345,7 @@ private struct WorkspaceFileDTO: Codable {
             connections: s.connections.map { ConnectionsDTO(mcpServers: $0.mcpServers?.map { ConnectionTargetDTO(serviceRef: $0.serviceRef, url: $0.url) }, a2aAgents: $0.a2aAgents?.map { ConnectionTargetDTO(serviceRef: $0.serviceRef, url: $0.url) }) },
             mcp: s.mcp.map { MCPDTO(transport: $0.transport, path: $0.path) },
             a2a: s.a2a.map { A2ADTO(cardPath: $0.cardPath, rpcPath: $0.rpcPath) },
-            codex: s.codex.map { CodexDTO(auth: $0.auth.map { CodexAuthDTO(mode: $0.mode, secret: $0.secret, version: $0.version) }) },
+            codex: s.codex.map { CodexDTO(auth: $0.auth.map { CodexAuthDTO(mode: $0.mode, secret: $0.secret, version: $0.version, url: $0.url) }) },
             ui: s.ui.map { UIDTO(primaryMode: $0.primaryMode, chat: $0.chat.map { UIChatDTO(method: $0.method, path: $0.path, requestContentType: $0.requestContentType, requestMessageJSONPath: $0.requestMessageJSONPath, requestContextJSONPath: $0.requestContextJSONPath, responseMessageJSONPath: $0.responseMessageJSONPath, streaming: $0.streaming) }) },
             endpoints: s.endpoints,
             skills: s.skills,
@@ -430,7 +431,7 @@ private struct WorkspaceFileDTO: Codable {
             connections: s.connections.map { WorkspaceRepoConnectionsConfig(mcpServers: $0.mcpServers?.map { WorkspaceRepoConnectionTarget(serviceRef: $0.serviceRef, url: $0.url) }, a2aAgents: $0.a2aAgents?.map { WorkspaceRepoConnectionTarget(serviceRef: $0.serviceRef, url: $0.url) }) },
             mcp: s.mcp.map { WorkspaceRepoMCPConfig(transport: $0.transport, path: $0.path) },
             a2a: s.a2a.map { WorkspaceRepoA2AConfig(cardPath: $0.cardPath, rpcPath: $0.rpcPath) },
-            codex: s.codex.map { WorkspaceRepoCodexConfig(auth: $0.auth.map { WorkspaceRepoCodexAuthConfig(mode: $0.mode, secret: $0.secret, version: $0.version) }) },
+            codex: s.codex.map { WorkspaceRepoCodexConfig(auth: $0.auth.map { WorkspaceRepoCodexAuthConfig(mode: $0.mode, secret: $0.secret, version: $0.version, url: $0.url) }) },
             ui: s.ui.map { WorkspaceRepoUIConfig(primaryMode: $0.primaryMode, chat: $0.chat.map { WorkspaceRepoUIChatConfig(method: $0.method, path: $0.path, requestContentType: $0.requestContentType, requestMessageJSONPath: $0.requestMessageJSONPath, requestContextJSONPath: $0.requestContextJSONPath, responseMessageJSONPath: $0.responseMessageJSONPath, streaming: $0.streaming) }) },
             endpoints: s.endpoints,
             skills: s.skills,

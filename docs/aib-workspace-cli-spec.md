@@ -53,10 +53,12 @@ For `local` targets:
 - Node MCP/services run as host processes for fast local iteration
 - agent services run via Codex App Server, not local containers
 
-Agent services that should use a Codex ChatGPT subscription declare auth through
-the service-level `codex.auth` block. The user stores `auth.json` in the
-provider secret store; AIB mounts it as a file and exposes a writable
-`CODEX_HOME` to the runtime.
+Agent services that should use a Codex subscription in Cloud Run declare auth
+through the service-level `codex.auth` block. The provider secret store contains
+the `auth.json` created by `codex login` with ChatGPT sign-in. AIB mounts that
+secret read-only at `/secrets/codex-auth.json`, exposes writable
+`CODEX_HOME=/tmp/codex`, and the runtime copies the mounted file to
+`/tmp/codex/auth.json` before starting Codex App Server.
 
 ```yaml
 services:
@@ -68,6 +70,13 @@ services:
         secret: codex-auth-json
         version: latest
 ```
+
+`auth.json` contains refresh-capable ChatGPT-managed Codex credentials and must
+be handled as a password-equivalent secret. Cloud Run instances can refresh the
+copy under `/tmp/codex` while running, but that refreshed copy is lost when the
+instance exits. Long-running production use should either refresh the Secret
+Manager value intentionally or run the app-server on a host with persistent
+`CODEX_HOME`.
 
 ### `aib emulator validate`
 

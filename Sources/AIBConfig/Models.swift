@@ -191,16 +191,20 @@ public struct CodexAuthConfig: Sendable, Codable, Equatable {
     public var mode: CodexAuthMode
     public var secret: String
     public var version: String?
+    public var url: String?
 
-    public init(mode: CodexAuthMode, secret: String, version: String? = nil) {
+    public init(mode: CodexAuthMode, secret: String, version: String? = nil, url: String? = nil) {
         self.mode = mode
         self.secret = secret
         self.version = version
+        self.url = url
     }
 }
 
 public enum CodexAuthMode: String, Sendable, Codable, Equatable {
     case chatgpt
+    case appServer
+    case accessToken
 }
 
 public struct ServiceConnectionsConfig: Sendable, Codable, Equatable {

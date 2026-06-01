@@ -1602,6 +1602,18 @@ func deployPlanProjectsAssignedSkillBundlesIntoRuntimeDirectories() async throws
         atomically: true,
         encoding: .utf8
     )
+    let sources = repo.appendingPathComponent("Sources", isDirectory: true)
+    try FileManager.default.createDirectory(at: sources, withIntermediateDirectories: true)
+    try """
+    import Foundation
+
+    let remoteToken = ProcessInfo.processInfo.environment["AIB_CODEX_APP_SERVER_AUTH_TOKEN"]
+    let remoteTokenFile = ProcessInfo.processInfo.environment["AIB_CODEX_APP_SERVER_AUTH_TOKEN_FILE"]
+    let authJSON = ProcessInfo.processInfo.environment["AIB_CODEX_AUTH_JSON"]
+    let codexAccessToken = ProcessInfo.processInfo.environment["CODEX_ACCESS_TOKEN"]
+    let openAIAPIKey = ProcessInfo.processInfo.environment["OPENAI_API_KEY"]
+    _ = [remoteToken, remoteTokenFile, authJSON, codexAccessToken, openAIAPIKey]
+    """.write(to: sources.appendingPathComponent("main.swift"), atomically: true, encoding: .utf8)
     try """
     import Foundation
 
@@ -1739,10 +1751,10 @@ func deployPlanProjectsAssignedSkillBundlesIntoRuntimeDirectories() async throws
     #expect(service.envVars["AIB_AGENT_PERMISSION_MODE"] == "bypassPermissions")
     #expect(service.envVars["AIB_AGENT_ALLOW_DANGEROUSLY_SKIP_PERMISSIONS"] == "true")
     #expect(service.envVars["AIB_CODEX_AUTH_MODE"] == "chatgpt")
-    #expect(service.envVars["AIB_CODEX_AUTH_JSON"] == "/var/secrets/aib/codex/auth.json")
-    #expect(service.envVars["CODEX_HOME"] == "/home/node/.codex")
-    #expect(service.declaredSecretRefs["/var/secrets/aib/codex/auth.json"]?.secret == "codex-auth-json")
-    #expect(service.declaredSecretRefs["/var/secrets/aib/codex/auth.json"]?.version == "latest")
+    #expect(service.envVars["AIB_CODEX_AUTH_JSON"] == "/secrets/codex-auth.json")
+    #expect(service.envVars["CODEX_HOME"] == "/tmp/codex")
+    #expect(service.declaredSecretRefs["/secrets/codex-auth.json"]?.secret == "codex-auth-json")
+    #expect(service.declaredSecretRefs["/secrets/codex-auth.json"]?.version == "latest")
     #expect(!service.unresolvedSecrets.contains("OPENAI_API_KEY"))
     #expect(!service.unresolvedSecrets.contains("CODEX_API_KEY"))
     #expect(executionPaths.contains("__aib_deploy/claude/commands/deploy.md"))
@@ -1835,6 +1847,173 @@ func deployPlanProjectsAssignedSkillBundlesIntoRuntimeDirectories() async throws
     let dockerignoreContent = try String(contentsOf: dockerignoreURL, encoding: .utf8)
     #expect(dockerignoreContent.contains("!__aib_deploy"))
     #expect(dockerignoreContent.contains("!__aib_deploy/**"))
+}
+
+@Test(.timeLimit(.minutes(1)))
+func deployPlanUsesRemoteCodexAppServerAuthWithoutMountingChatGPTAuthJSON() async throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("aib-deploy-app-server-auth-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer {
+        do {
+            try FileManager.default.removeItem(at: root)
+        } catch {
+            // Best-effort cleanup for temp test directory.
+        }
+    }
+
+    let repo = root.appendingPathComponent("agent-a", isDirectory: true)
+    try FileManager.default.createDirectory(at: repo.appendingPathComponent(".git"), withIntermediateDirectories: true)
+    try """
+    // swift-tools-version: 6.0
+    import PackageDescription
+
+    let package = Package(
+        name: "agent-a",
+        targets: [.executableTarget(name: "agent-a")]
+    )
+    """.write(to: repo.appendingPathComponent("Package.swift"), atomically: true, encoding: .utf8)
+    try "FROM swift:6.2-jammy\nWORKDIR /app\n".write(
+        to: repo.appendingPathComponent("Dockerfile"),
+        atomically: true,
+        encoding: .utf8
+    )
+
+    let workspace = AIBWorkspaceConfig(
+        workspaceName: "test",
+        repos: [
+            WorkspaceRepo(
+                name: "agent-a",
+                path: "agent-a",
+                runtime: .swift,
+                framework: .unknown,
+                packageManager: .swiftpm,
+                status: .discoverable,
+                detectionConfidence: .high,
+                services: [
+                    WorkspaceRepoServiceConfig(
+                        id: "app",
+                        kind: "agent",
+                        mountPath: "/agents/a",
+                        run: ["swift", "run"],
+                        codex: WorkspaceRepoCodexConfig(
+                            auth: WorkspaceRepoCodexAuthConfig(
+                                mode: "appServer",
+                                secret: "codex-app-server-client-token",
+                                version: "latest",
+                                url: "wss://codex-host.internal/app-server"
+                            )
+                        )
+                    ),
+                ]
+            ),
+        ]
+    )
+    try AIBWorkspaceManager.saveWorkspace(workspace, workspaceRoot: root.path)
+
+    let provider = MockDeploymentProvider()
+    let targetConfig = AIBDeployTargetConfig(providerID: provider.providerID, region: "us-central1")
+    let plan = try await AIBDeployService.generatePlan(
+        workspaceRoot: root.path,
+        targetConfig: targetConfig,
+        provider: provider
+    )
+
+    let service = try #require(plan.services.first)
+    #expect(service.envVars["AIB_CODEX_AUTH_MODE"] == "appServer")
+    #expect(service.envVars["AIB_CODEX_APP_SERVER_URL"] == "wss://codex-host.internal/app-server")
+    #expect(service.envVars["AIB_CODEX_APP_SERVER_AUTH_TOKEN_FILE"] == "/var/secrets/aib/codex/app-server-token")
+    #expect(service.envVars["AIB_CODEX_AUTH_JSON"] == nil)
+    #expect(service.envVars["CODEX_HOME"] == nil)
+    #expect(service.declaredSecretRefs["/secrets/codex-auth.json"] == nil)
+    #expect(service.declaredSecretRefs["/var/secrets/aib/codex/app-server-token"]?.secret == "codex-app-server-client-token")
+    #expect(service.declaredSecretRefs["/var/secrets/aib/codex/app-server-token"]?.version == "latest")
+}
+
+@Test(.timeLimit(.minutes(1)))
+func deployPlanUsesCodexAccessTokenWithoutMountingChatGPTAuthJSON() async throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("aib-deploy-access-token-auth-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer {
+        do {
+            try FileManager.default.removeItem(at: root)
+        } catch {
+            // Best-effort cleanup for temp test directory.
+        }
+    }
+
+    let repo = root.appendingPathComponent("agent-a", isDirectory: true)
+    try FileManager.default.createDirectory(at: repo.appendingPathComponent(".git"), withIntermediateDirectories: true)
+    try """
+    // swift-tools-version: 6.0
+    import PackageDescription
+
+    let package = Package(
+        name: "agent-a",
+        targets: [.executableTarget(name: "agent-a")]
+    )
+    """.write(to: repo.appendingPathComponent("Package.swift"), atomically: true, encoding: .utf8)
+    try "FROM swift:6.2-jammy\nWORKDIR /app\n".write(
+        to: repo.appendingPathComponent("Dockerfile"),
+        atomically: true,
+        encoding: .utf8
+    )
+
+    let workspace = AIBWorkspaceConfig(
+        workspaceName: "test",
+        repos: [
+            WorkspaceRepo(
+                name: "agent-a",
+                path: "agent-a",
+                runtime: .swift,
+                framework: .unknown,
+                packageManager: .swiftpm,
+                status: .discoverable,
+                detectionConfidence: .high,
+                services: [
+                    WorkspaceRepoServiceConfig(
+                        id: "app",
+                        kind: "agent",
+                        mountPath: "/agents/a",
+                        run: ["swift", "run"],
+                        codex: WorkspaceRepoCodexConfig(
+                            auth: WorkspaceRepoCodexAuthConfig(
+                                mode: "accessToken",
+                                secret: "codex-access-token",
+                                version: "latest"
+                            )
+                        )
+                    ),
+                ]
+            ),
+        ]
+    )
+    try AIBWorkspaceManager.saveWorkspace(workspace, workspaceRoot: root.path)
+
+    let provider = MockDeploymentProvider()
+    let targetConfig = AIBDeployTargetConfig(providerID: provider.providerID, region: "us-central1")
+    let plan = try await AIBDeployService.generatePlan(
+        workspaceRoot: root.path,
+        targetConfig: targetConfig,
+        provider: provider
+    )
+
+    let service = try #require(plan.services.first)
+    #expect(service.envVars["AIB_CODEX_AUTH_MODE"] == "accessToken")
+    #expect(service.envVars["AIB_CODEX_ACCESS_TOKEN_FILE"] == "/var/secrets/aib/codex/access-token")
+    #expect(service.envVars["CODEX_HOME"] == "/tmp/codex")
+    #expect(service.envVars["AIB_CODEX_AUTH_JSON"] == nil)
+    #expect(service.envVars["AIB_CODEX_APP_SERVER_URL"] == nil)
+    #expect(service.declaredSecretRefs["/secrets/codex-auth.json"] == nil)
+    #expect(service.declaredSecretRefs["/var/secrets/aib/codex/access-token"]?.secret == "codex-access-token")
+    #expect(service.declaredSecretRefs["/var/secrets/aib/codex/access-token"]?.version == "latest")
+    #expect(!service.unresolvedSecrets.contains("OPENAI_API_KEY"))
+    #expect(!service.unresolvedSecrets.contains("CODEX_API_KEY"))
+    #expect(!service.unresolvedSecrets.contains("CODEX_ACCESS_TOKEN"))
+    #expect(!service.unresolvedSecrets.contains("AIB_CODEX_AUTH_JSON"))
+    #expect(!service.unresolvedSecrets.contains("AIB_CODEX_APP_SERVER_AUTH_TOKEN"))
+    #expect(!service.unresolvedSecrets.contains("AIB_CODEX_APP_SERVER_AUTH_TOKEN_FILE"))
 }
 
 @Test(.timeLimit(.minutes(1)))

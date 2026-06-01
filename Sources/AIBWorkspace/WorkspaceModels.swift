@@ -223,11 +223,13 @@ public struct WorkspaceRepoCodexAuthConfig: Codable, Sendable, Equatable {
     public var mode: String
     public var secret: String
     public var version: String?
+    public var url: String?
 
-    public init(mode: String, secret: String, version: String? = nil) {
+    public init(mode: String, secret: String, version: String? = nil, url: String? = nil) {
         self.mode = mode
         self.secret = secret
         self.version = version
+        self.url = url
     }
 }
 

@@ -31,7 +31,7 @@ public struct ResolvedSecretValue: Sendable {
 /// Reads Codex ChatGPT auth from the local `~/.codex/auth.json`.
 ///
 /// Only triggers for secrets backed by the codex auth mount path
-/// (`/var/secrets/aib/codex/auth.json`), matching how `AIBDeployService`
+/// (`/secrets/codex-auth.json`), matching how `AIBDeployService`
 /// declares the SecretRef for `codex.auth.mode: chatgpt` agents. The
 /// uploaded value is the raw file contents — same shape Codex CLI writes via
 /// `codex login`, so deploys reuse the developer's existing authentication
@@ -39,7 +39,7 @@ public struct ResolvedSecretValue: Sendable {
 public struct CodexAuthSecretValueResolver: SecretValueResolver {
     /// Mount path used by `AIBDeployService` when declaring the Codex auth
     /// SecretRef. Kept in sync with that single declaration site.
-    public static let codexAuthMountPath = "/var/secrets/aib/codex/auth.json"
+    public static let codexAuthMountPath = "/secrets/codex-auth.json"
 
     private let authFileURL: URL
 
@@ -61,9 +61,13 @@ public struct CodexAuthSecretValueResolver: SecretValueResolver {
         guard FileManager.default.fileExists(atPath: authFileURL.path) else {
             return nil
         }
-        guard let data = try? Data(contentsOf: authFileURL),
-              let value = String(data: data, encoding: .utf8),
-              !value.isEmpty else {
+        let data: Data
+        do {
+            data = try Data(contentsOf: authFileURL)
+        } catch {
+            return nil
+        }
+        guard let value = String(data: data, encoding: .utf8), !value.isEmpty else {
             return nil
         }
         return ResolvedSecretValue(

@@ -1,14 +1,17 @@
 import AIBRuntimeCore
 import Foundation
+import Logging
 
 public final class CodexAppServerAgentRunner: AgentRunner {
     private let model: String?
     private let reasoningEffort: String?
+    private let logger: Logger?
     private let state = CodexAppServerRunnerState()
 
-    public init(model: String? = nil, reasoningEffort: String? = nil) {
+    public init(model: String? = nil, reasoningEffort: String? = nil, logger: Logger? = nil) {
         self.model = model
         self.reasoningEffort = reasoningEffort
+        self.logger = logger
     }
 
     public static let displayName = "Codex App Server"
@@ -35,13 +38,27 @@ public final class CodexAppServerAgentRunner: AgentRunner {
                 do {
                     let codexBinary = try CodexAppServerCommandLocator.requireCodexBinary()
                     let config = try CodexAppServerRuntimeConfig(context: context)
+                    let environment = try CodexAppServerEnvironment.processEnvironment(context: context)
+                    logger?.info(
+                        "[codex/app-server] launching transport",
+                        metadata: [
+                            "service_id": "\(context.serviceID)",
+                            "codex_binary": "\(codexBinary)",
+                            "mcp_servers": "\(config.mcpServerNames.joined(separator: ","))",
+                            "override_count": "\(config.configOverrides.count)",
+                            "codex_home": "\(environment["CODEX_HOME"] ?? "-")",
+                            "cwd": "\(context.executionDirectory ?? FileManager.default.currentDirectoryPath)",
+                        ]
+                    )
                     let runtime = try CodexAppServerTransport(
                         codexBinary: codexBinary,
-                        configOverrides: config.configOverrides
+                        configOverrides: config.configOverrides,
+                        environment: environment
                     )
                     transport = runtime
                     await state.setTransport(runtime)
 
+                    logger?.info("[codex/app-server] request initialize", metadata: ["service_id": "\(context.serviceID)"])
                     _ = try await runtime.send(
                         method: "initialize",
                         paramsJSON: try CodexJSON.stringify([
@@ -55,16 +72,25 @@ public final class CodexAppServerAgentRunner: AgentRunner {
                             ],
                         ])
                     )
+                    logger?.info("[codex/app-server] response initialize", metadata: ["service_id": "\(context.serviceID)"])
+                    logger?.info("[codex/app-server] notify initialized", metadata: ["service_id": "\(context.serviceID)"])
                     await runtime.notify(method: "initialized", paramsJSON: "{}")
 
                     let effectiveModel = model ?? ProcessInfo.processInfo.environment["MODEL"] ?? "gpt-5.5"
+                    logger?.info(
+                        "[codex/app-server] request thread/start",
+                        metadata: [
+                            "service_id": "\(context.serviceID)",
+                            "model": "\(effectiveModel)",
+                        ]
+                    )
                     let threadResponseJSON = try await runtime.send(
                         method: "thread/start",
                         paramsJSON: try CodexJSON.stringify([
                             "model": effectiveModel,
                             "cwd": context.executionDirectory ?? FileManager.default.currentDirectoryPath,
                             "approvalPolicy": "never",
-                            "sandbox": "danger-full-access",
+                            "sandbox": "workspace-write",
                             "serviceName": "aib_local_agent",
                         ])
                     )
@@ -75,6 +101,13 @@ public final class CodexAppServerAgentRunner: AgentRunner {
                     else {
                         throw CodexAppServerRunnerError.missingThreadID
                     }
+                    logger?.info(
+                        "[codex/app-server] response thread/start",
+                        metadata: [
+                            "service_id": "\(context.serviceID)",
+                            "thread_id": "\(threadID)",
+                        ]
+                    )
 
                     continuation.yield(.system(AgentRunnerSystemInfo(
                         sessionID: threadID,
@@ -107,6 +140,15 @@ public final class CodexAppServerAgentRunner: AgentRunner {
                     var input: [[String: Any]] = [["type": "text", "text": message]]
                     input.append(contentsOf: skillInputs)
 
+                    logger?.info(
+                        "[codex/app-server] request turn/start",
+                        metadata: [
+                            "service_id": "\(context.serviceID)",
+                            "thread_id": "\(threadID)",
+                            "input_count": "\(input.count)",
+                            "mcp_servers": "\(config.mcpServerNames.joined(separator: ","))",
+                        ]
+                    )
                     _ = try await runtime.send(
                         method: "turn/start",
                         paramsJSON: try CodexJSON.stringify([
@@ -116,19 +158,44 @@ public final class CodexAppServerAgentRunner: AgentRunner {
                             "model": effectiveModel,
                             "effort": resolveReasoningEffort(),
                             "approvalPolicy": "never",
-                            "sandboxPolicy": ["type": "dangerFullAccess"],
+                            "sandboxPolicy": CodexAppServerSandboxPolicy.workspaceWrite(
+                                executionDirectory: context.executionDirectory
+                            ),
                         ])
+                    )
+                    logger?.info(
+                        "[codex/app-server] response turn/start",
+                        metadata: [
+                            "service_id": "\(context.serviceID)",
+                            "thread_id": "\(threadID)",
+                        ]
                     )
 
                     var finalText = ""
                     var completed = false
                     while !completed {
                         guard let notificationJSON = await runtime.nextNotification() else {
+                            logger?.warning(
+                                "[codex/app-server] notification stream ended before turn completion",
+                                metadata: [
+                                    "service_id": "\(context.serviceID)",
+                                    "thread_id": "\(threadID)",
+                                ]
+                            )
                             break
                         }
                         let notification = try CodexJSON.object(from: notificationJSON)
                         let method = notification["method"] as? String
                         let params = notification["params"] as? [String: Any] ?? [:]
+                        logger?.info(
+                            "[codex/app-server] notification",
+                            metadata: notificationMetadata(
+                                serviceID: context.serviceID,
+                                threadID: threadID,
+                                method: method,
+                                params: params
+                            )
+                        )
 
                         switch method {
                         case "item/agentMessage/delta":
@@ -143,6 +210,14 @@ public final class CodexAppServerAgentRunner: AgentRunner {
                             } else if item["type"] as? String == "mcpToolCall" {
                                 let server = item["server"] as? String ?? "mcp"
                                 let tool = item["tool"] as? String ?? "tool"
+                                logger?.info(
+                                    "[codex/app-server] mcp tool started",
+                                    metadata: itemMetadata(
+                                        serviceID: context.serviceID,
+                                        threadID: threadID,
+                                        item: item
+                                    )
+                                )
                                 continuation.yield(.toolUse(name: "\(server).\(tool)"))
                             }
                         case "item/completed":
@@ -150,6 +225,14 @@ public final class CodexAppServerAgentRunner: AgentRunner {
                             if item["type"] as? String == "agentMessage", let text = item["text"] as? String {
                                 finalText = text
                             } else if item["type"] as? String == "mcpToolCall" {
+                                logger?.info(
+                                    "[codex/app-server] mcp tool completed",
+                                    metadata: itemMetadata(
+                                        serviceID: context.serviceID,
+                                        threadID: threadID,
+                                        item: item
+                                    )
+                                )
                                 let content = try CodexJSON.stringify(item["result"] ?? item["error"] ?? [:])
                                 continuation.yield(.toolResult(
                                     toolUseID: item["id"] as? String ?? "",
@@ -159,6 +242,14 @@ public final class CodexAppServerAgentRunner: AgentRunner {
                         case "turn/completed":
                             let turn = params["turn"] as? [String: Any]
                             let status = turn?["status"] as? String
+                            logger?.info(
+                                "[codex/app-server] turn completed",
+                                metadata: [
+                                    "service_id": "\(context.serviceID)",
+                                    "thread_id": "\(threadID)",
+                                    "status": "\(status ?? "-")",
+                                ]
+                            )
                             if status == "failed" {
                                 let error = turn?["error"] as? [String: Any]
                                 continuation.yield(.error(error?["message"] as? String ?? "Codex turn failed"))
@@ -172,6 +263,14 @@ public final class CodexAppServerAgentRunner: AgentRunner {
                             completed = true
                         case "error":
                             let error = params["error"] as? [String: Any]
+                            logger?.error(
+                                "[codex/app-server] error notification",
+                                metadata: [
+                                    "service_id": "\(context.serviceID)",
+                                    "thread_id": "\(threadID)",
+                                    "message": "\(error?["message"] as? String ?? "Codex app-server error")",
+                                ]
+                            )
                             continuation.yield(.error(error?["message"] as? String ?? "Codex app-server error"))
                         default:
                             break
@@ -183,6 +282,13 @@ public final class CodexAppServerAgentRunner: AgentRunner {
                     }
                     continuation.finish()
                 } catch {
+                    logger?.error(
+                        "[codex/app-server] send failed",
+                        metadata: [
+                            "service_id": "\(context.serviceID)",
+                            "error": "\(error.localizedDescription)",
+                        ]
+                    )
                     continuation.yield(.error(error.localizedDescription))
                     continuation.finish(throwing: error)
                 }
@@ -212,6 +318,53 @@ public final class CodexAppServerAgentRunner: AgentRunner {
             return AIBReasoningEffort.defaultAgent.rawValue
         }
         return effort.rawValue
+    }
+
+    private func notificationMetadata(
+        serviceID: String,
+        threadID: String,
+        method: String?,
+        params: [String: Any]
+    ) -> Logger.Metadata {
+        var metadata: Logger.Metadata = [
+            "service_id": "\(serviceID)",
+            "thread_id": "\(threadID)",
+            "method": "\(method ?? "-")",
+        ]
+        if let item = params["item"] as? [String: Any] {
+            for (key, value) in itemMetadata(serviceID: serviceID, threadID: threadID, item: item) {
+                metadata[key] = value
+            }
+        }
+        if let turn = params["turn"] as? [String: Any], let status = turn["status"] {
+            metadata["turn_status"] = "\(status)"
+        }
+        return metadata
+    }
+
+    private func itemMetadata(
+        serviceID: String,
+        threadID: String,
+        item: [String: Any]
+    ) -> Logger.Metadata {
+        var metadata: Logger.Metadata = [
+            "service_id": "\(serviceID)",
+            "thread_id": "\(threadID)",
+            "item_type": "\(item["type"] as? String ?? "-")",
+            "item_id": "\(item["id"] as? String ?? "-")",
+            "has_result": "\(item["result"] != nil)",
+            "has_error": "\(item["error"] != nil)",
+        ]
+        if let server = item["server"] as? String {
+            metadata["mcp_server"] = "\(server)"
+        }
+        if let tool = item["tool"] as? String {
+            metadata["mcp_tool"] = "\(tool)"
+        }
+        if let status = item["status"] as? String {
+            metadata["item_status"] = "\(status)"
+        }
+        return metadata
     }
 }
 
@@ -277,13 +430,15 @@ private enum CodexAppServerCommandLocator {
     }
 }
 
-private struct CodexAppServerRuntimeConfig {
+struct CodexAppServerRuntimeConfig {
     var configOverrides: [String]
     var mcpServerNames: [String]
 
     init(context: AgentRunnerContext) throws {
-        guard let mcpConfigPath = context.mcpConfigPath else {
-            self.configOverrides = []
+        var overrides = CodexAppServerRuntimePolicy.closedEnvironmentOverrides
+
+        guard let mcpConfigPath = Self.resolvedMCPConfigPath(context: context) else {
+            self.configOverrides = overrides
             self.mcpServerNames = []
             return
         }
@@ -296,7 +451,6 @@ private struct CodexAppServerRuntimeConfig {
             throw CodexAppServerRunnerError.invalidMCPConfig(mcpConfigPath)
         }
 
-        var overrides: [String] = []
         var names: [String] = []
         for (name, rawServer) in servers.sorted(by: { $0.key < $1.key }) {
             guard
@@ -314,7 +468,6 @@ private struct CodexAppServerRuntimeConfig {
                 overrides.append("mcp_servers.\(normalizedName).http_headers=\(CodexTOML.inlineTable(headers))")
             }
         }
-        overrides.append("tools.web_search=true")
         self.configOverrides = overrides
         self.mcpServerNames = names
     }
@@ -326,6 +479,22 @@ private struct CodexAppServerRuntimeConfig {
         return result.isEmpty ? "mcp-server" : result
     }
 
+    private static func resolvedMCPConfigPath(context: AgentRunnerContext) -> String? {
+        if let mcpConfigPath = context.mcpConfigPath, !mcpConfigPath.isEmpty {
+            return mcpConfigPath
+        }
+
+        guard let pluginRootPath = context.pluginRootPath, !pluginRootPath.isEmpty else {
+            return nil
+        }
+
+        let pluginMCPConfigPath = CodexAppServerPluginBundle.mcpConfigPath(pluginRootPath: pluginRootPath)
+        guard FileManager.default.fileExists(atPath: pluginMCPConfigPath) else {
+            return nil
+        }
+        return pluginMCPConfigPath
+    }
+
     private static func stringHeaders(_ rawHeaders: Any?) -> [String: String] {
         guard let rawHeaders = rawHeaders as? [String: Any] else {
             return [:]
@@ -334,6 +503,148 @@ private struct CodexAppServerRuntimeConfig {
             if let value = entry.value as? String {
                 result[entry.key] = value
             }
+        }
+    }
+}
+
+enum CodexAppServerRuntimePolicy {
+    static let closedEnvironmentOverrides = [
+        "include_apps_instructions=false",
+        "include_environment_context=false",
+        "include_permissions_instructions=false",
+        "project_doc_max_bytes=0",
+        "features.apps=false",
+        "features.plugins=false",
+        "features.tool_search=false",
+        "features.tool_suggest=false",
+        "features.image_generation=false",
+        "features.browser_use=false",
+        "features.computer_use=false",
+        "features.enable_mcp_apps=false",
+        "features.remote_plugin=false",
+        "skills.bundled={enabled=false}",
+    ]
+}
+
+enum CodexAppServerSandboxPolicy {
+    static func workspaceWrite(executionDirectory: String?) -> [String: Any] {
+        var policy: [String: Any] = [
+            "type": "workspaceWrite",
+            "networkAccess": true,
+        ]
+        if let executionDirectory, !executionDirectory.isEmpty {
+            policy["writableRoots"] = [executionDirectory]
+        }
+        return policy
+    }
+}
+
+enum CodexAppServerEnvironment {
+    static func processEnvironment(
+        context: AgentRunnerContext,
+        authSourceRoot: URL? = nil,
+        baseEnvironment: [String: String] = ProcessInfo.processInfo.environment
+    ) throws -> [String: String] {
+        var environment = baseEnvironment
+        let codexHomeURL = writableCodexHomeURL(context: context, baseEnvironment: baseEnvironment)
+        try FileManager.default.createDirectory(at: codexHomeURL, withIntermediateDirectories: true)
+        if let mountedAuthJSONURL = mountedAuthJSONURL(baseEnvironment: baseEnvironment) {
+            try copyAuthJSONFile(from: mountedAuthJSONURL, to: codexHomeURL)
+        } else {
+            try copyAuthJSON(
+                from: authSourceRoot ?? defaultAuthSourceRoot(baseEnvironment: baseEnvironment),
+                to: codexHomeURL
+            )
+        }
+
+        environment["CODEX_HOME"] = codexHomeURL.path
+        environment["HOME"] = codexHomeURL.path
+        if let pluginRootPath = context.pluginRootPath {
+            environment["AIB_PLUGIN_DIR"] = pluginRootPath
+            environment["AIB_PLUGIN_SKILLS_DIR"] = CodexAppServerPluginBundle.skillsDirectoryPath(
+                pluginRootPath: pluginRootPath
+            )
+            environment["AIB_SKILL_DISCOVERY_MODE"] = CodexAppServerPluginBundle.closedSkillDiscoveryMode
+        }
+        return environment
+    }
+
+    static func writableCodexHomeURL(
+        context: AgentRunnerContext,
+        baseEnvironment: [String: String]
+    ) -> URL {
+        if mountedAuthJSONURL(baseEnvironment: baseEnvironment) != nil,
+           let configured = baseEnvironment["CODEX_HOME"],
+           !configured.isEmpty {
+            return URL(fileURLWithPath: configured, isDirectory: true).standardizedFileURL
+        }
+        return isolatedCodexHomeURL(context: context)
+    }
+
+    static func isolatedCodexHomeURL(context: AgentRunnerContext) -> URL {
+        if let pluginRootPath = context.pluginRootPath {
+            let aibRootURL = URL(fileURLWithPath: pluginRootPath, isDirectory: true)
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+            return aibRootURL
+                .appendingPathComponent("state", isDirectory: true)
+                .appendingPathComponent("codex-home", isDirectory: true)
+                .appendingPathComponent(CodexAppServerPluginBundle.sanitizedServiceID(context.serviceID), isDirectory: true)
+                .standardizedFileURL
+        }
+
+        return FileManager.default.temporaryDirectory
+            .appendingPathComponent("aib-codex-home", isDirectory: true)
+            .appendingPathComponent(CodexAppServerPluginBundle.sanitizedServiceID(context.serviceID), isDirectory: true)
+            .standardizedFileURL
+    }
+
+    private static func mountedAuthJSONURL(baseEnvironment: [String: String]) -> URL? {
+        guard let configured = baseEnvironment["AIB_CODEX_AUTH_JSON"], !configured.isEmpty else {
+            return nil
+        }
+        return URL(fileURLWithPath: configured, isDirectory: false).standardizedFileURL
+    }
+
+    private static func defaultAuthSourceRoot(baseEnvironment: [String: String]) -> URL {
+        if let configured = baseEnvironment["CODEX_HOME"], !configured.isEmpty {
+            return URL(fileURLWithPath: configured, isDirectory: true).standardizedFileURL
+        }
+        let home = baseEnvironment["HOME"] ?? NSHomeDirectory()
+        return URL(fileURLWithPath: home, isDirectory: true)
+            .appendingPathComponent(".codex", isDirectory: true)
+            .standardizedFileURL
+    }
+
+    private static func copyAuthJSON(from sourceRoot: URL, to codexHomeURL: URL) throws {
+        let sourceURL = sourceRoot.appendingPathComponent("auth.json", isDirectory: false)
+        guard FileManager.default.fileExists(atPath: sourceURL.path) else {
+            return
+        }
+        try copyAuthJSONFile(from: sourceURL, to: codexHomeURL)
+    }
+
+    private static func copyAuthJSONFile(from sourceURL: URL, to codexHomeURL: URL) throws {
+        guard FileManager.default.fileExists(atPath: sourceURL.path) else {
+            throw CodexAppServerEnvironmentError.missingAuthJSON(sourceURL.path)
+        }
+        let destinationURL = codexHomeURL.appendingPathComponent("auth.json", isDirectory: false)
+        if FileManager.default.fileExists(atPath: destinationURL.path) {
+            try FileManager.default.removeItem(at: destinationURL)
+        }
+        try FileManager.default.copyItem(at: sourceURL, to: destinationURL)
+    }
+}
+
+private enum CodexAppServerEnvironmentError: LocalizedError {
+    case missingAuthJSON(String)
+
+    var errorDescription: String? {
+        switch self {
+        case let .missingAuthJSON(path):
+            return "Codex auth.json was configured but not found at \(path)"
         }
     }
 }
@@ -368,12 +679,9 @@ private enum CodexTOML {
     }
 }
 
-private enum CodexJSON {
+enum CodexJSON {
     static func stringify(_ value: Any) throws -> String {
-        guard JSONSerialization.isValidJSONObject(value) else {
-            return String(describing: value)
-        }
-        let data = try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
+        let data = try JSONSerialization.data(withJSONObject: value, options: [.fragmentsAllowed, .sortedKeys])
         return String(data: data, encoding: .utf8) ?? ""
     }
 
@@ -398,13 +706,14 @@ private actor CodexAppServerTransport {
     private var notificationWaiters: [CheckedContinuation<String?, Never>] = []
     private var terminated = false
 
-    init(codexBinary: String, configOverrides: [String]) throws {
+    init(codexBinary: String, configOverrides: [String], environment: [String: String]) throws {
         let process = Process()
         let input = Pipe()
         let output = Pipe()
         let error = Pipe()
         process.executableURL = URL(fileURLWithPath: codexBinary)
         process.arguments = ["app-server"] + configOverrides.flatMap { ["-c", $0] }
+        process.environment = environment
         process.standardInput = input
         process.standardOutput = output
         process.standardError = error
@@ -449,7 +758,11 @@ private actor CodexAppServerTransport {
     }
 
     func notify(method: String, paramsJSON: String) async {
-        try? writeRaw(#"{"method":\#(CodexTOML.string(method)),"params":\#(paramsJSON)}"#)
+        do {
+            try writeRaw(#"{"method":\#(CodexTOML.string(method)),"params":\#(paramsJSON)}"#)
+        } catch {
+            finish()
+        }
     }
 
     func nextNotification() async -> String? {
@@ -492,7 +805,10 @@ private actor CodexAppServerTransport {
     }
 
     private func handleLine(_ line: String) {
-        guard let message = try? CodexJSON.object(from: line) else {
+        let message: [String: Any]
+        do {
+            message = try CodexJSON.object(from: line)
+        } catch {
             return
         }
 
@@ -504,7 +820,11 @@ private actor CodexAppServerTransport {
                     userInfo: [NSLocalizedDescriptionKey: error["message"] as? String ?? "Codex app-server request failed"]
                 ))
             } else {
-                continuation.resume(returning: try! CodexJSON.stringify(message["result"] ?? [:]))
+                do {
+                    continuation.resume(returning: try CodexJSON.stringify(message["result"] ?? [:]))
+                } catch {
+                    continuation.resume(throwing: error)
+                }
             }
             return
         }
@@ -525,18 +845,20 @@ private actor CodexAppServerTransport {
     private func respondToServerRequest(_ message: [String: Any]) {
         guard let id = message["id"] else { return }
         let method = message["method"] as? String
-        let result: Any
-        switch method {
-        case "item/commandExecution/requestApproval", "item/fileChange/requestApproval":
-            result = "accept"
-        case "tool/requestUserInput":
-            result = ["selectedOptionId": "accept"]
-        default:
-            result = NSNull()
-        }
+        let params = message["params"] as? [String: Any]
+        let result = CodexAppServerServerRequestResponder.result(for: method, params: params)
         let idJSON = (id as? String).map(CodexTOML.string) ?? "\(id)"
-        let resultJSON = (try? CodexJSON.stringify(result)) ?? "null"
-        try? writeRaw(#"{"id":\#(idJSON),"result":\#(resultJSON)}"#)
+        do {
+            let resultJSON = try CodexJSON.stringify(result)
+            try writeRaw(#"{"id":\#(idJSON),"result":\#(resultJSON)}"#)
+        } catch {
+            do {
+                let messageJSON = CodexTOML.string("Failed to encode app-server response")
+                try writeRaw(#"{"id":\#(idJSON),"error":{"code":-32603,"message":\#(messageJSON)}}"#)
+            } catch {
+                finish()
+            }
+        }
     }
 
     private func writeRequest(method: String, id: Int, paramsJSON: String?) throws {
@@ -563,6 +885,77 @@ private actor CodexAppServerTransport {
         stderr.readabilityHandler = nil
         for waiter in waiters {
             waiter.resume(returning: nil)
+        }
+    }
+}
+
+enum CodexAppServerServerRequestResponder {
+    static func result(for method: String?, params: [String: Any]? = nil) -> Any {
+        switch method {
+        case "item/commandExecution/requestApproval":
+            return ["decision": "accept"]
+        case "item/fileChange/requestApproval":
+            return ["decision": "accept"]
+        case "applyPatchApproval", "execCommandApproval":
+            return ["decision": "approved"]
+        case "item/tool/requestUserInput", "tool/requestUserInput":
+            return ["answers": [:]]
+        case "mcpServer/elicitation/request":
+            return mcpElicitationResult(params: params)
+        default:
+            return NSNull()
+        }
+    }
+
+    private static func mcpElicitationResult(params: [String: Any]?) -> [String: Any] {
+        guard params?["mode"] as? String == "form" else {
+            return [
+                "action": "decline",
+                "content": NSNull(),
+            ]
+        }
+
+        let schema = params?["requestedSchema"] as? [String: Any]
+        return [
+            "action": "accept",
+            "content": elicitationContent(from: schema),
+        ]
+    }
+
+    private static func elicitationContent(from schema: [String: Any]?) -> [String: Any] {
+        guard let properties = schema?["properties"] as? [String: Any] else {
+            return [:]
+        }
+
+        let required = Set(schema?["required"] as? [String] ?? [])
+        var content: [String: Any] = [:]
+        for (key, rawProperty) in properties {
+            guard let property = rawProperty as? [String: Any] else { continue }
+            if let defaultValue = property["default"], !(defaultValue is NSNull) {
+                content[key] = defaultValue
+            } else if required.contains(key) {
+                content[key] = fallbackValue(for: property)
+            }
+        }
+        return content
+    }
+
+    private static func fallbackValue(for property: [String: Any]) -> Any {
+        if let enumValues = property["enum"] as? [Any], let first = enumValues.first {
+            return first
+        }
+
+        switch property["type"] as? String {
+        case "boolean":
+            return true
+        case "integer":
+            return 0
+        case "number":
+            return 0
+        case "array":
+            return []
+        default:
+            return ""
         }
     }
 }
@@ -690,7 +1083,10 @@ enum CodexSkillInputResolver {
             #"([A-Za-z0-9]+[-_:][A-Za-z0-9:_-]+)\s*スキル"#,
         ]
         for pattern in patterns {
-            guard let regex = try? NSRegularExpression(pattern: pattern) else {
+            let regex: NSRegularExpression
+            do {
+                regex = try NSRegularExpression(pattern: pattern)
+            } catch {
                 continue
             }
             let range = NSRange(prompt.startIndex..<prompt.endIndex, in: prompt)
@@ -756,9 +1152,14 @@ enum CodexSkillInputResolver {
         let metadataURL = URL(fileURLWithPath: pluginRootPath)
             .appendingPathComponent(".codex-plugin", isDirectory: true)
             .appendingPathComponent("plugin.json")
-        guard let data = try? Data(contentsOf: metadataURL),
-              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let name = object["name"] as? String else {
+        let object: [String: Any]
+        do {
+            let data = try Data(contentsOf: metadataURL)
+            object = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
+        } catch {
+            return nil
+        }
+        guard let name = object["name"] as? String else {
             return nil
         }
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)

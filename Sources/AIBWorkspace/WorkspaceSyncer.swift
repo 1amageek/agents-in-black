@@ -416,7 +416,8 @@ public enum WorkspaceSyncer {
                 CodexAuthConfig(
                     mode: CodexAuthMode(rawValue: auth.mode) ?? .chatgpt,
                     secret: auth.secret,
-                    version: auth.version
+                    version: auth.version,
+                    url: auth.url
                 )
             })
         } ?? (resolvedKind == .agent ? .defaultChatGPTAuth : nil)

@@ -23,7 +23,7 @@ public enum LocalAgentHandler {
         reasoningEffort: String?,
         logger: Logger
     ) -> LocalRequestHandler {
-        let runner = CodexAppServerAgentRunner(model: model, reasoningEffort: reasoningEffort)
+        let runner = CodexAppServerAgentRunner(model: model, reasoningEffort: reasoningEffort, logger: logger)
         let serviceIDString = serviceID.rawValue
         let log = logger
 
@@ -255,7 +255,7 @@ public enum LocalAgentHandler {
 
         let runID = UUID()
         let task = Task.detached(priority: .userInitiated) {
-            let runner = CodexAppServerAgentRunner(model: model, reasoningEffort: reasoningEffort)
+            let runner = CodexAppServerAgentRunner(model: model, reasoningEffort: reasoningEffort, logger: logger)
 
             defer {
                 cleanupPreparedChatRun(preparedRun)

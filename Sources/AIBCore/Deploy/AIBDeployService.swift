@@ -721,6 +721,15 @@ public enum AIBDeployService {
             var declaredSecretRefs = service.secrets
             var suppressedDetectedSecrets = Set<String>()
             if service.kind == .agent, let codexAuth = service.codex?.auth {
+                let codexManagedSecretEnvVars: Set<String> = [
+                    "OPENAI_API_KEY",
+                    "CODEX_API_KEY",
+                    "CODEX_ACCESS_TOKEN",
+                    "AIB_CODEX_AUTH_JSON",
+                    "AIB_CODEX_ACCESS_TOKEN_FILE",
+                    "AIB_CODEX_APP_SERVER_AUTH_TOKEN",
+                    "AIB_CODEX_APP_SERVER_AUTH_TOKEN_FILE",
+                ]
                 switch codexAuth.mode {
                 case .chatgpt:
                     let secretName = codexAuth.secret.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -732,11 +741,59 @@ public enum AIBDeployService {
                     }
                     envVars.removeValue(forKey: "OPENAI_API_KEY")
                     envVars.removeValue(forKey: "CODEX_API_KEY")
-                    suppressedDetectedSecrets.formUnion(["OPENAI_API_KEY", "CODEX_API_KEY"])
+                    suppressedDetectedSecrets.formUnion(codexManagedSecretEnvVars)
                     envVars["AIB_CODEX_AUTH_MODE"] = "chatgpt"
-                    envVars["AIB_CODEX_AUTH_JSON"] = "/var/secrets/aib/codex/auth.json"
-                    envVars["CODEX_HOME"] = "/home/node/.codex"
-                    declaredSecretRefs["/var/secrets/aib/codex/auth.json"] = SecretRef(
+                    envVars["AIB_CODEX_AUTH_JSON"] = "/secrets/codex-auth.json"
+                    envVars["CODEX_HOME"] = "/tmp/codex"
+                    declaredSecretRefs["/secrets/codex-auth.json"] = SecretRef(
+                        secret: secretName,
+                        version: codexAuth.version
+                    )
+                case .appServer:
+                    let appServerURL = (codexAuth.url ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                    let tokenSecretName = codexAuth.secret.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if appServerURL.isEmpty {
+                        fatalErrors.append(
+                            "Service '\(service.id.rawValue)': codex.auth.url is required when codex.auth.mode is appServer."
+                        )
+                        continue
+                    }
+                    if tokenSecretName.isEmpty {
+                        fatalErrors.append(
+                            "Service '\(service.id.rawValue)': codex.auth.secret is required when codex.auth.mode is appServer."
+                        )
+                        continue
+                    }
+                    envVars.removeValue(forKey: "OPENAI_API_KEY")
+                    envVars.removeValue(forKey: "CODEX_API_KEY")
+                    envVars.removeValue(forKey: "AIB_CODEX_AUTH_JSON")
+                    envVars.removeValue(forKey: "CODEX_HOME")
+                    suppressedDetectedSecrets.formUnion(codexManagedSecretEnvVars)
+                    envVars["AIB_CODEX_AUTH_MODE"] = "appServer"
+                    envVars["AIB_CODEX_APP_SERVER_URL"] = appServerURL
+                    envVars["AIB_CODEX_APP_SERVER_AUTH_TOKEN_FILE"] = "/var/secrets/aib/codex/app-server-token"
+                    declaredSecretRefs["/var/secrets/aib/codex/app-server-token"] = SecretRef(
+                        secret: tokenSecretName,
+                        version: codexAuth.version
+                    )
+                case .accessToken:
+                    let secretName = codexAuth.secret.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if secretName.isEmpty {
+                        fatalErrors.append(
+                            "Service '\(service.id.rawValue)': codex.auth.secret is required when codex.auth.mode is accessToken."
+                        )
+                        continue
+                    }
+                    envVars.removeValue(forKey: "OPENAI_API_KEY")
+                    envVars.removeValue(forKey: "CODEX_API_KEY")
+                    envVars.removeValue(forKey: "AIB_CODEX_AUTH_JSON")
+                    envVars.removeValue(forKey: "AIB_CODEX_APP_SERVER_URL")
+                    envVars.removeValue(forKey: "AIB_CODEX_APP_SERVER_AUTH_TOKEN_FILE")
+                    suppressedDetectedSecrets.formUnion(codexManagedSecretEnvVars)
+                    envVars["AIB_CODEX_AUTH_MODE"] = "accessToken"
+                    envVars["AIB_CODEX_ACCESS_TOKEN_FILE"] = "/var/secrets/aib/codex/access-token"
+                    envVars["CODEX_HOME"] = "/tmp/codex"
+                    declaredSecretRefs["/var/secrets/aib/codex/access-token"] = SecretRef(
                         secret: secretName,
                         version: codexAuth.version
                     )

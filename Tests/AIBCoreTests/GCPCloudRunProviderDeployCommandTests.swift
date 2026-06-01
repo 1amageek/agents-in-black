@@ -67,11 +67,11 @@ struct GCPCloudRunProviderDeployCommandTests {
         let plan = makePlan(
             envVars: [
                 "AIB_CODEX_AUTH_MODE": "chatgpt",
-                "AIB_CODEX_AUTH_JSON": "/var/secrets/aib/codex/auth.json",
-                "CODEX_HOME": "/home/node/.codex",
+                "AIB_CODEX_AUTH_JSON": "/secrets/codex-auth.json",
+                "CODEX_HOME": "/tmp/codex",
             ],
             declaredSecretRefs: [
-                "/var/secrets/aib/codex/auth.json": SecretRef(secret: "codex-auth-json", version: "latest"),
+                "/secrets/codex-auth.json": SecretRef(secret: "codex-auth-json", version: "latest"),
             ]
         )
         let target = makeTarget()
@@ -81,7 +81,7 @@ struct GCPCloudRunProviderDeployCommandTests {
         let secretsIndex = try! #require(args.firstIndex(of: "--set-secrets"))
         let secretsValue = args[secretsIndex + 1]
 
-        #expect(secretsValue.contains("/var/secrets/aib/codex/auth.json=codex-auth-json:latest"))
+        #expect(secretsValue.contains("/secrets/codex-auth.json=codex-auth-json:latest"))
     }
 
     @Test("Configured runtime service account is passed to Cloud Run deploy")
